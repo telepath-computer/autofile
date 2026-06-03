@@ -1,0 +1,162 @@
+ignore:
+  - "VAULT.md"
+  - "assets/**"
+
+_date: &date
+  type: string
+  pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+
+_related: &related
+  type: array
+  items:
+    type: string
+
+# No labels are defined in the starter vault. Add enum values here when
+# VAULT.md's Labels section gains entries.
+_labels: &labels
+  type: array
+  items:
+    type: string
+    enum: []
+
+_global_properties: &global_properties
+  created:
+    <<: *date
+    required: true
+  updated:
+    <<: *date
+    required: true
+  labels: *labels
+  related: *related
+
+scopes:
+  - where:
+      path: "references/*.md"
+    rules:
+      - id: reference-frontmatter
+        type: frontmatter
+        additional_properties: false
+        properties:
+          <<: *global_properties
+          title:
+            type: string
+            required: true
+          type:
+            type: string
+            enum: [article, book, video, paper, website, post, dataset]
+          url:
+            type: string
+          author:
+            type: array
+            items:
+              type: string
+          date: *date
+          published_in:
+            type: string
+          publisher:
+            type: string
+          doi:
+            type: string
+          isbn:
+            type: string
+          accessed: *date
+          asset_path:
+            type: string
+
+  - where:
+      path: "contacts/*.md"
+    rules:
+      - id: contact-frontmatter
+        type: frontmatter
+        additional_properties: false
+        properties:
+          <<: *global_properties
+          name:
+            type: string
+            required: true
+          type:
+            type: string
+            enum: [person, organization]
+            required: true
+          aliases:
+            type: array
+            items:
+              type: string
+          email:
+            type: string
+          phone:
+            type: string
+          website:
+            type: string
+
+  - where:
+      path: "places/*.md"
+    rules:
+      - id: place-frontmatter
+        type: frontmatter
+        additional_properties: false
+        properties:
+          <<: *global_properties
+          name:
+            type: string
+            required: true
+          type:
+            type: string
+            enum: [region, restaurant, bar, cafe, shop, point-of-interest]
+            required: true
+          parent:
+            type: string
+          address:
+            type: string
+          gps:
+            type: array
+            items:
+              type: number
+          website:
+            type: string
+
+  - where:
+      path: "events/*.md"
+    rules:
+      - id: event-frontmatter
+        type: frontmatter
+        additional_properties: false
+        properties:
+          <<: *global_properties
+          title:
+            type: string
+            required: true
+          date:
+            <<: *date
+            required: true
+          participants:
+            type: array
+            items:
+              type: string
+          location:
+            type: string
+
+  - where:
+      path: "misc/*.md"
+    rules:
+      - id: misc-frontmatter
+        type: frontmatter
+        additional_properties: false
+        properties:
+          <<: *global_properties
+          title:
+            type: string
+            required: true
+          asset_path:
+            type: string
+          url:
+            type: string
+
+  - where:
+      path: "special/now.md"
+    rules:
+      - id: special-now-frontmatter
+        type: frontmatter
+        additional_properties: false
+        properties:
+          <<: *global_properties
