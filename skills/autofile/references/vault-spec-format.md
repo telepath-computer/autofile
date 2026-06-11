@@ -70,6 +70,6 @@ No extensions defined.
 ```md
 ## Validation
 
-- Run: `fslint`
+- Run: `npx @telepath-computer/fslint@0.3.3`
 ```
 

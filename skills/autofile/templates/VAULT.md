@@ -95,4 +95,4 @@ No extensions defined.
 
 ## Validation
 
-- `fslint` — run from vault root after edits.
+- `npx @telepath-computer/fslint@0.3.3` — run from vault root after edits.

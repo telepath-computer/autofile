@@ -34,7 +34,7 @@ Run validation with `fslint`:
 
 ```sh
 cd /path/to/vault
-npx @telepath-computer/fslint
+npx @telepath-computer/fslint@0.3.3
 ```
 
 ## What's here

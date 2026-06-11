@@ -1,5 +1,8 @@
 {
   "scripts": {
     "test": "node --test"
+  },
+  "devDependencies": {
+    "@telepath-computer/fslint": "0.3.3"
   }
 }

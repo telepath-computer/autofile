@@ -8,6 +8,7 @@ const child_process = require('node:child_process');
 const repo = path.resolve(__dirname, '..');
 const templateDir = path.join(repo, 'skills', 'autofile', 'templates');
 const exampleDir = path.join(repo, 'example');
+const fslint = path.join(repo, 'node_modules', '.bin', 'fslint');
 
 function run(command, options = {}) {
   return child_process.execFileSync(command[0], command.slice(1), {
@@ -18,7 +19,7 @@ function run(command, options = {}) {
 }
 
 test('example vault validates with fslint', () => {
-  run(['fslint'], { cwd: exampleDir });
+  run([fslint], { cwd: exampleDir });
 });
 
 test('starter template can initialize a minimal vault', () => {
@@ -29,7 +30,7 @@ test('starter template can initialize a minimal vault', () => {
     fs.mkdirSync(path.join(dir, folder), { recursive: true });
   }
   fs.writeFileSync(path.join(dir, 'special', 'now.md'), `---\ncreated: "2026-06-03"\nupdated: "2026-06-03"\n---\n\n# Now\n`);
-  run(['fslint'], { cwd: dir });
+  run([fslint], { cwd: dir });
 });
 
 test('template and example use VAULT.md as root spec', () => {
