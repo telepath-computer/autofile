@@ -6,17 +6,22 @@
 
 Predictable filesystem memory for agents.
 
-Unlike a wiki, notes app, or vector database, Autofile is a strict, typed filesystem for agent memory: each top-level folder defines a record type, `VAULT.md` defines the rules, and `fslint` validates the frontmatter schema. The focus is no ambiguity on input, and effective, efficient retrieval on output. Agents can edit safely, query with normal filesystem tools, and trust the result across runs.
+Like a wiki, notes app, or vector database, Autofile gives agents durable memory. Unlike those systems, an Autofile vault is a strict, typed filesystem: it specifies the types of things that can be stored, where each type belongs, and the rules for how records should be filed and organized.
 
-An Autofile vault starts simple and can be progressively enhanced with scripts, schemas, and extensions for specific workflows such as tasks, calendars, email, receipts, etc.
+Autofile is designed for:
+
+- **No ambiguity on input.** Every input should have a specific, well-defined place in the system and clear instructions for how it should be filed.
+- **Efficient retrieval.** Vaults are structured to be flat, typed, and searchable through methods agents already use well: keyword search, semantic search, property matching, filenames, links, and normal filesystem traversal.
+- **Native agent editing.** Agents can read, write, move, validate, and query records with ordinary filesystem tools, then trust the result across runs.
+- **Progressive enhancement.** A vault can start simple, then grow through skills that bundle scripts, schemas, filing rules, and operations for specific workflows or data types such as tasks, calendars, email, receipts, and more.
 
 ## Anatomy and terms
 
 - **Autofile** is the project and installable agent skill.
 - A **vault** is the typed directory that Autofile helps an agent maintain.
-- `VAULT.md` is the root spec for a vault. It stays named `VAULT.md` because it describes the data structure, not the tool managing it.
+- `VAULT.md` is the root spec for a vault: it defines record types, folder rules, schemas, labels, validation commands, and any extensions.
 - Top-level folders such as `contacts/`, `places/`, and `events/` define record types.
-- A **record** is one markdown file in a typed folder, with structured frontmatter and concise body text.
+- A **record** is one markdown file representing one thing, with structured frontmatter and concise body text.
 - `.fslint.yml` is the machine-readable validation config kept in sync with `VAULT.md`.
 
 ## Get started
