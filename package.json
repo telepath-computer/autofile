@@ -1,7 +1,7 @@
 {
   "name": "autofile",
   "version": "0.1.0",
-  "description": "Predictable filesystem memory for agents.",
+  "description": "Predictable filing for agents.",
   "private": true,
   "license": "MIT",
   "repository": {

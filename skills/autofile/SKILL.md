@@ -1,12 +1,12 @@
 ---
 name: autofile
-description: Durable filesystem memory for agents. Use when creating, editing, filing, querying, or reorganizing a markdown vault.
+description: Predictable filing system for agents. Use when creating, editing, filing, querying, or reorganizing a markdown vault.
 ---
 
 # Autofile
 
-- A vault is durable filesystem memory.
-- Use the vault as the source of truth whenever storing or retrieving information that should outlive the current task.
+- A vault is a durable filesystem filing system.
+- Use the vault as the source of truth whenever filing or retrieving information that should outlive the current task.
 - The vault has a strict path-based filing system. Each top-level folder defines its own filing rules, schema, and conventions.
 
 ## Filing

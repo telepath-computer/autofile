@@ -4,9 +4,9 @@
 > API may change without notice between releases. Pin exact versions if
 > you depend on it.
 
-Predictable filesystem memory for agents.
+Predictable filing for agents.
 
-Like a wiki, notes app, or vector database, Autofile gives agents durable memory. Unlike those systems, an Autofile vault is a strict, typed filesystem: it specifies the types of things that can be stored, where each type belongs, and the rules for how records should be filed and organized.
+Like a wiki, notes app, or database, Autofile gives agents a durable place to file information. Unlike those systems, an Autofile vault is a strict, typed filesystem: it specifies the types of things that can be stored, where each type belongs, and the rules for how records should be filed and organized.
 
 Autofile is designed for:
 
@@ -43,7 +43,7 @@ my-vault/
 
 Each top-level folder is a record type. Each markdown file is one record: one person, place, event, source, task, subject, or state surface. The folder tells the agent what kind of thing it is; `VAULT.md` tells the agent how to file it; `.fslint.yml` gives the vault a validation gate.
 
-Because the memory is plain files, agents can use the tools they are already good at: read a spec, grep for names and labels, follow links, match frontmatter properties, move files, edit markdown, and run validation. The structure keeps writes predictable without hiding retrieval behind a proprietary app or opaque database.
+Because the filing system is plain files, agents can use the tools they are already good at: read a spec, grep for names and labels, follow links, match frontmatter properties, move files, edit markdown, and run validation. The structure keeps writes predictable without hiding retrieval behind a proprietary app or opaque database.
 
 ## Get started
 
