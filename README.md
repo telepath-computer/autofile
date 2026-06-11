@@ -6,9 +6,9 @@
 
 Predictable filesystem memory for agents.
 
-Unlike a wiki, notes app, or vector database, a vault is a strict, typed filesystem: each top-level folder defines a record type, `VAULT.md` defines the rules, and `fslint` validates the frontmatter schema. The focus is no ambiguity on input, and effective, efficient retrieval on output. Agents can edit safely, query with normal filesystem tools, and trust the result across runs.
+Unlike a wiki, notes app, or vector database, Autofile is a strict, typed filesystem for agent memory: each top-level folder defines a record type, `VAULT.md` defines the rules, and `fslint` validates the frontmatter schema. The focus is no ambiguity on input, and effective, efficient retrieval on output. Agents can edit safely, query with normal filesystem tools, and trust the result across runs.
 
-An autofile vault starts simple and can be progressively enhanced with scripts, schemas, and extensions for specific workflows such as tasks, calendars, email, receipts, etc.
+An Autofile vault starts simple and can be progressively enhanced with scripts, schemas, and extensions for specific workflows such as tasks, calendars, email, receipts, etc.
 
 ## Anatomy and terms
 
