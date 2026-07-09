@@ -72,6 +72,18 @@ cd /path/to/vault
 npx @telepath-computer/fslint@0.3.3
 ```
 
+## Server
+
+`server/` holds [`@telepath-computer/autofile-server`](server/SPEC.md), a local HTTP server that exposes vaults to apps: it serves records as JSON with frontmatter transformed into structured properties, and accepts writes so an app can create and update records. `server/SPEC.md` is the full interface spec.
+
+```sh
+npm install
+npm run build --workspace server
+node server/dist/src/cli.js --vault main=/path/to/vault
+```
+
+Or put the binary on your PATH with `npm link --workspace server`, then `autofile-server --vault main=/path/to/vault`.
+
 ## Test
 
 ```sh
