@@ -13,9 +13,12 @@
   },
   "homepage": "https://github.com/telepath-computer/autofile#readme",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test \"test/**/*.test.js\" && npm test --workspace server"
   },
   "devDependencies": {
     "@telepath-computer/fslint": "0.3.3"
-  }
+  },
+  "workspaces": [
+    "server"
+  ]
 }
