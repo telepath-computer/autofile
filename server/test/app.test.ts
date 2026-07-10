@@ -34,12 +34,20 @@ function rawGetStatus(baseUrl: string, rawPath: string): Promise<number> {
   });
 }
 
-function putJson(url: string, body: unknown, headers: Record<string, string> = {}): Promise<globalThis.Response> {
+function sendJson(method: "PUT" | "PATCH", url: string, body: unknown, headers: Record<string, string> = {}): Promise<globalThis.Response> {
   return fetch(url, {
-    method: "PUT",
+    method,
     headers: { "Content-Type": "application/json", ...headers },
     body: typeof body === "string" ? body : JSON.stringify(body)
   });
+}
+
+function putJson(url: string, body: unknown, headers: Record<string, string> = {}): Promise<globalThis.Response> {
+  return sendJson("PUT", url, body, headers);
+}
+
+function patchJson(url: string, body: unknown, headers: Record<string, string> = {}): Promise<globalThis.Response> {
+  return sendJson("PATCH", url, body, headers);
 }
 
 describe("autofile-server HTTP app", () => {
@@ -302,6 +310,179 @@ describe("autofile-server HTTP app", () => {
     });
   });
 
+  describe("PATCH /vaults/<vault>/records/<type>/<slug>", () => {
+    it("merges properties into an existing record and returns 200 with the result", async () => {
+      await putJson(`${baseUrl}/vaults/main/records/tasks/patch-merge`, {
+        properties: { title: "Before", status: "available" },
+        body: "Patch body.\n"
+      });
+
+      const response = await patchJson(`${baseUrl}/vaults/main/records/tasks/patch-merge`, {
+        properties: { status: "done" }
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("access-control-allow-origin"), "*");
+      const record = await response.json();
+      assert.equal(record.id, "tasks/patch-merge");
+      assert.deepEqual(record.properties, { title: "Before", status: "done" });
+      assert.equal(record.body, "Patch body.\n");
+      assert.match(record.mtime, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+
+      const readBack = await fetch(`${baseUrl}/vaults/main/records/tasks/patch-merge`);
+      assert.equal(readBack.status, 200);
+      assert.deepEqual((await readBack.json()).properties, { title: "Before", status: "done" });
+    });
+
+    it('merges a property literally named "__proto__" end-to-end, and null deletes it', async () => {
+      await putJson(`${baseUrl}/vaults/main/records/tasks/patch-proto`, {
+        properties: { title: "T" },
+        body: ""
+      });
+
+      // Raw JSON string: a literal __proto__ key in a JS object would set the
+      // prototype instead of surviving JSON.stringify as a data property.
+      const response = await patchJson(
+        `${baseUrl}/vaults/main/records/tasks/patch-proto`,
+        '{"properties":{"__proto__":{"evil":1}}}'
+      );
+
+      assert.equal(response.status, 200);
+      const record = await response.json();
+      assert.deepEqual(Object.entries(record.properties), [
+        ["title", "T"],
+        ["__proto__", { evil: 1 }]
+      ]);
+
+      const readBack = await fetch(`${baseUrl}/vaults/main/records/tasks/patch-proto`);
+      assert.equal(readBack.status, 200);
+      assert.deepEqual(Object.entries((await readBack.json()).properties), [
+        ["title", "T"],
+        ["__proto__", { evil: 1 }]
+      ]);
+
+      const removed = await patchJson(
+        `${baseUrl}/vaults/main/records/tasks/patch-proto`,
+        '{"properties":{"__proto__":null}}'
+      );
+      assert.equal(removed.status, 200);
+      assert.deepEqual(Object.entries((await removed.json()).properties), [["title", "T"]]);
+    });
+
+    it("removes a key set to null and never returns null property values", async () => {
+      await putJson(`${baseUrl}/vaults/main/records/tasks/patch-null`, {
+        properties: { title: "T", status: "available" },
+        body: ""
+      });
+
+      const response = await patchJson(`${baseUrl}/vaults/main/records/tasks/patch-null`, {
+        properties: { status: null }
+      });
+
+      assert.equal(response.status, 200);
+      const record = await response.json();
+      assert.deepEqual(record.properties, { title: "T" });
+    });
+
+    it("replaces the body wholesale on a body-only patch", async () => {
+      await putJson(`${baseUrl}/vaults/main/records/tasks/patch-body`, {
+        properties: { title: "Stays" },
+        body: "Old.\n"
+      });
+
+      const response = await patchJson(`${baseUrl}/vaults/main/records/tasks/patch-body`, {
+        body: "New.\n"
+      });
+
+      assert.equal(response.status, 200);
+      const record = await response.json();
+      assert.deepEqual(record.properties, { title: "Stays" });
+      assert.equal(record.body, "New.\n");
+    });
+
+    it("returns the current record for an empty patch {}", async () => {
+      await putJson(`${baseUrl}/vaults/main/records/tasks/patch-noop`, {
+        properties: { title: "As is" },
+        body: "Same.\n"
+      });
+
+      const response = await patchJson(`${baseUrl}/vaults/main/records/tasks/patch-noop`, {});
+
+      assert.equal(response.status, 200);
+      const record = await response.json();
+      assert.deepEqual(record.properties, { title: "As is" });
+      assert.equal(record.body, "Same.\n");
+    });
+
+    it("returns 404 for a missing record and does not create it", async () => {
+      const response = await patchJson(`${baseUrl}/vaults/main/records/tasks/patch-missing`, {
+        properties: { title: "Never lands" }
+      });
+
+      assert.equal(response.status, 404);
+      assert.equal(typeof (await response.json()).message, "string");
+
+      const readBack = await fetch(`${baseUrl}/vaults/main/records/tasks/patch-missing`);
+      assert.equal(readBack.status, 404);
+    });
+
+    it("returns 422 with an Error body for an unparseable target", async () => {
+      const response = await patchJson(`${baseUrl}/vaults/main/records/tasks/broken`, {
+        properties: { title: "New" }
+      });
+
+      assert.equal(response.status, 422);
+      const body = await response.json();
+      assert.equal(body.path, "tasks/broken.md");
+      assert.ok(body.message.length > 0);
+    });
+
+    it("rejects a request without Content-Type: application/json", async () => {
+      const noHeader = await fetch(`${baseUrl}/vaults/main/records/tasks/alpha`, {
+        method: "PATCH",
+        body: JSON.stringify({})
+      });
+      const wrongHeader = await fetch(`${baseUrl}/vaults/main/records/tasks/alpha`, {
+        method: "PATCH",
+        headers: { "Content-Type": "text/plain" },
+        body: JSON.stringify({})
+      });
+
+      assert.equal(noHeader.status, 400);
+      assert.equal(wrongHeader.status, 400);
+    });
+
+    it("rejects unknown top-level fields", async () => {
+      const response = await patchJson(`${baseUrl}/vaults/main/records/tasks/alpha`, {
+        properties: {},
+        mtime: "2026-01-01T00:00:00.000Z"
+      });
+
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).message, /mtime/);
+    });
+
+    it("rejects mistyped properties and body", async () => {
+      const cases: unknown[] = [
+        { properties: "not an object" },
+        { properties: [] },
+        { properties: null },
+        { body: 42 },
+        { body: null },
+        []
+      ];
+      for (const payload of cases) {
+        const response = await patchJson(`${baseUrl}/vaults/main/records/tasks/alpha`, payload);
+        assert.equal(response.status, 400, JSON.stringify(payload));
+      }
+    });
+
+    it("returns 400 for invalid segments on PATCH", async () => {
+      const response = await patchJson(`${baseUrl}/vaults/main/records/tasks/bad.md`, {});
+      assert.equal(response.status, 400);
+    });
+  });
+
   describe("cross-cutting behavior", () => {
     it("returns 404 for an unknown vault on every route", async () => {
       const collection = await fetch(`${baseUrl}/vaults/nope/records/tasks`);
@@ -310,13 +491,15 @@ describe("autofile-server HTTP app", () => {
         properties: {},
         body: ""
       });
+      const patch = await patchJson(`${baseUrl}/vaults/nope/records/tasks/alpha`, {});
 
       assert.equal(collection.status, 404);
       assert.equal(single.status, 404);
       assert.equal(put.status, 404);
+      assert.equal(patch.status, 404);
     });
 
-    it("answers OPTIONS preflight permitting GET, PUT, and Content-Type", async () => {
+    it("answers OPTIONS preflight permitting GET, PUT, PATCH, and Content-Type", async () => {
       const response = await fetch(`${baseUrl}/vaults/main/records/tasks/alpha`, {
         method: "OPTIONS",
         headers: {
@@ -330,6 +513,7 @@ describe("autofile-server HTTP app", () => {
       assert.equal(response.headers.get("access-control-allow-origin"), "*");
       assert.match(response.headers.get("access-control-allow-methods") ?? "", /GET/);
       assert.match(response.headers.get("access-control-allow-methods") ?? "", /PUT/);
+      assert.match(response.headers.get("access-control-allow-methods") ?? "", /PATCH/);
       assert.match(response.headers.get("access-control-allow-headers") ?? "", /Content-Type/i);
     });
 

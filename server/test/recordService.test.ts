@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readdir, readFile, writeFile, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, stat, writeFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -359,6 +359,249 @@ describe("record service", () => {
     it("returns unknownVault for an unregistered vault", async () => {
       const result = await service.putRecord("nope", "tasks", "x", { properties: {}, body: "" });
       assert.deepEqual(result, { kind: "unknownVault" });
+    });
+  });
+
+  describe("patchRecord", () => {
+    it("shallow-merges properties: the patched key changes, others stay", async () => {
+      await service.putRecord("main", "patch", "merge", {
+        properties: { title: "Keep me", status: "available", n: 1 },
+        body: "Merge body.\n"
+      });
+
+      const result = await service.patchRecord("main", "patch", "merge", {
+        properties: { status: "done" }
+      });
+
+      assert.equal(result.kind, "ok");
+      if (result.kind !== "ok") return;
+      assert.equal(result.record.id, "patch/merge");
+      assert.deepEqual(result.record.properties, { title: "Keep me", status: "done", n: 1 });
+      assert.equal(result.record.body, "Merge body.\n");
+      assert.match(result.record.mtime, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    });
+
+    it("removes a key set to null; null on an absent key is a no-op", async () => {
+      await service.putRecord("main", "patch", "nulls", {
+        properties: { title: "T", status: "available" },
+        body: ""
+      });
+
+      const result = await service.patchRecord("main", "patch", "nulls", {
+        properties: { status: null, "never-existed": null }
+      });
+
+      assert.equal(result.kind, "ok");
+      if (result.kind !== "ok") return;
+      assert.deepEqual(result.record.properties, { title: "T" });
+      assert.equal(Object.values(result.record.properties).some((value) => value === null), false);
+    });
+
+    it("replaces a nested value wholesale, never deep-merging", async () => {
+      await service.putRecord("main", "patch", "nested", {
+        properties: { meta: { a: 1, b: 2 }, tags: ["x", "y"] },
+        body: ""
+      });
+
+      const result = await service.patchRecord("main", "patch", "nested", {
+        properties: { meta: { c: 3 }, tags: ["z"] }
+      });
+
+      assert.equal(result.kind, "ok");
+      if (result.kind !== "ok") return;
+      assert.deepEqual(result.record.properties, { meta: { c: 3 }, tags: ["z"] });
+    });
+
+    it("applies properties and body together in one patch", async () => {
+      await service.putRecord("main", "patch", "both", {
+        properties: { title: "T", status: "available" },
+        body: "Old.\n"
+      });
+
+      const result = await service.patchRecord("main", "patch", "both", {
+        properties: { status: "done" },
+        body: "New.\n"
+      });
+
+      assert.equal(result.kind, "ok");
+      if (result.kind !== "ok") return;
+      assert.deepEqual(result.record.properties, { title: "T", status: "done" });
+      assert.equal(result.record.body, "New.\n");
+
+      const readBack = await service.getRecord("main", "patch", "both");
+      assert.equal(readBack.kind, "ok");
+      if (readBack.kind !== "ok") return;
+      assert.deepEqual(readBack.record.properties, { title: "T", status: "done" });
+      assert.equal(readBack.record.body, "New.\n");
+    });
+
+    it("preserves nulls nested inside a patched value: only top-level null keys delete", async () => {
+      await service.putRecord("main", "patch", "nested-null", {
+        properties: { title: "T", meta: { old: true } },
+        body: ""
+      });
+
+      const result = await service.patchRecord("main", "patch", "nested-null", {
+        properties: { meta: { a: null, b: 1 } }
+      });
+
+      assert.equal(result.kind, "ok");
+      if (result.kind !== "ok") return;
+      assert.deepEqual(result.record.properties, { title: "T", meta: { a: null, b: 1 } });
+
+      const written = await readFile(path.join(root, "patch", "nested-null.md"), "utf8");
+      assert.match(written, /a: null/);
+
+      const readBack = await service.getRecord("main", "patch", "nested-null");
+      assert.equal(readBack.kind, "ok");
+      if (readBack.kind !== "ok") return;
+      assert.deepEqual(readBack.record.properties, { title: "T", meta: { a: null, b: 1 } });
+    });
+
+    it('merges a property literally named "__proto__" as an own key, and null deletes it', async () => {
+      await service.putRecord("main", "patch", "proto", {
+        properties: { title: "T" },
+        body: ""
+      });
+
+      // JSON.parse, not an object literal: a literal __proto__ key would set
+      // the prototype instead of creating the own data property a JSON body has.
+      const patched = await service.patchRecord("main", "patch", "proto", {
+        properties: JSON.parse('{"__proto__": {"evil": 1}}')
+      });
+
+      assert.equal(patched.kind, "ok");
+      if (patched.kind !== "ok") return;
+      assert.deepEqual(Object.entries(patched.record.properties), [
+        ["title", "T"],
+        ["__proto__", { evil: 1 }]
+      ]);
+
+      const written = await readFile(path.join(root, "patch", "proto.md"), "utf8");
+      assert.match(written, /__proto__/);
+      assert.match(written, /evil: 1/);
+
+      const removed = await service.patchRecord("main", "patch", "proto", {
+        properties: JSON.parse('{"__proto__": null}')
+      });
+      assert.equal(removed.kind, "ok");
+      if (removed.kind !== "ok") return;
+      assert.deepEqual(Object.entries(removed.record.properties), [["title", "T"]]);
+    });
+
+    it("replaces the body wholesale on a body-only patch, leaving properties untouched", async () => {
+      await service.putRecord("main", "patch", "body-only", {
+        properties: { title: "Stays", status: "available" },
+        body: "Old body.\n"
+      });
+
+      const result = await service.patchRecord("main", "patch", "body-only", {
+        body: "New body.\n"
+      });
+
+      assert.equal(result.kind, "ok");
+      if (result.kind !== "ok") return;
+      assert.deepEqual(result.record.properties, { title: "Stays", status: "available" });
+      assert.equal(result.record.body, "New body.\n");
+    });
+
+    it("round-trips an untouched body byte-exact through a properties-only patch", async () => {
+      const body = "line one\n---\nno trailing newline";
+      await service.putRecord("main", "patch", "keep-body", {
+        properties: { title: "T" },
+        body
+      });
+
+      const result = await service.patchRecord("main", "patch", "keep-body", {
+        properties: { extra: true }
+      });
+
+      assert.equal(result.kind, "ok");
+      if (result.kind !== "ok") return;
+      assert.equal(result.record.body, body);
+
+      const written = await readFile(path.join(root, "patch", "keep-body.md"), "utf8");
+      assert.ok(written.endsWith(`---\n${body}`));
+
+      const readBack = await service.getRecord("main", "patch", "keep-body");
+      assert.equal(readBack.kind, "ok");
+      if (readBack.kind !== "ok") return;
+      assert.equal(readBack.record.body, body);
+    });
+
+    it("treats an empty patch as a pure no-op: current record back, file untouched", async () => {
+      await mkdir(path.join(root, "patch"), { recursive: true });
+      const filePath = path.join(root, "patch", "noop.md");
+      // Hand-written formatting that serialization would normalize, so an
+      // unchanged file proves the no-op skipped the rewrite entirely.
+      await writeFile(filePath, "---\ntitle:    'Odd   quoting'\n---\nNoop body.\n");
+      const before = await stat(filePath);
+
+      const result = await service.patchRecord("main", "patch", "noop", {});
+
+      assert.equal(result.kind, "ok");
+      if (result.kind !== "ok") return;
+      assert.deepEqual(result.record.properties, { title: "Odd   quoting" });
+      assert.equal(result.record.body, "Noop body.\n");
+      assert.equal(result.record.mtime, before.mtime.toISOString());
+      assert.equal(await readFile(filePath, "utf8"), "---\ntitle:    'Odd   quoting'\n---\nNoop body.\n");
+    });
+
+    it("returns notFound for a missing record and does not create a file", async () => {
+      const result = await service.patchRecord("main", "tasks", "patch-missing", {
+        properties: { title: "Never lands" }
+      });
+
+      assert.deepEqual(result, { kind: "notFound" });
+      const entries = await readdir(path.join(root, "tasks"));
+      assert.equal(entries.includes("patch-missing.md"), false);
+    });
+
+    it("returns notFound for a missing type folder and does not create it", async () => {
+      const result = await service.patchRecord("main", "patch-no-such-type", "x", { body: "b\n" });
+
+      assert.deepEqual(result, { kind: "notFound" });
+      const entries = await readdir(root);
+      assert.equal(entries.includes("patch-no-such-type"), false);
+    });
+
+    it("returns notFound for a record symlinked outside the vault and never writes through it", async () => {
+      const result = await service.patchRecord("main", "tasks", "escape", {
+        properties: { hacked: true }
+      });
+
+      assert.deepEqual(result, { kind: "notFound" });
+      assert.equal(
+        await readFile(path.join(outsideRoot, "secret.md"), "utf8"),
+        "---\ntitle: Secret\n---\nOutside.\n"
+      );
+    });
+
+    it("returns parseError with the .md path for an unparseable target, leaving it untouched", async () => {
+      const result = await service.patchRecord("main", "tasks", "broken", {
+        properties: { title: "New" }
+      });
+
+      assert.equal(result.kind, "parseError");
+      if (result.kind !== "parseError") return;
+      assert.equal(result.error.path, "tasks/broken.md");
+      assert.ok(result.error.message.length > 0);
+      assert.equal(
+        await readFile(path.join(root, "tasks", "broken.md"), "utf8"),
+        "---\ntitle: [unclosed\n---\nBody.\n"
+      );
+    });
+
+    it("rejects invalid segments and a slug ending in .md", async () => {
+      const patch = { body: "x\n" };
+      assert.equal((await service.patchRecord("main", "..", "slug", patch)).kind, "invalidSegment");
+      assert.equal((await service.patchRecord("main", "_t", "slug", patch)).kind, "invalidSegment");
+      assert.equal((await service.patchRecord("main", "tasks", "alpha.md", patch)).kind, "invalidSegment");
+      assert.equal((await service.patchRecord("main", "tasks", "a/b", patch)).kind, "invalidSegment");
+    });
+
+    it("returns unknownVault for an unregistered vault", async () => {
+      assert.deepEqual(await service.patchRecord("nope", "tasks", "alpha", {}), { kind: "unknownVault" });
     });
   });
 
