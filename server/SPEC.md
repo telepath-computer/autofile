@@ -2,7 +2,7 @@
 
 A local HTTP server that exposes autofile vaults to apps. It serves the vault's records as JSON with frontmatter transformed into structured properties, and accepts writes so an app can create and update records.
 
-The initial version covers listing records, getting a single record, and writing a record. Apps poll the read routes to stay current. Later additions: change subscriptions, querying, partial updates (PATCH), schema validation of writes, and write-conflict detection.
+The initial version covers listing records, getting a single record, and writing a record — in full (PUT) or partially (PATCH). Apps poll the read routes to stay current. Later additions: change subscriptions, querying, schema validation of writes, and write-conflict detection.
 
 ## HTTP interface
 
@@ -12,6 +12,7 @@ The initial version covers listing records, getting a single record, and writing
 GET /vaults/<vault>/records/<type>          → all records of a type
 GET /vaults/<vault>/records/<type>/<slug>   → one record
 PUT /vaults/<vault>/records/<type>/<slug>   → create or replace one record
+PATCH /vaults/<vault>/records/<type>/<slug> → partially update one record
 ```
 
 Every route that touches a vault starts with the vault's name (see CLI interface). Everything after `records/` is exactly the record's vault-relative ID — the same string used in wikilinks. The `records/` segment namespaces record routes apart from other per-vault endpoints (such as the change feed, a later addition), which is necessary because record types are user-defined folder names and could otherwise collide with endpoint names.
@@ -75,9 +76,9 @@ Every error response body is an Error: `message` always, `path` when the error c
 
 ### Content type and CORS
 
-All responses are JSON, `Content-Type: application/json`. A PUT request body must be JSON and declare `Content-Type: application/json`, or the request is rejected `400`.
+All responses are JSON, `Content-Type: application/json`. A PUT or PATCH request body must be JSON and declare `Content-Type: application/json`, or the request is rejected `400`.
 
-All responses include `Access-Control-Allow-Origin: *`, and `OPTIONS` preflight requests are answered, permitting `GET` and `PUT` and the `Content-Type` header. Browser-based artifacts are primary consumers, and a page calling `http://127.0.0.1:8766` is always cross-origin — without this, the flagship use case doesn't work. The policy matches fileserver; the access boundary is binding to localhost, not the origin.
+All responses include `Access-Control-Allow-Origin: *`, and `OPTIONS` preflight requests are answered, permitting `GET`, `PUT`, and `PATCH` and the `Content-Type` header. Browser-based artifacts are primary consumers, and a page calling `http://127.0.0.1:8766` is always cross-origin — without this, the flagship use case doesn't work. The policy matches fileserver; the access boundary is binding to localhost, not the origin.
 
 ### GET /vaults/\<vault\>/records/\<type\>
 
@@ -115,6 +116,17 @@ Request body:
 The file is written atomically (temp file + rename), so other readers of the vault never see a half-written record.
 
 The initial version does not validate writes against the vault schema and does not detect write conflicts — the last write wins. Both are later additions.
+
+### PATCH /vaults/\<vault\>/records/\<type\>/\<slug\>
+
+Partially updates an existing record. Responds `200` with the resulting Record. PATCH is not upsert: a record that does not exist responds `404` — creation is PUT's job, and a typo'd slug must fail loudly rather than merge into nothing. If the file exists but its frontmatter fails to parse, responds `422` with an Error body: there are no properties to merge into.
+
+Request body: `{ "properties": {...}, "body": "..." }` with both fields optional. An empty patch `{}` is a valid no-op and returns the current record.
+
+- `body`, when present, replaces the record body wholesale.
+- `properties`, when present, is shallow-merged into the existing frontmatter key by key. A key set to `null` is removed. A key's new value replaces the old value entirely — nested objects and arrays are not merged recursively. Consequence: PATCH cannot set a property to a literal YAML `null`; the vault schema never uses null values, so nothing is lost.
+
+Everything else matches PUT: the `Content-Type: application/json` gate, `properties` must be an object and `body` a string when present, unknown top-level fields rejected `400`, the 50 MB body limit, and the atomic temp-file + rename write. The server's read-merge-write is not atomic against a concurrent direct-on-disk edit — the last write wins, the same stance the initial version takes everywhere.
 
 ## CLI interface
 

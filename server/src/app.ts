@@ -1,5 +1,5 @@
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
-import type { RecordPayload, RecordService } from "./recordService.js";
+import type { RecordPatch, RecordPayload, RecordService } from "./recordService.js";
 
 export interface AppOptions {
   recordService: RecordService;
@@ -21,7 +21,7 @@ export function createApp({ recordService, jsonBodyLimit = "50mb" }: AppOptions)
   });
 
   app.options("*", (_request, response) => {
-    response.setHeader("Access-Control-Allow-Methods", "GET, PUT, OPTIONS");
+    response.setHeader("Access-Control-Allow-Methods", "GET, PUT, PATCH, OPTIONS");
     response.setHeader("Access-Control-Allow-Headers", "Content-Type");
     response.status(204).end();
   });
@@ -105,6 +105,41 @@ export function createApp({ recordService, jsonBodyLimit = "50mb" }: AppOptions)
     }
   });
 
+  app.patch("/vaults/:vault/records/:type/:slug", async (request, response, next) => {
+    try {
+      if (!request.is("application/json")) {
+        sendError(response, 400, "request must declare Content-Type: application/json");
+        return;
+      }
+      const parsed = parsePatchPayload(request.body);
+      if (!parsed.ok) {
+        sendError(response, 400, parsed.message);
+        return;
+      }
+
+      const { vault, type, slug } = request.params;
+      const result = await recordService.patchRecord(vault, type, slug, parsed.patch);
+      switch (result.kind) {
+        case "ok":
+          response.status(200).json(result.record);
+          return;
+        case "invalidSegment":
+          sendError(response, 400, result.message);
+          return;
+        case "unknownVault":
+          sendError(response, 404, "unknown vault");
+          return;
+        case "notFound":
+          sendError(response, 404, "not found");
+          return;
+        case "parseError":
+          response.status(422).json(result.error);
+      }
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.use((_request, response) => {
     sendError(response, 404, "not found");
   });
@@ -140,6 +175,33 @@ function parsePutPayload(body: unknown): ParsedPayload {
     return { ok: false, message: "body is required and must be a string" };
   }
   return { ok: true, payload: { properties: body.properties, body: body.body } };
+}
+
+type ParsedPatch = { ok: true; patch: RecordPatch } | { ok: false; message: string };
+
+function parsePatchPayload(body: unknown): ParsedPatch {
+  if (!isPlainObject(body)) {
+    return { ok: false, message: "request body must be a JSON object" };
+  }
+  for (const key of Object.keys(body)) {
+    if (key !== "properties" && key !== "body") {
+      return { ok: false, message: `unknown field: ${key}` };
+    }
+  }
+  const patch: RecordPatch = {};
+  if (body.properties !== undefined) {
+    if (!isPlainObject(body.properties)) {
+      return { ok: false, message: "properties must be an object when present" };
+    }
+    patch.properties = body.properties;
+  }
+  if (body.body !== undefined) {
+    if (typeof body.body !== "string") {
+      return { ok: false, message: "body must be a string when present" };
+    }
+    patch.body = body.body;
+  }
+  return { ok: true, patch };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

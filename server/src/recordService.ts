@@ -51,10 +51,23 @@ export type PutResult =
   | { kind: "unknownVault" }
   | { kind: "refused"; message: string };
 
+export interface RecordPatch {
+  properties?: Record<string, unknown>;
+  body?: string;
+}
+
+export type PatchResult =
+  | { kind: "ok"; record: RecordJson }
+  | { kind: "invalidSegment"; message: string }
+  | { kind: "unknownVault" }
+  | { kind: "notFound" }
+  | { kind: "parseError"; error: ErrorJson };
+
 export interface RecordService {
   listRecords(vaultName: string, type: string): Promise<ListResult>;
   getRecord(vaultName: string, type: string, slug: string): Promise<GetResult>;
   putRecord(vaultName: string, type: string, slug: string, payload: RecordPayload): Promise<PutResult>;
+  patchRecord(vaultName: string, type: string, slug: string, patch: RecordPatch): Promise<PatchResult>;
 }
 
 // YAML engine using the JSON schema so scalars pass through uncoerced: unquoted
@@ -228,14 +241,7 @@ export async function createRecordService(vaults: VaultConfig[]): Promise<Record
       const created = !(await exists(targetPath));
 
       const content = serializeRecordFile(payload.properties, payload.body);
-      const tempPath = path.join(typeDir, `.${slug}.md.${randomBytes(8).toString("hex")}.tmp`);
-      try {
-        await writeFile(tempPath, content, "utf8");
-        await rename(tempPath, targetPath);
-      } catch (error) {
-        await rm(tempPath, { force: true });
-        throw error;
-      }
+      await writeFileAtomically(targetPath, content);
 
       // Re-parse what was written so the response matches a subsequent GET exactly.
       const parsed = parseRecordFile(content);
@@ -243,8 +249,94 @@ export async function createRecordService(vaults: VaultConfig[]): Promise<Record
         throw new Error(`written record failed to re-parse: ${parsed.message}`);
       }
       return { kind: "ok", record: await toRecord(type, slug, parsed, targetPath), created };
+    },
+
+    async patchRecord(vaultName, type, slug, patch) {
+      const root = roots.get(vaultName);
+      if (root === undefined) {
+        return { kind: "unknownVault" };
+      }
+      const message = segmentError(type, "type") ?? segmentError(slug, "slug");
+      if (message !== undefined) {
+        return { kind: "invalidSegment", message };
+      }
+
+      // The read phase mirrors getRecord exactly: PATCH is not upsert, so a
+      // missing target — including one symlinked outside the vault — is a
+      // plain notFound, and an unparseable one has no properties to merge into.
+      const errorPath = `${type}/${slug}.md`;
+      let filePath: string;
+      let existing: { properties: Record<string, unknown>; body: string };
+      try {
+        const resolved = await resolveContained(root, path.join(root, type, `${slug}.md`));
+        if (resolved === undefined || !(await stat(resolved)).isFile()) {
+          return { kind: "notFound" };
+        }
+        filePath = resolved;
+
+        const parsed = parseRecordFile(await readFile(filePath, "utf8"));
+        if (!parsed.ok) {
+          return { kind: "parseError", error: { path: errorPath, message: parsed.message } };
+        }
+        existing = parsed;
+      } catch (error) {
+        if (errnoCode(error) === "ENOENT") {
+          return { kind: "notFound" };
+        }
+        return { kind: "parseError", error: { path: errorPath, message: errorMessage(error) } };
+      }
+
+      // An empty patch is a pure no-op: the current record comes back and the
+      // file is left alone — no normalizing rewrite, no mtime bump.
+      if (patch.properties === undefined && patch.body === undefined) {
+        return { kind: "ok", record: await toRecord(type, slug, existing, filePath) };
+      }
+
+      // Shallow merge, key by key: null removes, any other value replaces the
+      // old one entirely — nested objects and arrays are never merged recursively.
+      // Defined, not assigned: assigning a key literally named "__proto__" would
+      // hit the inherited setter and silently drop the property.
+      const properties = { ...existing.properties };
+      for (const [key, value] of Object.entries(patch.properties ?? {})) {
+        if (value === null) {
+          delete properties[key];
+        } else {
+          Object.defineProperty(properties, key, {
+            value,
+            writable: true,
+            enumerable: true,
+            configurable: true
+          });
+        }
+      }
+
+      const content = serializeRecordFile(properties, patch.body ?? existing.body);
+      await writeFileAtomically(filePath, content);
+
+      // Re-parse what was written so the response matches a subsequent GET exactly.
+      const parsed = parseRecordFile(content);
+      if (!parsed.ok) {
+        throw new Error(`written record failed to re-parse: ${parsed.message}`);
+      }
+      return { kind: "ok", record: await toRecord(type, slug, parsed, filePath) };
     }
   };
+}
+
+// Atomic write: a hidden temp file beside the target, renamed into place, so
+// other readers of the vault never see a half-written record.
+async function writeFileAtomically(targetPath: string, content: string): Promise<void> {
+  const tempPath = path.join(
+    path.dirname(targetPath),
+    `.${path.basename(targetPath)}.${randomBytes(8).toString("hex")}.tmp`
+  );
+  try {
+    await writeFile(tempPath, content, "utf8");
+    await rename(tempPath, targetPath);
+  } catch (error) {
+    await rm(tempPath, { force: true });
+    throw error;
+  }
 }
 
 // Route-segment rules from the spec: reject empty, "." and "..", separators, a
