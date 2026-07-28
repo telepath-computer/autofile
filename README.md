@@ -74,7 +74,7 @@ npx @telepath-computer/fslint@0.3.3
 
 ## Server
 
-`server/` holds [`@telepath-computer/autofile-server`](server/SPEC.md), a local HTTP server that exposes vaults to apps: it serves records as JSON with frontmatter transformed into structured properties, and accepts writes so an app can create and update records. `server/SPEC.md` is the full interface spec.
+`server/` holds [`@telepath-computer/autofile-server`](server/spec/index.md), a local HTTP server that exposes vaults to apps: it serves records as JSON with frontmatter transformed into structured properties, and accepts writes so an app can create and update records. `server/spec/index.md` is the full interface spec.
 
 ```sh
 npm install

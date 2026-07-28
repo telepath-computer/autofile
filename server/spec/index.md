@@ -2,13 +2,15 @@
 
 A local HTTP server that exposes autofile vaults to apps. It serves the vault's records as JSON with frontmatter transformed into structured properties, and accepts writes so an app can create and update records.
 
-The initial version covers listing records, getting a single record, and writing a record — in full (PUT) or partially (PATCH). Apps poll the read routes to stay current. Later additions: change subscriptions, querying, schema validation of writes, and write-conflict detection.
+The initial version covers listing records, getting a single record, and writing a record — in full (PUT) or partially (PATCH). Two discovery routes let a client find the vaults and their types without being told a name in advance, and every read route serves a built-in browser UI (`ui.md`) to requests that prefer HTML. Apps poll the read routes to stay current. Later additions: change subscriptions, querying, schema validation of writes, and write-conflict detection.
 
 ## HTTP interface
 
 ### Routes
 
 ```
+GET /                                       → the configured vaults
+GET /vaults/<vault>                         → a vault's record types
 GET /vaults/<vault>/records/<type>          → all records of a type
 GET /vaults/<vault>/records/<type>/<slug>   → one record
 PUT /vaults/<vault>/records/<type>/<slug>   → create or replace one record
@@ -76,9 +78,54 @@ Every error response body is an Error: `message` always, `path` when the error c
 
 ### Content type and CORS
 
-All responses are JSON, `Content-Type: application/json`. A PUT or PATCH request body must be JSON and declare `Content-Type: application/json`, or the request is rejected `400`.
+Responses are JSON, `Content-Type: application/json`, except where a `GET` negotiates to the UI shell (see below). A PUT or PATCH request body must be JSON and declare `Content-Type: application/json`, or the request is rejected `400`.
 
 All responses include `Access-Control-Allow-Origin: *`, and `OPTIONS` preflight requests are answered, permitting `GET`, `PUT`, and `PATCH` and the `Content-Type` header. Browser-based artifacts are primary consumers, and a page calling `http://127.0.0.1:8766` is always cross-origin — without this, the flagship use case doesn't work. The policy matches fileserver; the access boundary is binding to localhost, not the origin.
+
+### Content negotiation
+
+Every `GET` route serves two representations of the same resource. A request whose `Accept` header prefers `text/html` — what a browser sends when navigating to the URL — receives the UI shell, the HTML document that boots the built-in UI (`ui.md`). Everything else receives JSON.
+
+JSON is the default: `*/*`, a missing `Accept` header, and anything that does not prefer HTML all get JSON, so existing clients are unaffected and only browsers see HTML. Negotiated responses carry `Vary: Accept`.
+
+The shell is served with the status the request actually earned — a `GET` of a missing record returns the shell with `404`, and the UI renders its not-found state — so a page URL and its data URL never disagree about whether a thing exists. It is served at every `GET` route rather than only at `/`, which is what makes a deep link or a reload land on the right page.
+
+Writes are unaffected: PUT and PATCH are JSON-only.
+
+### Serving the UI
+
+The UI's build output is served as static files under `/_ui/`, where the shell's script and style references point. The prefix cannot collide with vault data, since every record route lives under `/vaults/`, and a leading underscore already marks paths this system ignores. It is deliberately not `/assets/`: vaults have their own `assets/` directory, which `asset_path` fields point into, and one word meaning two things in one system invites exactly the confusion the route layout otherwise avoids.
+
+### GET /
+
+Lists the vaults the server was started with, in the order they were given on the command line.
+
+```json
+{
+  "vaults": [
+    { "name": "main", "path": "/home/rupert/Vault" }
+  ]
+}
+```
+
+`path` is the resolved absolute directory with `~` already expanded. Exposing it is consistent with the access boundary: a client that can reach this route can already read every record in the vault. An envelope rather than a bare array, matching Collection, so fields can be added later without breaking clients.
+
+### GET /vaults/\<vault\>
+
+Lists a vault's record types — the direct child directories of the vault root — ordered by name, each with the number of records it holds.
+
+```json
+{
+  "types": [
+    { "name": "contacts", "count": 3 },
+    { "name": "events", "count": 3 }
+  ]
+}
+```
+
+Visibility matches the record routes: directories beginning with `.` or `_` are invisible, and `count` is the number of direct-child `*.md` files — the same set `GET /vaults/<vault>/records/<type>` reports across its `records` and `errors` lists, so a broken file still counts. `VAULT.md` and every other root-level file is not a type and does not appear.
+
+An unknown vault responds `404`.
 
 ### GET /vaults/\<vault\>/records/\<type\>
 
