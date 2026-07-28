@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -20,18 +20,43 @@ async function listen(app: ReturnType<typeof createApp>): Promise<{ baseUrl: str
   return { baseUrl: `http://127.0.0.1:${address.port}`, server };
 }
 
-// fetch() normalizes %2E%2E to ".." and collapses it client-side, so traversal
-// paths must be sent raw for the server-side rejection to be exercised.
-function rawGetStatus(baseUrl: string, rawPath: string): Promise<number> {
+// A raw request, unlike fetch(), normalizes nothing: it neither collapses
+// %2E%2E client-side (so the server-side rejection is exercised) nor adds an
+// Accept header of its own (so the missing-Accept negotiation case is reachable).
+function rawGet(
+  baseUrl: string,
+  rawPath: string
+): Promise<{ status: number; contentType: string; body: string }> {
   const { hostname, port } = new URL(baseUrl);
   return new Promise((resolve, reject) => {
     const request = httpRequest({ hostname, port, path: rawPath, method: "GET" }, (response) => {
-      response.resume();
-      resolve(response.statusCode ?? 0);
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk: string) => {
+        body += chunk;
+      });
+      response.on("end", () =>
+        resolve({
+          status: response.statusCode ?? 0,
+          contentType: response.headers["content-type"] ?? "",
+          body
+        })
+      );
     });
     request.once("error", reject);
     request.end();
   });
+}
+
+async function rawGetStatus(baseUrl: string, rawPath: string): Promise<number> {
+  return (await rawGet(baseUrl, rawPath)).status;
+}
+
+// What a browser sends when a person navigates to the URL.
+const browserAccept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
+function getWithAccept(url: string, accept: string): Promise<globalThis.Response> {
+  return fetch(url, { headers: { Accept: accept } });
 }
 
 function sendJson(method: "PUT" | "PATCH", url: string, body: unknown, headers: Record<string, string> = {}): Promise<globalThis.Response> {
@@ -50,8 +75,15 @@ function patchJson(url: string, body: unknown, headers: Record<string, string> =
   return sendJson("PATCH", url, body, headers);
 }
 
+const shellHtml =
+  '<!doctype html><html><head><title>autofile</title></head><body><div id="app"></div></body></html>';
+
 describe("autofile-server HTTP app", () => {
   let root: string;
+  // A second vault nothing writes to, so the discovery routes see a fixed
+  // layout no matter what the PUT and PATCH suites have added to "main".
+  let archiveRoot: string;
+  let uiDir: string;
   let server: Server;
   let baseUrl: string;
 
@@ -66,14 +98,92 @@ describe("autofile-server HTTP app", () => {
     await writeFile(path.join(root, "tasks", "broken.md"), "---\ntitle: [unclosed\n---\nBody.\n");
     await mkdir(path.join(root, "empty"));
 
-    const recordService = await createRecordService([{ name: "main", root }]);
-    ({ baseUrl, server } = await listen(createApp({ recordService })));
+    archiveRoot = await mkdtemp(path.join(tmpdir(), "autofile-archive-"));
+    await mkdir(path.join(archiveRoot, "contacts"));
+    await writeFile(path.join(archiveRoot, "contacts", "ann.md"), "---\ntitle: Ann\n---\n");
+    await writeFile(path.join(archiveRoot, "contacts", "bob.md"), "No frontmatter.\n");
+    await writeFile(path.join(archiveRoot, "contacts", "broken.md"), "---\ntitle: [unclosed\n---\n");
+    await mkdir(path.join(archiveRoot, "events"));
+    await writeFile(path.join(archiveRoot, "events", "one.md"), "---\ntitle: One\n---\n");
+    await mkdir(path.join(archiveRoot, "_private"));
+    await writeFile(path.join(archiveRoot, "_private", "secret.md"), "---\ntitle: Secret\n---\n");
+    await mkdir(path.join(archiveRoot, ".obsidian"));
+    await writeFile(path.join(archiveRoot, ".obsidian", "config.md"), "---\ntitle: Config\n---\n");
+    await writeFile(path.join(archiveRoot, "VAULT.md"), "---\ntitle: The vault\n---\n");
+
+    uiDir = await mkdtemp(path.join(tmpdir(), "autofile-ui-"));
+    await writeFile(path.join(uiDir, "index.html"), shellHtml);
+    await writeFile(path.join(uiDir, "probe.js"), "export const probe = true;\n");
+
+    const recordService = await createRecordService([
+      { name: "main", root },
+      { name: "archive", root: archiveRoot }
+    ]);
+    ({ baseUrl, server } = await listen(createApp({ recordService, uiDir })));
   });
 
   after(async () => {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
+    });
+  });
+
+  describe("GET /", () => {
+    it("lists the configured vaults with their resolved paths, in configuration order", async () => {
+      const response = await fetch(`${baseUrl}/`);
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("access-control-allow-origin"), "*");
+      assert.ok(response.headers.get("content-type")?.startsWith("application/json"));
+      assert.deepEqual(await response.json(), {
+        vaults: [
+          { name: "main", path: await realpath(root) },
+          { name: "archive", path: await realpath(archiveRoot) }
+        ]
+      });
+    });
+  });
+
+  describe("GET /vaults/<vault>", () => {
+    it("lists types by name with record counts, excluding _/. dirs and root-level files", async () => {
+      const response = await fetch(`${baseUrl}/vaults/archive`);
+
+      assert.equal(response.status, 200);
+      assert.ok(response.headers.get("content-type")?.startsWith("application/json"));
+      assert.deepEqual(await response.json(), {
+        types: [
+          { name: "contacts", count: 3 },
+          { name: "events", count: 1 }
+        ]
+      });
+    });
+
+    it("counts a record with broken frontmatter, matching the collection route's records plus errors", async () => {
+      const types = (await (await fetch(`${baseUrl}/vaults/archive`)).json()).types;
+
+      for (const type of types as Array<{ name: string; count: number }>) {
+        const collection = await (await fetch(`${baseUrl}/vaults/archive/records/${type.name}`)).json();
+        assert.equal(
+          collection.records.length + (collection.errors?.length ?? 0),
+          type.count,
+          type.name
+        );
+      }
+      const contacts = (types as Array<{ name: string; count: number }>).find(
+        (type) => type.name === "contacts"
+      );
+      const collection = await (await fetch(`${baseUrl}/vaults/archive/records/contacts`)).json();
+      assert.equal(collection.errors.length, 1);
+      assert.equal(contacts?.count, 3);
+    });
+
+    it("returns 404 for an unknown vault", async () => {
+      const response = await fetch(`${baseUrl}/vaults/nope`);
+
+      assert.equal(response.status, 404);
+      assert.ok(response.headers.get("content-type")?.startsWith("application/json"));
+      assert.equal(typeof (await response.json()).message, "string");
     });
   });
 
@@ -483,6 +593,169 @@ describe("autofile-server HTTP app", () => {
     });
   });
 
+  describe("content negotiation", () => {
+    const getRoutes = [
+      "/",
+      "/vaults/archive",
+      "/vaults/archive/records/contacts",
+      "/vaults/archive/records/contacts/ann"
+    ];
+
+    it("serves JSON for Accept: application/json on every GET route", async () => {
+      for (const route of getRoutes) {
+        const response = await getWithAccept(`${baseUrl}${route}`, "application/json");
+
+        assert.equal(response.status, 200, route);
+        assert.ok(response.headers.get("content-type")?.startsWith("application/json"), route);
+        assert.equal(typeof (await response.json()), "object", route);
+      }
+    });
+
+    it("serves JSON when the request sends no Accept header at all", async () => {
+      for (const route of getRoutes) {
+        const response = await rawGet(baseUrl, route);
+
+        assert.equal(response.status, 200, route);
+        assert.ok(response.contentType.startsWith("application/json"), route);
+      }
+    });
+
+    it("serves JSON for Accept: */*", async () => {
+      for (const route of getRoutes) {
+        const response = await getWithAccept(`${baseUrl}${route}`, "*/*");
+
+        assert.equal(response.status, 200, route);
+        assert.ok(response.headers.get("content-type")?.startsWith("application/json"), route);
+      }
+    });
+
+    it("serves the UI shell for a browser-style Accept on every GET route", async () => {
+      for (const route of getRoutes) {
+        const response = await getWithAccept(`${baseUrl}${route}`, browserAccept);
+
+        assert.equal(response.status, 200, route);
+        assert.ok(response.headers.get("content-type")?.startsWith("text/html"), route);
+        assert.equal(await response.text(), shellHtml, route);
+      }
+    });
+
+    it("serves the shell with the status the request earned, not 200", async () => {
+      const missingRecord = await getWithAccept(
+        `${baseUrl}/vaults/archive/records/contacts/no-such-record`,
+        browserAccept
+      );
+      assert.equal(missingRecord.status, 404);
+      assert.ok(missingRecord.headers.get("content-type")?.startsWith("text/html"));
+      assert.equal(await missingRecord.text(), shellHtml);
+
+      const missingVault = await getWithAccept(`${baseUrl}/vaults/nope`, browserAccept);
+      assert.equal(missingVault.status, 404);
+      assert.equal(await missingVault.text(), shellHtml);
+
+      const missingType = await getWithAccept(
+        `${baseUrl}/vaults/archive/records/no-such-type`,
+        browserAccept
+      );
+      assert.equal(missingType.status, 404);
+      assert.equal(await missingType.text(), shellHtml);
+    });
+
+    it("sets Vary: Accept on negotiated GET responses, whichever representation wins", async () => {
+      for (const route of getRoutes) {
+        const json = await getWithAccept(`${baseUrl}${route}`, "application/json");
+        const html = await getWithAccept(`${baseUrl}${route}`, browserAccept);
+
+        assert.equal(json.headers.get("vary"), "Accept", route);
+        assert.equal(html.headers.get("vary"), "Accept", route);
+        await json.text();
+        await html.text();
+      }
+    });
+
+    it("leaves PUT and PATCH JSON-only under a browser-style Accept", async () => {
+      const put = await putJson(
+        `${baseUrl}/vaults/main/records/tasks/negotiated`,
+        { properties: { title: "Negotiated" }, body: "Body.\n" },
+        { Accept: browserAccept }
+      );
+      assert.equal(put.status, 201);
+      assert.ok(put.headers.get("content-type")?.startsWith("application/json"));
+      assert.equal((await put.json()).id, "tasks/negotiated");
+
+      const patch = await patchJson(
+        `${baseUrl}/vaults/main/records/tasks/negotiated`,
+        { properties: { title: "Patched" } },
+        { Accept: browserAccept }
+      );
+      assert.equal(patch.status, 200);
+      assert.ok(patch.headers.get("content-type")?.startsWith("application/json"));
+      assert.deepEqual((await patch.json()).properties, { title: "Patched" });
+    });
+  });
+
+  describe("serving the UI", () => {
+    it("serves the UI build directory under /_ui/", async () => {
+      const asset = await fetch(`${baseUrl}/_ui/probe.js`);
+
+      assert.equal(asset.status, 200);
+      assert.equal(await asset.text(), "export const probe = true;\n");
+    });
+
+    // The shell names a content-hashed asset filename, so a rebuild that the
+    // server did not observe would serve a document pointing at a script the
+    // rebuild has already deleted — a blank page rather than a stale one.
+    it("re-reads the shell, so a rebuilt UI appears without restarting", async () => {
+      const rebuiltUiDir = await mkdtemp(path.join(tmpdir(), "autofile-ui-rebuild-"));
+      await writeFile(path.join(rebuiltUiDir, "index.html"), shellHtml);
+      const recordService = await createRecordService([{ name: "main", root }]);
+      const rebuilt = await listen(createApp({ recordService, uiDir: rebuiltUiDir }));
+
+      try {
+        const before = await getWithAccept(`${rebuilt.baseUrl}/`, browserAccept);
+        assert.equal(await before.text(), shellHtml);
+
+        const nextShell = shellHtml.replace("<title>autofile</title>", "<title>rebuilt</title>");
+        await writeFile(path.join(rebuiltUiDir, "index.html"), nextShell);
+
+        const after = await getWithAccept(`${rebuilt.baseUrl}/`, browserAccept);
+        assert.equal(await after.text(), nextShell);
+      } finally {
+        await new Promise<void>((resolve) => rebuilt.server.close(() => resolve()));
+      }
+    });
+
+    it("falls back to JSON, warning once, when the UI has not been built", async () => {
+      const emptyUiDir = await mkdtemp(path.join(tmpdir(), "autofile-no-ui-"));
+      const recordService = await createRecordService([{ name: "main", root }]);
+      const unbuilt = await listen(createApp({ recordService, uiDir: emptyUiDir }));
+
+      const written: string[] = [];
+      const realWrite = process.stderr.write.bind(process.stderr);
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        written.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write;
+
+      try {
+        for (const route of ["/", "/vaults/main/records/tasks/alpha"]) {
+          const response = await getWithAccept(`${unbuilt.baseUrl}${route}`, browserAccept);
+
+          assert.equal(response.status, 200, route);
+          assert.ok(response.headers.get("content-type")?.startsWith("application/json"), route);
+          assert.equal(typeof (await response.json()), "object", route);
+        }
+        assert.equal(written.length, 1);
+        assert.match(written[0], /ui/i);
+      } finally {
+        process.stderr.write = realWrite;
+        unbuilt.server.closeAllConnections();
+        await new Promise<void>((resolve, reject) => {
+          unbuilt.server.close((error) => (error ? reject(error) : resolve()));
+        });
+      }
+    });
+  });
+
   describe("cross-cutting behavior", () => {
     it("returns 404 for an unknown vault on every route", async () => {
       const collection = await fetch(`${baseUrl}/vaults/nope/records/tasks`);
@@ -518,7 +791,7 @@ describe("autofile-server HTTP app", () => {
     });
 
     it("returns JSON 404 with CORS for unknown routes and record IDs with extra segments", async () => {
-      for (const route of ["/", "/vaults", "/vaults/main/records", "/vaults/main/records/a/b/c"]) {
+      for (const route of ["/vaults", "/vaults/main/records", "/vaults/main/records/a/b/c"]) {
         const response = await fetch(`${baseUrl}${route}`);
         assert.equal(response.status, 404, route);
         assert.equal(response.headers.get("access-control-allow-origin"), "*", route);

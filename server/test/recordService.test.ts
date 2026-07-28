@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readdir, readFile, stat, writeFile, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, realpath, stat, writeFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -62,6 +62,104 @@ describe("record service", () => {
         createRecordService([{ name: "bad", root: path.join(root, "tasks", "alpha.md") }]),
         /directory/i
       );
+    });
+  });
+
+  describe("listVaults", () => {
+    it("returns every configured vault with its path, in configuration order", async () => {
+      const second = await makeVault();
+      const service = await createRecordService([
+        { name: "main", root },
+        { name: "archive", root: second }
+      ]);
+
+      assert.deepEqual(service.listVaults(), {
+        vaults: [
+          { name: "main", path: await realpath(root) },
+          { name: "archive", path: await realpath(second) }
+        ]
+      });
+    });
+
+    it("reports the resolved real path, not the symlink it was configured with", async () => {
+      const target = await makeVault();
+      const link = path.join(await makeVault(), "link-to-vault");
+      await symlink(target, link);
+
+      const service = await createRecordService([{ name: "linked", root: link }]);
+
+      assert.deepEqual(service.listVaults(), {
+        vaults: [{ name: "linked", path: await realpath(target) }]
+      });
+    });
+  });
+
+  describe("listTypes", () => {
+    let typesRoot: string;
+    let typesService: RecordService;
+
+    before(async () => {
+      typesRoot = await makeVault();
+
+      await mkdir(path.join(typesRoot, "contacts"));
+      await writeFile(path.join(typesRoot, "contacts", "ann.md"), "---\ntitle: Ann\n---\n");
+      await writeFile(path.join(typesRoot, "contacts", "bob.md"), "Just a body.\n");
+      await writeFile(path.join(typesRoot, "contacts", "broken.md"), "---\ntitle: [unclosed\n---\n");
+      await writeFile(path.join(typesRoot, "contacts", "_draft.md"), "---\ntitle: Draft\n---\n");
+      await writeFile(path.join(typesRoot, "contacts", ".hidden.md"), "---\ntitle: Hidden\n---\n");
+      await writeFile(path.join(typesRoot, "contacts", "notes.txt"), "not markdown\n");
+      await mkdir(path.join(typesRoot, "contacts", "nested"));
+      await writeFile(path.join(typesRoot, "contacts", "nested", "deep.md"), "---\ntitle: Deep\n---\n");
+
+      await mkdir(path.join(typesRoot, "events"));
+      await writeFile(path.join(typesRoot, "events", "one.md"), "---\ntitle: One\n---\n");
+
+      await mkdir(path.join(typesRoot, "empty"));
+
+      await mkdir(path.join(typesRoot, "_archive"));
+      await writeFile(path.join(typesRoot, "_archive", "old.md"), "---\ntitle: Old\n---\n");
+      await mkdir(path.join(typesRoot, ".obsidian"));
+      await writeFile(path.join(typesRoot, ".obsidian", "config.md"), "---\ntitle: Config\n---\n");
+
+      await writeFile(path.join(typesRoot, "VAULT.md"), "---\ntitle: The vault\n---\n");
+      await symlink(outsideRoot, path.join(typesRoot, "linked"));
+
+      typesService = await createRecordService([{ name: "main", root: typesRoot }]);
+    });
+
+    it("lists direct child directories by name, excluding _/. prefixed dirs, root files, and escaping links", async () => {
+      const result = await typesService.listTypes("main");
+
+      assert.equal(result.kind, "ok");
+      if (result.kind !== "ok") return;
+      assert.deepEqual(result.types.map((type) => type.name), ["contacts", "empty", "events"]);
+    });
+
+    it("counts the same files the collection route reports across records and errors", async () => {
+      const result = await typesService.listTypes("main");
+
+      assert.equal(result.kind, "ok");
+      if (result.kind !== "ok") return;
+      assert.deepEqual(result.types, [
+        { name: "contacts", count: 3 },
+        { name: "empty", count: 0 },
+        { name: "events", count: 1 }
+      ]);
+
+      for (const type of result.types) {
+        const collection = await typesService.listRecords("main", type.name);
+        assert.equal(collection.kind, "ok", type.name);
+        if (collection.kind !== "ok") return;
+        assert.equal(
+          collection.collection.records.length + (collection.collection.errors?.length ?? 0),
+          type.count,
+          type.name
+        );
+      }
+    });
+
+    it("returns unknownVault for an unregistered vault", async () => {
+      assert.deepEqual(await typesService.listTypes("nope"), { kind: "unknownVault" });
     });
   });
 

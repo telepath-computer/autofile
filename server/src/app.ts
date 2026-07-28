@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import type { RecordPatch, RecordPayload, RecordService } from "./recordService.js";
 
@@ -6,9 +9,17 @@ export interface AppOptions {
   // Overridable for tests; the default is deliberately generous because the
   // read side serves records of any size and PUT must be able to write them.
   jsonBodyLimit?: string;
+  // The UI's build output: the static assets and the shell document. Overridable
+  // for tests; the default resolves against the compiled module rather than the
+  // working directory, so the installed binary finds it wherever npm put it.
+  uiDir?: string;
 }
 
-export function createApp({ recordService, jsonBodyLimit = "50mb" }: AppOptions): Express {
+export function createApp({
+  recordService,
+  jsonBodyLimit = "50mb",
+  uiDir = fileURLToPath(new URL("../ui/", import.meta.url))
+}: AppOptions): Express {
   const app = express();
 
   // v1 has no conditional requests or write-conflict detection; suppress
@@ -28,22 +39,102 @@ export function createApp({ recordService, jsonBodyLimit = "50mb" }: AppOptions)
 
   app.use(express.json({ limit: jsonBodyLimit }));
 
+  // The UI's build output, at the prefix its shell's asset references point to.
+  app.use("/_ui", express.static(uiDir));
+
+  const shellPath = path.join(uiDir, "index.html");
+  let shellWarned = false;
+
+  // Read per request, not held: the server must start before the UI is built
+  // (and start at all without it), so the shell cannot be a constructor-time
+  // dependency — and because the shell names a content-hashed asset, a copy
+  // held across a rebuild would point at a script that rebuild has deleted.
+  async function loadShell(): Promise<string | undefined> {
+    try {
+      return await readFile(shellPath, "utf8");
+    } catch {
+      // JSON is the interface's default representation, so an unbuilt UI
+      // degrades to today's behaviour rather than breaking the server.
+      if (!shellWarned) {
+        shellWarned = true;
+        process.stderr.write(
+          `autofile-server: no UI shell at ${shellPath}; serving JSON to every request\n`
+        );
+      }
+      return undefined;
+    }
+  }
+
+  // Both representations of one resource. "json" is listed first so that */* and
+  // a missing Accept header — which match either — resolve to JSON, leaving HTML
+  // to requests that genuinely prefer it, which in practice means browsers.
+  async function sendNegotiated(
+    request: Request,
+    response: Response,
+    status: number,
+    body: unknown
+  ): Promise<void> {
+    response.setHeader("Vary", "Accept");
+    if (request.accepts(["json", "html"]) === "html") {
+      const document = await loadShell();
+      if (document !== undefined) {
+        // The shell carries the status the JSON would have earned, so a page URL
+        // and its data URL never disagree about whether a thing exists.
+        response.status(status).type("html").send(document);
+        return;
+      }
+    }
+    response.status(status).json(body);
+  }
+
+  function sendNegotiatedError(
+    request: Request,
+    response: Response,
+    status: number,
+    message: string
+  ): Promise<void> {
+    return sendNegotiated(request, response, status, { message });
+  }
+
+  app.get("/", async (request, response, next) => {
+    try {
+      await sendNegotiated(request, response, 200, recordService.listVaults());
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/vaults/:vault", async (request, response, next) => {
+    try {
+      const result = await recordService.listTypes(request.params.vault);
+      switch (result.kind) {
+        case "ok":
+          await sendNegotiated(request, response, 200, { types: result.types });
+          return;
+        case "unknownVault":
+          await sendNegotiatedError(request, response, 404, "unknown vault");
+      }
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/vaults/:vault/records/:type", async (request, response, next) => {
     try {
       const { vault, type } = request.params;
       const result = await recordService.listRecords(vault, type);
       switch (result.kind) {
         case "ok":
-          response.status(200).json(result.collection);
+          await sendNegotiated(request, response, 200, result.collection);
           return;
         case "invalidSegment":
-          sendError(response, 400, result.message);
+          await sendNegotiatedError(request, response, 400, result.message);
           return;
         case "unknownVault":
-          sendError(response, 404, "unknown vault");
+          await sendNegotiatedError(request, response, 404, "unknown vault");
           return;
         case "notFound":
-          sendError(response, 404, "not found");
+          await sendNegotiatedError(request, response, 404, "not found");
       }
     } catch (error) {
       next(error);
@@ -56,19 +147,19 @@ export function createApp({ recordService, jsonBodyLimit = "50mb" }: AppOptions)
       const result = await recordService.getRecord(vault, type, slug);
       switch (result.kind) {
         case "ok":
-          response.status(200).json(result.record);
+          await sendNegotiated(request, response, 200, result.record);
           return;
         case "invalidSegment":
-          sendError(response, 400, result.message);
+          await sendNegotiatedError(request, response, 400, result.message);
           return;
         case "unknownVault":
-          sendError(response, 404, "unknown vault");
+          await sendNegotiatedError(request, response, 404, "unknown vault");
           return;
         case "notFound":
-          sendError(response, 404, "not found");
+          await sendNegotiatedError(request, response, 404, "not found");
           return;
         case "parseError":
-          response.status(422).json(result.error);
+          await sendNegotiated(request, response, 422, result.error);
       }
     } catch (error) {
       next(error);
