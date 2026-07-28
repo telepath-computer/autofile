@@ -32,6 +32,22 @@ export interface RecordPayload {
   body: string;
 }
 
+export interface VaultSummary {
+  name: string;
+  path: string;
+}
+
+export interface VaultsJson {
+  vaults: VaultSummary[];
+}
+
+export interface TypeSummary {
+  name: string;
+  count: number;
+}
+
+export type TypesResult = { kind: "ok"; types: TypeSummary[] } | { kind: "unknownVault" };
+
 export type ListResult =
   | { kind: "ok"; collection: CollectionJson }
   | { kind: "invalidSegment"; message: string }
@@ -64,6 +80,8 @@ export type PatchResult =
   | { kind: "parseError"; error: ErrorJson };
 
 export interface RecordService {
+  listVaults(): VaultsJson;
+  listTypes(vaultName: string): Promise<TypesResult>;
   listRecords(vaultName: string, type: string): Promise<ListResult>;
   getRecord(vaultName: string, type: string, slug: string): Promise<GetResult>;
   putRecord(vaultName: string, type: string, slug: string, payload: RecordPayload): Promise<PutResult>;
@@ -113,6 +131,45 @@ export async function createRecordService(vaults: VaultConfig[]): Promise<Record
   }
 
   return {
+    listVaults() {
+      // Insertion order is the order the vaults were configured, which is the
+      // order the spec promises.
+      return { vaults: [...roots].map(([name, root]) => ({ name, path: root })) };
+    },
+
+    async listTypes(vaultName) {
+      const root = roots.get(vaultName);
+      if (root === undefined) {
+        return { kind: "unknownVault" };
+      }
+
+      const names = (await readdir(root))
+        .filter((name) => isVisibleTypeName(name))
+        .sort(compareBytewise);
+
+      const types: TypeSummary[] = [];
+      for (const name of names) {
+        let typeDir: string | undefined;
+        try {
+          typeDir = await resolveContained(root, path.join(root, name));
+          if (typeDir !== undefined && !(await stat(typeDir)).isDirectory()) {
+            typeDir = undefined;
+          }
+        } catch {
+          typeDir = undefined;
+        }
+        // Skipping what listRecords would answer notFound for — a plain file, or
+        // a directory symlinked outside the vault — keeps this route and the
+        // collection route agreeing about which types exist.
+        if (typeDir === undefined) {
+          continue;
+        }
+        types.push({ name, count: await countVisibleRecords(root, typeDir) });
+      }
+
+      return { kind: "ok", types };
+    },
+
     async listRecords(vaultName, type) {
       const root = roots.get(vaultName);
       if (root === undefined) {
@@ -398,6 +455,33 @@ function isWithinRoot(root: string, candidate: string): boolean {
 
 function isVisibleMarkdownName(name: string): boolean {
   return name.endsWith(".md") && !name.startsWith(".") && !name.startsWith("_");
+}
+
+function isVisibleTypeName(name: string): boolean {
+  return !name.startsWith(".") && !name.startsWith("_");
+}
+
+// Counts exactly the files listRecords would report across records and errors —
+// an unparseable file still counts, a vanished one does not. Resolving each file
+// rather than filtering the readdir listing is what makes that true: a record
+// symlinked outside the vault is invisible to the collection route, so counting
+// it here would make the two routes disagree.
+async function countVisibleRecords(root: string, typeDir: string): Promise<number> {
+  let count = 0;
+  for (const name of (await readdir(typeDir)).filter((entry) => isVisibleMarkdownName(entry))) {
+    try {
+      const filePath = await resolveContained(root, path.join(typeDir, name));
+      if (filePath === undefined || !(await stat(filePath)).isFile()) {
+        continue;
+      }
+    } catch (error) {
+      if (errnoCode(error) === "ENOENT") {
+        continue;
+      }
+    }
+    count += 1;
+  }
+  return count;
 }
 
 function compareBytewise(a: string, b: string): number {
