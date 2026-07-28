@@ -3,7 +3,7 @@
  * whatever the renderer produced.
  */
 
-import { loadView, serverOrigin } from "./load.js";
+import { loadView } from "./load.js";
 
 export const PAGE_TAG = "autofile-page";
 
@@ -13,7 +13,7 @@ export class AutofilePage extends HTMLElement {
   }
 
   async load(): Promise<void> {
-    const view = await loadView(serverOrigin(), location.pathname);
+    const view = await loadView(location.pathname);
     this.replaceChildren(view);
   }
 }

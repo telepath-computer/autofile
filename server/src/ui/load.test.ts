@@ -27,12 +27,14 @@ function textOf(node: Node): string {
 }
 
 describe("loadView", () => {
-  it("fetches the given path from the given origin, asking for JSON", async () => {
+  // Fetched as a relative path, so the request always goes to the origin that
+  // served the page — there is no origin to configure and no cross-origin case.
+  it("fetches the path itself, asking for JSON", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(200, { vaults: [] }));
 
-    await loadView("http://127.0.0.1:8766", "/vaults/main/records/tasks", fetchImpl);
+    await loadView("/vaults/main/records/tasks", fetchImpl);
 
-    expect(fetchImpl).toHaveBeenCalledWith("http://127.0.0.1:8766/vaults/main/records/tasks", {
+    expect(fetchImpl).toHaveBeenCalledWith("/vaults/main/records/tasks", {
       headers: { Accept: "application/json" },
     });
   });
@@ -42,7 +44,7 @@ describe("loadView", () => {
       jsonResponse(200, { vaults: [{ name: "main", path: "/home/rupert/Vault" }] }),
     );
 
-    const view = await loadView("http://x", "/", fetchImpl);
+    const view = await loadView("/", fetchImpl);
 
     expect(textOf(view)).toContain("main");
     expect(textOf(view)).toContain("/home/rupert/Vault");
@@ -51,7 +53,7 @@ describe("loadView", () => {
   it("renders a not-found state for a 404, naming the path", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(404, { message: "Not found" }));
 
-    const view = await loadView("http://x", "/vaults/main/records/tasks/nope", fetchImpl);
+    const view = await loadView("/vaults/main/records/tasks/nope", fetchImpl);
 
     expect(textOf(view)).toContain("Not found");
     expect(textOf(view)).toContain("/vaults/main/records/tasks/nope");
@@ -65,7 +67,7 @@ describe("loadView", () => {
       }),
     );
 
-    const view = await loadView("http://x", "/vaults/main/records/tasks/broken", fetchImpl);
+    const view = await loadView("/vaults/main/records/tasks/broken", fetchImpl);
 
     expect(textOf(view)).toContain("YAML parse error: bad indentation at line 3");
   });
@@ -75,7 +77,7 @@ describe("loadView", () => {
       throw new TypeError("Failed to fetch");
     });
 
-    const view = await loadView("http://x", "/vaults/main", fetchImpl);
+    const view = await loadView("/vaults/main", fetchImpl);
 
     expect(textOf(view)).toContain("Request failed");
     expect(textOf(view)).toContain("Failed to fetch");
@@ -84,7 +86,7 @@ describe("loadView", () => {
   it("renders an error state when a 200 body is not JSON", async () => {
     const fetchImpl = vi.fn(async () => unparseableResponse(200));
 
-    const view = await loadView("http://x", "/", fetchImpl);
+    const view = await loadView("/", fetchImpl);
 
     expect(textOf(view)).toContain("Request failed");
   });
@@ -92,7 +94,7 @@ describe("loadView", () => {
   it("still renders an error state when an error body is not JSON", async () => {
     const fetchImpl = vi.fn(async () => unparseableResponse(500));
 
-    const view = await loadView("http://x", "/", fetchImpl);
+    const view = await loadView("/", fetchImpl);
 
     expect(textOf(view)).toContain("Error 500");
   });

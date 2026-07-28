@@ -6,28 +6,24 @@
 
 import { renderErrorResponse, renderRequestFailure, renderValue } from "./render.js";
 
-/** Where to fetch from: the serving origin in a build, a running server in dev. */
-export function serverOrigin(): string {
-  return import.meta.env.VITE_SERVER_ORIGIN ?? location.origin;
-}
-
 function failureMessage(cause: unknown): string {
   if (cause instanceof Error) return cause.message;
   return String(cause);
 }
 
 /**
- * Fetch `origin + path` as JSON and render it. Always resolves: every failure
- * is a rendered state, never a rejection and never a blank page.
+ * Fetch `path` as JSON and render it. The path is relative, so the request goes
+ * to whichever origin served the page — in development that is the same server,
+ * because the UI is built to disk and served by it rather than by a dev server.
+ * Always resolves: every failure is a rendered state, never a blank page.
  */
 export async function loadView(
-  origin: string,
   path: string,
   fetchImpl: typeof fetch = (...args) => fetch(...args),
 ): Promise<Node> {
   let response: Response;
   try {
-    response = await fetchImpl(origin + path, {
+    response = await fetchImpl(path, {
       headers: { Accept: "application/json" },
     });
   } catch (cause) {

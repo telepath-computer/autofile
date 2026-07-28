@@ -30,7 +30,9 @@ The UI is part of the server package rather than its own — one package, one ve
 
 TypeScript becomes two projects referenced from the package's `tsconfig.json`: the server's, which excludes `src/ui` so browser code never compiles into `dist/src`, and the UI's, which typechecks only, since Vite emits and never typechecks. The package build is `tsc -b && vite build`.
 
-In development Vite serves `src/ui/` on its own port and fetches from a running `autofile-server`. The origin it fetches from defaults to the page's own and is overridden for dev; cross-origin needs no proxy, since the server already sends `Access-Control-Allow-Origin: *`.
+There is no Vite dev server. Development builds to disk and watches — Vite rebuilding `dist/ui`, `tsc` rebuilding `dist/src`, and the server restarting when it changes — so what you look at is served by the real server through the real negotiation path, not a simulation of it. The UI fetches relative paths and therefore always talks to whichever origin served it, which leaves no origin to configure and nothing for CORS to carry.
+
+A dev server would cost all three. The page URL and the data URL are the same string, differing only by `Accept`, so Vite could not route between serving the shell and proxying data without reimplementing the negotiation rule in its config — and serving the app from a second origin would mean a `base` that breaks history fallback, an origin to inject, and a dev entry path unlike the real one.
 
 ## Testing
 
