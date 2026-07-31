@@ -1,9 +1,7 @@
 ---
-created: "2026-06-03"
-updated: "2026-06-03"
 title: Weekend zine idea
 url: https://example.com/zine-outline
-related: [contacts/priya-narayan.md, references/bringhurst-elements-of-typographic-style.md]
+related: ["[[contacts/priya-narayan]]", "[[references/bringhurst-elements-of-typographic-style]]"]
 ---
 
 Eight-page zine about overlooked street hardware: drain covers, doorbells, signs, and repair stickers.

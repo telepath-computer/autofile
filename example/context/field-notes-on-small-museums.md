@@ -1,8 +1,6 @@
 ---
-created: "2026-06-03"
-updated: "2026-06-03"
 title: Field notes on small museums
-related: [places/museum-of-small-machines.md, references/museum-label-writing.md]
+related: ["[[places/museum-of-small-machines]]", "[[references/museum-label-writing]]"]
 ---
 
 Loose observations about small museums and hand-built exhibits.

@@ -17,7 +17,7 @@ Autofile is designed for:
 
 ## How it works
 
-An Autofile vault is just a directory, but it is not an unstructured notes folder. The root `VAULT.md` is the contract: it describes what kinds of records exist, which folders own them, which frontmatter fields they use, what labels mean, how validation works, and which optional extensions apply.
+An Autofile vault is just a directory, but it is not an unstructured notes folder. The root `VAULT.md` is the contract: it describes what kinds of records exist, which folders own them, which frontmatter fields they use, and how validation works.
 
 A small vault might look like this:
 
@@ -33,17 +33,15 @@ my-vault/
 │   └── 2026-06-03-small-machines-visit.md
 ├── references/
 │   └── risograph-printing-guide.md
-├── misc/
+├── context/
 │   └── desk-lamp-repair.md
-├── assets/
-│   └── risograph-guide.html
-└── special/
-    └── now.md            # operating state for the agent/user
+└── _assets/
+    └── risograph-guide.html
 ```
 
-Each top-level folder is a record type. Each markdown file is one record: one person, place, event, source, task, subject, or state surface. The folder tells the agent what kind of thing it is; `VAULT.md` tells the agent how to file it; `.fslint.yml` gives the vault a validation gate.
+Each top-level folder is a record type. Each markdown file is one record: one person, place, event, source, task, or subject. The folder tells the agent what kind of thing it is; `VAULT.md` tells the agent how to file it; `.fslint.yml` gives the vault a validation gate.
 
-Because the filing system is plain files, agents can use the tools they are already good at: read a spec, grep for names and labels, follow links, match frontmatter properties, move files, edit markdown, and run validation. The structure keeps writes predictable without hiding retrieval behind a proprietary app or opaque database.
+Because the filing system is plain files, agents can use the tools they are already good at: read a spec, grep for names, follow links, match frontmatter properties, move files, edit markdown, and run validation. The structure keeps writes predictable without hiding retrieval behind a proprietary app or opaque database.
 
 ## Get started
 
@@ -59,17 +57,13 @@ Or copy it into your agent's skills directory manually:
 cp -R skills/autofile ~/.agents/skills/autofile
 ```
 
-Initialize a new vault by following:
-
-```sh
-skills/autofile/INSTALL.md
-```
+Initialize a new vault by following the Vault setup section in `skills/autofile/SKILL.md`: copy `templates/` into the target directory.
 
 Run validation with `fslint`:
 
 ```sh
 cd /path/to/vault
-npx @telepath-computer/fslint@0.3.3
+npx @telepath-computer/fslint
 ```
 
 ## Server

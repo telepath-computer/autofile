@@ -1,8 +1,6 @@
 ---
-created: "2026-06-03"
-updated: "2026-06-03"
 title: Desk lamp repair
-related: [contacts/atlas-repair.md, events/2026-06-01-lamp-shop-call.md]
+related: ["[[contacts/atlas-repair]]", "[[events/2026-06-01-lamp-shop-call]]"]
 ---
 
 Brass desk lamp flickers when the switch is pressed halfway.

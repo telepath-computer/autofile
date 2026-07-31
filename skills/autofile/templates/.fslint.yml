@@ -1,8 +1,18 @@
 ignore:
   - "VAULT.md"
-  - "assets/**"
+  - "_*/**"
+  - "**/_*/**"
 
 scopes:
+  # No untyped markdown records at vault root; root markdown is limited to ignored VAULT.md.
+  - where:
+      path: "*.md"
+    rules:
+      - id: no-root-markdown-records
+        type: frontmatter
+        additional_properties: false
+        properties: {}
+
   - where:
       path: "references/*.md"
     rules:
@@ -11,21 +21,7 @@ scopes:
         additional_properties: false
         properties:
           <<: &global_properties
-            created:
-              <<: &date
-                type: string
-                pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
-              required: true
-            updated:
-              <<: *date
-              required: true
-            # No labels are defined in the starter vault. Add a non-empty
-            # `enum` under `items` when VAULT.md's Labels section gains entries.
-            labels: &labels
-              type: array
-              items:
-                type: string
-            related: &related
+            related:
               type: array
               items:
                 type: string
@@ -41,16 +37,11 @@ scopes:
             type: array
             items:
               type: string
-          date: *date
-          published_in:
+          date: &date
             type: string
+            pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
           publisher:
             type: string
-          doi:
-            type: string
-          isbn:
-            type: string
-          accessed: *date
           asset_path:
             type: string
 
@@ -128,26 +119,16 @@ scopes:
             type: string
 
   - where:
-      path: "misc/*.md"
+      path: "context/*.md"
     rules:
-      - id: misc-frontmatter
+      - id: context-frontmatter
         type: frontmatter
         additional_properties: false
         properties:
           <<: *global_properties
           title:
             type: string
-            required: true
-          asset_path:
-            type: string
           url:
             type: string
-
-  - where:
-      path: "special/now.md"
-    rules:
-      - id: special-now-frontmatter
-        type: frontmatter
-        additional_properties: false
-        properties:
-          <<: *global_properties
+          asset_path:
+            type: string

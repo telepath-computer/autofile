@@ -26,10 +26,6 @@ test('starter template can initialize a minimal vault', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'autofile-template-'));
   fs.cpSync(path.join(templateDir, 'VAULT.md'), path.join(dir, 'VAULT.md'));
   fs.cpSync(path.join(templateDir, '.fslint.yml'), path.join(dir, '.fslint.yml'));
-  for (const folder of ['assets', 'references', 'contacts', 'places', 'events', 'misc', 'special']) {
-    fs.mkdirSync(path.join(dir, folder), { recursive: true });
-  }
-  fs.writeFileSync(path.join(dir, 'special', 'now.md'), `---\ncreated: "2026-06-03"\nupdated: "2026-06-03"\n---\n\n# Now\n`);
   run([fslint], { cwd: dir });
 });
 
