@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Autofile vault config",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "A human-readable name for the vault."
+    },
+    "description": {
+      "type": "string",
+      "description": "What the vault is for, and what belongs in it rather than in another vault."
+    },
+    "paths": {
+      "type": "object",
+      "description": "The paths within the vault and the rules for each.",
+      "propertyNames": {
+        "pattern": "^(?:/(?!\\.)[^/]+)+$",
+        "description": "A literal path written from the vault root. Segments may not be empty or begin with a dot."
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/entry"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "A human-readable name for the path."
+        },
+        "description": {
+          "type": "string",
+          "description": "What it contains and how to file into it."
+        },
+        "schema": {
+          "type": "object",
+          "description": "JSON Schema for the frontmatter of records at that path."
+        },
+        "filename": {
+          "type": "object",
+          "description": "JSON Schema for a record's filename at that path, without its extension."
+        },
+        "body": {
+          "type": "boolean",
+          "description": "false forbids a body on records at this path."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,9 +1,32 @@
 {
-  "name": "autofile",
+  "name": "@telepath-computer/autofile",
   "version": "0.1.0",
   "description": "Predictable filing for agents.",
-  "private": true,
   "license": "MIT",
+  "type": "module",
+  "bin": {
+    "autofile": "dist/cli/main.js"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/telepath-computer/autofile.git"
