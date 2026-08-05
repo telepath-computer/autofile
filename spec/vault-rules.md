@@ -9,25 +9,31 @@ A *vault* must have an `autofile.yml` at its root. The *config* defines what
 Autofile is authoritative over: the *paths* it lists are the *vault* as far as
 Autofile is concerned, and anything else in the folder is left alone.
 
-- `title` — optional. A human-readable name for the *vault*.
+- `title` — a human-readable name for the *vault*.
 - `description` — what the *vault* is for, and what belongs in it rather than in
   another *vault*.
 - `paths` — the *paths* within the *vault* and the rules for each. Keys are
   literal paths written from the *vault* root — `/contacts` — with no globbing
   or patterns.
 
+Every field is optional, and a *path* may be listed with no entry at all.
 Each entry under `paths` takes:
 
-- `title` — optional. A human-readable name for the *path*.
+- `title` — a human-readable name for the *path*.
 - `description` — what it contains and how to file into it.
-- `schema` — optional. JSON Schema for the *header* of *records* at that *path*.
-- `filename` — optional. JSON Schema for a *record*'s filename at that *path*,
-  without its extension.
-- `body` — optional. `false` forbids a *body* on *records* at this *path*. A
-  *body* is allowed by default.
+- `schema` — JSON Schema for the *header* of *records* at that *path*.
+- `filename` — JSON Schema for a *record*'s filename at that *path*, without
+  its extension.
+- `body` — `false` forbids a *body* on *records* at this *path*. A *body* is
+  allowed by default.
 
 Schemas are JSON Schema 2020-12. A *record* must satisfy its *path*'s `schema`,
-`format` included — a property declared `format: date` must hold a date.
+`format` included — a property declared `format: date` must hold a date. A
+*record* with no *header* is checked as a *header* with no properties.
+
+A `schema` or `filename` that is not usable as a schema makes the *config*
+invalid, rather than a *path* whose rules silently never apply. A misspelled
+keyword counts: it is legal JSON Schema, and it is a rule that would never fire.
 
 The *config* itself is described by
 [`autofile.schema.json`](autofile.schema.json).
@@ -66,12 +72,12 @@ paths:
 ## Records
 
 A *record* is a markdown file with two optional parts: a YAML *header* for
-structured data, and the *body*, which is everything after it. Whitespace alone
-is not a *body*.
+structured data, opened and closed by a `---` line at the start of the file,
+and the *body*, which is everything after it. Whitespace alone is not a *body*.
 
 A `.md` file is a *record* if and only if its folder is listed in `paths`. A
 markdown file deeper in the tree is not a *record* until its own folder is
-listed.
+listed. Files and folders whose name begins with `.` are ignored.
 
 ## Static files
 
@@ -86,6 +92,9 @@ extension. The file `contacts/priya-narayan.md` is the *record*
 
 A *static file*'s *identity* is its path from the *vault* root, extension
 included: `assets/risograph-guide.html`.
+
+An *identity* has one spelling: no leading `/`, and no `.` or `..` segments.
+Symlinks are followed wherever they lead.
 
 A *reference* is an *identity* in double brackets — `[[contacts/priya-narayan]]`,
 `[[assets/risograph-guide.html]]`. *References* may appear in property values

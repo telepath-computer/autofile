@@ -19,4 +19,6 @@ without redefining them.
   making the vault invalid.
 - *Warning* — something legal but usually a mistake, reported by `validate`
   without making the vault invalid.
+- *Back pressure* — what implementation teaches about a spec that is wrong or
+  vague, carried back into the spec rather than worked around in code.
 - *Skill* — the instruction set an agent follows to use a vault.

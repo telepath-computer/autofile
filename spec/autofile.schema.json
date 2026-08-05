@@ -15,11 +15,18 @@
       "type": "object",
       "description": "The paths within the vault and the rules for each.",
       "propertyNames": {
-        "pattern": "^/",
-        "description": "A literal path written from the vault root."
+        "pattern": "^(?:/(?!\\.)[^/]+)+$",
+        "description": "A literal path written from the vault root. Segments may not be empty or begin with a dot."
       },
       "additionalProperties": {
-        "$ref": "#/$defs/entry"
+        "anyOf": [
+          {
+            "$ref": "#/$defs/entry"
+          },
+          {
+            "type": "null"
+          }
+        ]
       }
     }
   },

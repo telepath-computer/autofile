@@ -6,18 +6,19 @@ file into one, retrieve from one, and create one. It lives at
 
 ## Authority
 
-The *skill* derives from the [vault rules](vault-rules.md) and does not restate
-them. Where it needs a rule it refers to the rules; where the two disagree the
-rules win and the *skill* has the bug. Restating invites drift, and a drifted
-*skill* is worse than a silent one, because an agent follows it without checking.
+The *skill* derives from the [vault rules](vault-rules.md). It is installed
+away from this tree, so it may state the rules an agent needs in hand rather
+than refer to them — but only those. Where the two disagree the rules win and
+the *skill* has the bug.
 
-## Required coverage
+## What it must cover
+
+How it is organised is the *skill*'s own business; this is the content, not a
+structure.
 
 - When to reach for a *vault*: whenever information is encountered that should be
   durable, meaning it should outlive the current task. Filing is proactive
   rather than only on request.
-- Finding the *vault*. The *skill* addresses a single *vault*, which the agent is
-  assumed to know how to reach. Choosing between several is not covered.
 - Reading `autofile.yml` before acting. Its descriptions are filing
   instructions rather than documentation, and this is the step most often
   skipped.
@@ -37,4 +38,5 @@ rules win and the *skill* has the bug. Restating invites drift, and a drifted
 ## How it is written
 
 Terse and imperative, addressed to an agent rather than a reader. It says what
-to do; why the system is shaped this way belongs in the specs.
+to do; why the system is shaped this way belongs in the specs. It says each
+thing once — a *skill* that repeats itself is one an agent can follow two ways.

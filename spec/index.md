@@ -27,3 +27,12 @@ Its goals:
   `validate` reports, and how the code is laid out.
 - [Skill](skill.md) — the instructions an agent follows to use a vault, and
   what they must cover.
+- [README](readme.md) — what the repository's front page must cover.
+
+## Distribution
+
+Autofile is published as `@telepath-computer/autofile`, which provides the
+`autofile` binary.
+
+The skill is installed into an agent's skills directory with
+`npx skills add telepath-computer/autofile`.

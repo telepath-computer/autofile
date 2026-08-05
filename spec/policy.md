@@ -32,6 +32,16 @@ is. The more specific the demand, the more it needs a short "because" — withou
 one, a reader cannot tell a critical invariant from an incidental detail, and a
 later editor cannot judge whether changing it is safe. Obvious rules need none.
 
+## Back pressure
+
+Implementation surfaces what a spec got wrong or left vague. That is *back
+pressure*, and it is welcome — a best-effort spec is enough to build against,
+and what building teaches comes back into the spec.
+
+The discipline is that it lands there. A gap found while implementing is fixed
+in the spec, not worked around in code; otherwise the spec keeps authority it
+no longer deserves while the code quietly holds the real rules.
+
 ## One owner per rule
 
 A rule is stated once, by the spec that owns it, and referred to from anywhere
