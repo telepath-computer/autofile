@@ -1,0 +1,22 @@
+{
+  // The root config holds the compiler options every package shares; only the
+  // per-project paths and `composite` differ. Paths in an extended config
+  // resolve against the file that wrote them, so each has to be restated here.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "dist",
+
+    // The build log lives inside what it describes. Left beside this file it
+    // outlives a deleted `dist`, and `tsc -b` then reports the package as
+    // built while nothing is there to import — a green build, a green
+    // typecheck, and no output. Removing `dist` now removes the log with it.
+    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
+  },
+  // Core depends on nothing else here, so it references nothing. A package
+  // that does declares it, and `tsc -b` then builds its dependencies first
+  // and type-checks against their sources rather than a stale `dist`.
+  "references": [],
+  "include": ["src"]
+}

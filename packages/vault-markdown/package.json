@@ -1,0 +1,35 @@
+{
+  "name": "@autofile/vault-markdown",
+  "version": "0.1.0",
+  "description": "MarkdownVault: a vault kept as a folder of markdown files.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/*.tsbuildinfo"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "autofile-md": "./dist/server/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsc -b && node --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@autofile/core": "^0.1.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "yaml": "^2.9.0"
+  }
+}
