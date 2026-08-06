@@ -1,39 +1,29 @@
 # Markdown vault
 
-A *vault* kept as a folder of markdown files, implemented by `MarkdownVault`.
-It holds the *collections* described by [the vault spec](vault.md); this says
-how they are stored.
+A *vault* kept as a folder of markdown files. It holds the *collections*
+described by [the vault spec](vault.md); this says how they are stored, and how
+the folder is served as [an Autofile vault](http-api.md).
 
-Files and folders whose name begins with `.` are ignored.
+The folder and the API are two ends of one contract. Obsidian, Dropbox and
+`git diff` see the folder; everything else sees the API; and the program in the
+middle is what makes them the same *vault*.
 
 ## Config
 
 A `MarkdownVault` reads its *collections* from an `autofile.yml` at the
 folder's root.
 
-```ts
-interface Config {
-  /** The vault's collections, by name. */
-  collections?: { [name: string]: Collection };
-}
+Under `collections`, keyed by name, each is declared with the fields
+[the model](vault.md) gives it and one this *vault* adds:
 
-interface Collection {
-  /** What the collection holds. */
-  type: 'record' | 'blob';
-  /** A human-readable name for the collection. */
-  title?: string;
-  /** What it contains and how to file into it. */
-  description?: string;
-  /** JSON Schema for the fields of records here. Record collections only. */
-  schema?: object;
-  /** false forbids a body on records here. A body is allowed by default. */
-  body?: boolean;
-}
-```
+- `body` — `false` forbids a *body* on *records* here. A *body* is allowed by
+  default. This one is not served: a *record* in such a *collection* simply has
+  no `body`, which is all a consumer needs to see.
 
-Unknown keys are rejected, in the *config* and in a *collection* both. An
-`autofile.yml` that cannot be read, does not parse, or does not match this
-makes the *vault* unopenable.
+Unknown keys are rejected, in the *config* and in a *collection* both. So are
+two *collections* whose names differ only by case, since their folders would be
+one. An `autofile.yml` that cannot be read, does not parse, or does not match
+this makes the *vault* unopenable.
 
 ```yaml
 collections:
@@ -75,6 +65,10 @@ is a *record*; every other file is a *blob*.
 
 A *vault* declares at most one blob *collection*, since two would claim the
 same *keys* with no rule for which wins.
+
+A *key* becomes a path here, so this *vault* rejects any whose segments are not
+names a file can have: an empty segment, `.`, or `..`. Each would resolve to
+something another *key* already names, or to something outside the *vault*.
 
 ## Records
 
@@ -138,18 +132,65 @@ there, so comments do not survive a write. What does survive is order: reading
 keeps the *header*'s key order, so a *record* fetched, changed and written back
 comes out in the order it went in.
 
-`put` creates whatever folders a *key* implies. `remove` deletes the file and
-then any parent folder it leaves empty, stopping at a *collection*'s own folder
+`put` creates whatever folders a *key* implies.
+
+`remove` errors when nothing is at the *identity*, rather than answering
+differently from `get` about the same absence. It deletes the file and then any
+parent folder it leaves empty, stopping at a *collection*'s own folder
 and at the *vault* root — both mean something, and an empty one is a *vault*
 that has changed shape rather than one that has been tidied.
 
 A *blob* is written as its bytes. Its `content.type` is not stored, since the
 media type is the extension's to say.
 
-## Interface
+## Findings
+
+`validate` answers with *findings* rather than a verdict. A *violation* makes
+the *vault* invalid; a *warning* is legal and usually a mistake, and does not.
 
 ```ts
-class MarkdownVault implements Vault {
+interface Finding {
+  /** What was broken. */
+  rule: string;
+  severity: 'violation' | 'warning';
+  /** The identity at fault, where there is one. */
+  id?: string;
+  /** The collection at fault, where the finding is about one. */
+  collection?: string;
+  message: string;
+}
+```
+
+None of this reaches the API. A *vault* kept some other way would have its own
+list, most of which could not go wrong there at all.
+
+- `schema` — a *record*'s *fields* fail its *collection*'s `schema`.
+- `body` — the *record* has a *body* where its *collection* sets `body: false`.
+- `parse` — the *record* cannot be read, or its YAML *header* does not parse.
+- `config` — `autofile.yml` cannot be read, does not parse, or is not a valid
+  *config*. This one concerns the *vault*'s own file, so it names neither a
+  *record* nor a *collection*.
+- `key` — a *key* has a segment that is empty, `.` or `..`, is not in Unicode
+  NFC, holds a control character, or is too long for the filesystem.
+- `collision` — two *identities* whose files differ only by case, which a
+  filesystem that does not tell them apart holds as one. Checked over the whole
+  *vault* rather than within a *collection*, since *records* and *blobs* share
+  one tree and a *record*'s file can collide with a *blob*'s.
+
+All of those are *violations*. One *warning*:
+
+- `empty` — a declared *collection* with nothing in it: missing, or not a
+  folder. Legitimate when a *collection* is declared before anything is filed
+  into it, and indistinguishable from a mistyped name otherwise.
+
+## Interface
+
+The types below are this *vault*'s own. What a *record* or a *blob* looks like
+to a consumer is [the API](http-api.md)'s to say; these are the shapes the
+program holds in memory between the folder and the wire.
+
+```ts
+class MarkdownVault {
   /** Opens the vault rooted at `root`. */
   static open(root: string): Promise<MarkdownVault>;
 
@@ -160,6 +201,29 @@ class MarkdownVault implements Vault {
   list(collection: string): Promise<(Record | Blob)[]>;
   put(id: string, content: Fields | globalThis.Blob): Promise<Record | Blob>;
   remove(id: string): Promise<void>;
+
+  validate(): Promise<Finding[]>;
+}
+
+interface Record {
+  type: 'record';
+  id: string;
+  fields: Fields;
+  created: Date;
+  updated: Date;
+}
+
+interface Blob {
+  type: 'blob';
+  id: string;
+  created: Date;
+  updated: Date;
+  /** The bytes: `size`, `type` for the media type, `stream()`, `arrayBuffer()`. */
+  content: globalThis.Blob;
+}
+
+interface Fields {
+  [name: string]: unknown;
 }
 ```
 
@@ -177,3 +241,41 @@ A *record* whose file cannot be read, or whose *header* does not parse, is an
 error from `get` and from `list`. `null` means the *collection* holds no such
 *key*, which a file that is there but broken is not.
 
+## Serving
+
+`autofile-md serve` opens the folder and answers [the HTTP
+API](http-api.md) for it, holding it open across requests.
+
+```
+autofile-md serve --host 127.0.0.1 --port 8787
+```
+
+Both are settable and those are the defaults. Binding wide is typed rather than
+assumed: there is no authentication, so `--host 0.0.0.0` makes the *vault*
+readable and writable by everything that can reach the machine, and that should
+be the moment someone notices it.
+
+Every response carries `Access-Control-Allow-Origin: *`, and `OPTIONS` answers
+the preflight, because the point of serving JSON is a web app and it will be on
+another origin. With no authentication that means any page a browser has open
+can read and write the *vault* — a loopback bind does not prevent it, since
+`127.0.0.1` is reachable from whatever the browser is displaying. That is a
+choice this server makes rather than something the API asks for.
+
+`autofile-md validate` reports the *findings* above. It is a command about
+a folder rather than about a *vault*, which is why it is here and not in the API.
+
+A *violation* names the *identity*, what is wrong with it, and the *collection*
+that governs it. A *warning* is labelled and names the *collection* in the
+*identity*'s place. One *finding* to a line, *violations* before *warnings*, in
+a deterministic order, so two runs over an unchanged folder print the same
+thing.
+
+```
+contacts/priya-narayan — /name: must be string   (contacts)
+```
+
+It exits zero when the *vault* is valid and non-zero when it is not. *Warnings*
+do not change the exit code — a *warning* that fails a build is not a *warning*.
+A valid *vault* still prints a line naming what was checked, so a run that found
+nothing is distinguishable from one that found everything in order.
