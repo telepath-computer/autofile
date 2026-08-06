@@ -1,5 +1,5 @@
 /**
- * The vault rules about names: what a path key names, what an identity is
+ * The vault spec's rules about names: what a path key names, what an identity is
  * spelled like, and what is ignored. Finding records and checking a vault both
  * walk the same folders and have to agree about them down to the letter, so
  * they read these rules from here rather than each holding its own copy — a

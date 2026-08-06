@@ -24,7 +24,7 @@ export type VaultValidation =
     };
 
 /**
- * Checks the vault at `root` against the vault rules: reads the config, finds
+ * Checks the vault at `root` against the vault spec: reads the config, finds
  * the records the config declares, and checks them against it.
  *
  * The whole of it lives here rather than in the caller, because reading a vault

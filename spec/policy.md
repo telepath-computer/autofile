@@ -45,7 +45,7 @@ no longer deserves while the code quietly holds the real rules.
 ## One owner per rule
 
 A rule is stated once, by the spec that owns it, and referred to from anywhere
-else rather than restated. `cli.md` does not repeat the vault rules it checks.
+else rather than restated. `cli.md` does not repeat the vault spec it checks.
 
 ## Terms
 

@@ -45,7 +45,7 @@ export async function findRecords(root: string, config: VaultConfig): Promise<Va
 
 /**
  * The records directly at one listed path. A path with nothing on disk yields
- * none: the vault rules do not require a listed path to exist, and reporting
+ * none: the vault spec does not require a listed path to exist, and reporting
  * the absence is the `empty` warning's job, not this one's.
  */
 async function findRecordsAt(root: string, path: string): Promise<VaultRecord[]> {

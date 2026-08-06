@@ -3,18 +3,19 @@
 The vocabulary of the specs. Terms are defined here; other specs use them
 without redefining them.
 
-- *Vault* — a single folder that adheres to the vault rules.
-- *Config* — `autofile.yml`, at the vault root, declaring what Autofile is
-  authoritative over.
-- *Path* — a location the config lists, together with the rules for the records
-  there.
-- *Record* — a markdown file in a listed path.
-- *Header* — a record's YAML frontmatter, carrying its structured data.
-- *Body* — everything in a record after its header.
-- *Identity* — what names a record or a file within the vault: a record's path
-  without its `.md`, a file's path with its extension.
-- *Reference* — an identity in double brackets.
-- *Static file* — a file the vault holds that is not a record.
+- *Vault* — a set of collections that adheres to the vault spec.
+- *Collection* — a named group in a vault, holding records or blobs.
+- *Key* — what names a record or blob within its collection.
+- *Identity* — a collection and a key, joined by a slash.
+- *Record* — a thing a vault holds, having an identity and fields.
+- *Fields* — a record's data.
+- *Blob* — bytes a vault holds, having an identity and content but no fields.
+- *Reference* — a field value that points at an identity.
+- *Config* — in a markdown vault, the `autofile.yml` its collections are read
+  from.
+- *Header* — in a markdown vault, the YAML frontmatter carrying a record's
+  fields.
+- *Body* — in a markdown vault, the field holding what sits below the header.
 - *Violation* — something that breaks a vault rule, reported by `validate` and
   making the vault invalid.
 - *Warning* — something legal but usually a mistake, reported by `validate`

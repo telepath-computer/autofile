@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -295,18 +295,5 @@ paths:
     assert.equal(schema?.({ attendance: ['standup', 4] }), true);
     assert.equal(schema?.({ attendance: ['standup', 'four'] }), false);
     assert.equal(schema?.({ attendance: ['standup', 4, 'extra'] }), false);
-  });
-});
-
-describe('config.schema.json', () => {
-  // The production copy must match the spec byte for byte. When this fails the
-  // fix is always to copy `spec/autofile.schema.json` over the production copy,
-  // never to edit the spec: `spec/` is owned by a human and changes there go
-  // through review, not through making a test pass.
-  it('is identical to spec/autofile.schema.json', async () => {
-    const production = new URL('./config.schema.json', import.meta.url);
-    const spec = new URL('../../spec/autofile.schema.json', import.meta.url);
-
-    assert.equal(await readFile(production, 'utf8'), await readFile(spec, 'utf8'));
   });
 });

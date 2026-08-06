@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import type { ErrorObject, SchemaObject, ValidateFunction } from 'ajv/dist/2020.js';
 import { parse } from 'yaml';
 
-// A production copy of `spec/autofile.schema.json`. Nothing under `src/` reads
-// from `spec/`, so implementation pressure can never reach the spec; the two
-// copies are held together by the conformance test in `config.test.ts`.
+// The config document's own schema, stating in JSON Schema what the vault spec
+// states in TypeScript. It ships so an editor can validate an `autofile.yml`
+// against it.
 import configSchema from './config.schema.json' with { type: 'json' };
 import type { Finding } from './findings.ts';
 

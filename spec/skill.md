@@ -6,7 +6,7 @@ file into one, retrieve from one, and create one. It lives at
 
 ## Authority
 
-The *skill* derives from the [vault rules](vault-rules.md). It is installed
+The *skill* derives from the [vault spec](vault.md). It is installed
 away from this tree, so it may state the rules an agent needs in hand rather
 than refer to them — but only those. Where the two disagree the rules win and
 the *skill* has the bug.
@@ -27,10 +27,12 @@ structure.
   designed by the agent alone.
 - Filing: search for existing *records* first and prefer updating one over
   creating a duplicate. Fan out when one input touches several *records*.
-- Writing a *record*: *header* and *body*, conforming to the *path*'s
-  `schema`, `filename` and `body`.
-- Referencing *records* and *static files*.
-- Retrieval: by *path*, by property, by *reference*, and by search.
+- Choosing a *collection*, which is a filing decision for *blobs* as much as
+  for *records*.
+- Writing a *record*: *header* and *body*, conforming to the *collection*'s
+  `schema` and `body`.
+- Referencing *records* and *blobs*.
+- Retrieval: by *collection*, by *field*, by *reference*, and by search.
 - Validating after a change.
 - What not to do: no speculation, no invented content, and asking rather than
   guessing when the destination is unclear.
