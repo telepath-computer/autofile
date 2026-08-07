@@ -86,21 +86,25 @@ as a decision list. An entry declares any of:
     file must match in full, the final segment with its extension
     stripped — so one convention governs record ids and asset names alike.
 - `ignore` — what is not vault content:
-  - `pattern` — a regular expression; a file or folder whose name matches
-    it in full is ignored, subtree included. Ignored files are invisible
-    to `check` — sync and editor artifacts, not vault content.
+  - `pattern` — a regular expression; a file or folder whose name it
+    matches is ignored, subtree included. A plain match, not a full one —
+    an ignore rule is a trigger, unlike `filenames.pattern`, which states
+    a shape the whole name must have. Ignored files are invisible to
+    `check` — sync and editor artifacts, not vault content.
 
 Scope is positional: `global` governs the whole vault, a path entry the
 subtree under its folder. For each rule block, a path entry's block, where
 declared, replaces `global`'s entirely; an entry that omits a block leaves
 `global`'s in force, and an empty block (`records: {}`) is therefore how a
-folder relaxes a global rule.
+folder relaxes a global rule. A folder's rules apply to its
+children, not to the folder itself.
 
 Unknown keys are rejected at every level — a misspelled key is otherwise a
 rule that silently never runs. A schema that does not compile as JSON
 Schema, or a pattern that does not compile as a regular expression, is
 rejected for the same reason: a broken rule looks exactly like one
-everything passes. Two paths that differ only by case are rejected, since
+everything passes. Schemas compile strictly, so an unknown schema keyword
+is rejected like any other misspelled key. Two paths that differ only by case are rejected, since
 their folders would be one folder on a case-insensitive filesystem.
 
 Both top-level keys are optional — a config that declares neither is a
@@ -115,13 +119,18 @@ above makes the vault invalid; nothing else is checked until it is fixed.
 ## Records
 
 A record is one `.md` file representing one thing: a person, an event, a
-task, a source. Folders may nest below a path entry.
+task, a source. Folders may nest below a path entry. A `.md` file whose
+name begins with a dot is not a record: a dot-leading name resolves
+literally, so no reference could reach it as one.
 
 A record has two parts, both optional:
 
 - **Frontmatter** — a YAML block opened and closed by a `---` line at the
   start of the file, carrying the record's structured fields. This is what
-  a governing `schema` validates.
+  a governing `schema` validates. When present, the block must parse to a
+  mapping — a structural rule of its own, because JSON Schema keywords
+  constrain only objects, so a schema requiring fields would technically
+  accept a scalar.
 - **Body** — everything below the frontmatter: concise agent-authored prose,
   links, and retrieval cues. Whitespace alone is no body.
 
@@ -158,8 +167,10 @@ A wikilink may carry an alias or heading —
 and the reference is the part before the first `|` or `#`. Markdown-link
 targets resolve against the vault root only: a target with `./` or `../`
 segments or URL-encoding is not a reference. A reference resolves to a
-file — an extensionless target through `<target>.md`, any other through
-the literal path; a folder at the target path does not satisfy it.
+file — a target whose final segment contains no dot resolves through
+`<target>.md`; any dot, leading included, means the literal path, so
+`assets/.env` is reached as written. A folder at the target path does not
+satisfy a reference.
 
 In YAML a wikilink must be quoted — unquoted, `[[contacts/priya-narayan]]`
 is a nested array. A wikilink in body prose is a markdown-level link between

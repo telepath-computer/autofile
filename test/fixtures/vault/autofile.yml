@@ -1,0 +1,32 @@
+global:
+  ignore:
+    pattern: '^\.'
+  filenames:
+    pattern: '^[a-z0-9][a-z0-9-]*$'
+  assets:
+    allowed: false
+
+paths:
+  contacts:
+    description: |
+      People. One record per person; update the existing record when
+      details change.
+    records:
+      schema:
+        required: [name]
+        properties:
+          name: { type: string }
+
+  notes:
+    description: |
+      Freeform notes, nested by project.
+
+  attachments:
+    description: |
+      Source material and attached files: scans, photos, downloads.
+    assets:
+      allowed: true
+
+  journal:
+    description: |
+      Dated entries, one file per day.

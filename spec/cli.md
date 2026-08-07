@@ -93,8 +93,8 @@ Violations:
 
 - `config` — `autofile.yml` cannot be read, does not parse, or is not a valid
   config (including an uncompilable schema).
-- `parse` — a governed record cannot be read, or its frontmatter is not
-  valid YAML.
+- `parse` — a governed record cannot be read, its frontmatter is not
+  valid YAML, or its frontmatter is not a mapping.
 - `schema` — a record's frontmatter fails its governing `schema`.
 - `body` — a record has a body where its governing entry sets
   `body.allowed: false`.
