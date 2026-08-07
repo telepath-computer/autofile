@@ -1,85 +1,71 @@
 # Autofile
 
-> ⚠️ **Experimental.** Early-stage software. The config schema, CLI, and
-> API may change without notice between releases. Pin exact versions if
-> you depend on it.
+> ⚠️ **Experimental.** Early-stage software; the config format and CLI may
+> change without notice. Pin exact versions if you depend on it.
 
 Predictable filing for agents.
 
-Like a wiki, notes app, or database, Autofile gives agents a durable place to file information. Its characteristic shape is flat files with strict typing: an Autofile vault specifies the types of things that can be stored, where each type belongs, and the rules for how records should be filed and organized.
+Autofile is a place for agents to file durable information, optimized for
+hands-off input and retrieval. Data is stored in a *vault*: a folder of
+markdown files and assets, with a flat hierarchy and strict types,
+governed by config. Its categories and conventions are customized per
+user.
 
 Autofile is designed for:
 
-- **No ambiguity on input.** Every input should have a specific, well-defined place in the system and clear instructions for how it should be filed.
-- **Efficient retrieval.** Vaults are structured to be flat, typed, and searchable through methods agents already use well: keyword search, semantic search, property matching, filenames, links, and normal filesystem traversal.
-- **Native agent editing.** Agents can read, write, move, validate, and query records with ordinary filesystem tools, then trust the result across runs.
-- **Progressive enhancement.** A vault can start simple, then grow through skills that bundle scripts, schemas, filing rules, and operations for specific workflows or data types such as tasks, calendars, email, receipts, and more.
+- **No ambiguity on input.** Every input has a specific, well-defined
+  place and clear instructions for how it is filed.
+- **Efficient retrieval.** Vaults are flat, typed, and searchable by the
+  methods agents already use well: keyword search, property matching,
+  filenames, links, and normal filesystem traversal.
+- **Plain files, no lock-in.** A vault is an ordinary folder: Obsidian
+  opens it, Dropbox syncs it, git diffs it, any file server serves it.
 
-## How it works
-
-An Autofile vault is just a directory, but it is not an unstructured notes folder. The root `VAULT.md` is the contract: it describes what kinds of records exist, which folders own them, which frontmatter fields they use, and how validation works.
-
-A small vault might look like this:
+A vault looks like this:
 
 ```txt
 my-vault/
-├── VAULT.md              # the filing spec agents must follow
-├── .fslint.yml           # machine-readable validation for the spec
+├── autofile.yml            # the config: paths, descriptions, schemas
 ├── contacts/
-│   └── priya-narayan.md  # one person or organization
-├── places/
-│   └── blue-kettle-cafe.md
-├── events/
-│   └── 2026-06-03-small-machines-visit.md
-├── references/
-│   └── risograph-printing-guide.md
-├── context/
-│   └── desk-lamp-repair.md
-└── _assets/
-    └── risograph-guide.html
+│   └── priya-narayan.md    # a record: one file, one thing
+├── datasets/
+│   └── reading-list.md     # standalone structured data
+├── assets/
+│   └── risograph-guide.pdf # non-record files, in their sanctioned home
+└── topics/
+    └── desk-lamp-repair.md # durable notes on anything worth remembering
 ```
 
-Each top-level folder is a record type. Each markdown file is one record: one person, place, event, source, task, or subject. The folder tells the agent what kind of thing it is; `VAULT.md` tells the agent how to file it; `.fslint.yml` gives the vault a validation gate.
-
-Because the filing system is plain files, agents can use the tools they are already good at: read a spec, grep for names, follow links, match frontmatter properties, move files, edit markdown, and run validation. The structure keeps writes predictable without hiding retrieval behind a proprietary app or opaque database.
+Records are markdown with YAML frontmatter, validated against the config's
+JSON Schemas. Wikilinks — `[[contacts/priya-narayan]]` — connect records,
+and check reports the dangling ones.
 
 ## Get started
 
-Install the autofile skill with `skills`:
+Install the CLI, then create a vault in a folder of your choice and check
+it:
+
+```sh
+npm install -g @telepath-computer/autofile
+
+cd my-vault
+autofile init
+autofile check
+```
+
+`init` writes a starter `autofile.yml` and its folders; `check` validates
+the vault — findings one per line, non-zero exit on violations.
+
+Then install the skill, so an agent can file and retrieve on your behalf:
 
 ```sh
 npx skills add telepath-computer/autofile
 ```
 
-Or copy it into your agent's skills directory manually:
+Shape the vault with your agent: the paths and their descriptions are the
+filing system, so decide them together.
 
-```sh
-cp -R skills/autofile ~/.agents/skills/autofile
-```
+## Spec
 
-Initialize a new vault by following the Vault setup section in `skills/autofile/SKILL.md`: copy `templates/` into the target directory.
-
-Run validation with `fslint`:
-
-```sh
-cd /path/to/vault
-npx @telepath-computer/fslint
-```
-
-## Server
-
-`server/` holds [`@telepath-computer/autofile-server`](server/spec/index.md), a local HTTP server that exposes vaults to apps: it serves records as JSON with frontmatter transformed into structured properties, and accepts writes so an app can create and update records. `server/spec/index.md` is the full interface spec.
-
-```sh
-npm install
-npm run build --workspace server
-node server/dist/src/cli.js --vault main=/path/to/vault
-```
-
-Or put the binary on your PATH with `npm link --workspace server`, then `autofile-server --vault main=/path/to/vault`.
-
-## Test
-
-```sh
-npm test
-```
+[`spec/index.md`](spec/index.md) is authoritative: the vault format, the
+CLI, and what the skill must cover.
