@@ -5,7 +5,7 @@ import addFormatsExport from "ajv-formats";
 // ajv-formats ships CJS with an ESM-style default in its types; under
 // NodeNext the runtime value of the default import is the plugin itself.
 const addFormats = addFormatsExport as unknown as typeof addFormatsExport.default;
-import { load } from "js-yaml";
+import { CORE_SCHEMA, load } from "js-yaml";
 
 // The config model. Patterns and schemas are stored compiled: an
 // uncompilable one is rejected at load, so a Config in hand is enforceable
@@ -85,7 +85,9 @@ export async function loadConfig(filePath: string): Promise<ConfigResult> {
 export function parseConfig(source: string): ConfigResult {
   let document: unknown;
   try {
-    document = load(source);
+    // CORE_SCHEMA for the same YAML story as frontmatter (spec/vault.md);
+    // config has no date-shaped keys, so this is consistency, not behavior.
+    document = load(source, { schema: CORE_SCHEMA });
   } catch (error) {
     return { ok: false, errors: [{ message: `autofile.yml does not parse: ${describe(error)}` }] };
   }

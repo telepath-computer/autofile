@@ -119,9 +119,7 @@ above makes the vault invalid; nothing else is checked until it is fixed.
 ## Records
 
 A record is one `.md` file representing one thing: a person, an event, a
-task, a source. Folders may nest below a path entry. A `.md` file whose
-name begins with a dot is not a record: a dot-leading name resolves
-literally, so no reference could reach it as one.
+task, a source. Folders may nest below a path entry.
 
 A record has two parts, both optional:
 
@@ -130,7 +128,9 @@ A record has two parts, both optional:
   a governing `schema` validates. When present, the block must parse to a
   mapping — a structural rule of its own, because JSON Schema keywords
   constrain only objects, so a schema requiring fields would technically
-  accept a scalar.
+  accept a scalar. Frontmatter parses to JSON values: YAML's timestamp
+  type is not applied, so an unquoted date stays the string it was
+  written as — which is what a `schema` can validate.
 - **Body** — everything below the frontmatter: concise agent-authored prose,
   links, and retrieval cues. Whitespace alone is no body.
 
@@ -167,10 +167,13 @@ A wikilink may carry an alias or heading —
 and the reference is the part before the first `|` or `#`. Markdown-link
 targets resolve against the vault root only: a target with `./` or `../`
 segments or URL-encoding is not a reference. A reference resolves to a
-file — a target whose final segment contains no dot resolves through
-`<target>.md`; any dot, leading included, means the literal path, so
-`assets/.env` is reached as written. A folder at the target path does not
-satisfy a reference.
+file: the literal path first, then `<target>.md` when no file sits at the
+literal path — so `contacts/priya-narayan` reaches
+`contacts/priya-narayan.md`, `docs/v1.2` reaches `docs/v1.2.md`, and
+`assets/.env` is reached as written. Two probes in one order keep
+resolution a lookup rather than a search, and a record whose name carries
+a dot is referenced extensionless like any other. A folder at the target
+path does not satisfy a reference.
 
 In YAML a wikilink must be quoted — unquoted, `[[contacts/priya-narayan]]`
 is a nested array. A wikilink in body prose is a markdown-level link between
@@ -178,6 +181,8 @@ records; a frontmatter field whose value is a wikilink is a typed link an
 agent or app can follow.
 
 Every record's references are checked: wikilinks at any depth in
-frontmatter values, and both forms in the body. A reference may
-point at a record that does not exist yet; it marks something worth filing
-later. `check` reports these as warnings, not violations.
+frontmatter values, and both forms in the body. Fenced code blocks and
+inline code spans are not scanned — a link inside code is code. A
+reference may point at a record that does not exist yet; it marks
+something worth filing later. `check` reports these as warnings, not
+violations.

@@ -8,9 +8,10 @@ autofile check [path]
 ```
 
 `[path]` is the vault folder, defaulting to the current directory.
-`autofile --help` — also shown on no or unknown arguments — prints usage:
-the synopsis above with a one-line description per command. `autofile
---version` prints the package version.
+`autofile --help` — also shown on no or unknown arguments — prints usage —
+a Usage line, a one-sentence description, and an aligned list of the
+commands, the path argument, and the flags. `autofile --version` prints the
+package version.
 
 ## `autofile init`
 

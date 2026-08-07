@@ -297,6 +297,53 @@ test("every schema failure is reported, not just the first", async () => {
   assert.ok(messages.some((message) => message.startsWith("type ")));
 });
 
+// vault.md: "Frontmatter parses to JSON values: YAML's timestamp type is
+// not applied, so an unquoted date stays the string it was written as."
+test("an unquoted date satisfies a string schema, same as a quoted one", async () => {
+  const root = await vault({
+    "autofile.yml": [
+      "paths:",
+      "  contacts:",
+      "    description: People.",
+      "    records:",
+      "      schema:",
+      "        properties:",
+      "          date: { type: string }",
+      "          quoted: { type: string }",
+      "",
+    ].join("\n"),
+    "contacts/x.md": "---\ndate: 2026-08-05\nquoted: '2026-08-05'\n---\n",
+  });
+  const result = await check(root);
+  assert.deepEqual(byRule(result, "schema"), []);
+});
+
+// Dropping the timestamp type must not drop the rest of YAML's core
+// scalars: booleans and numbers keep their JSON types.
+test("unquoted booleans and numbers still parse to their JSON types", async () => {
+  const root = await vault({
+    "autofile.yml": [
+      "paths:",
+      "  contacts:",
+      "    description: People.",
+      "    records:",
+      "      schema:",
+      "        properties:",
+      "          active: { type: boolean }",
+      "          count: { type: number }",
+      "          name: { type: string }",
+      "",
+    ].join("\n"),
+    "contacts/x.md": "---\nactive: true\ncount: 42\nname: true\n---\n",
+  });
+  const result = await check(root);
+  const schema = byRule(result, "schema");
+  // active and count pass as boolean and number; name fails because an
+  // unquoted true is a boolean, not a string.
+  assert.equal(schema.length, 1);
+  assert.equal(schema[0]!.message, "name must be a string");
+});
+
 // --- body ---
 
 test("a body where body.allowed is false is a violation", async () => {
@@ -369,8 +416,9 @@ test("an asset in a path that allows assets is fine", async () => {
   assert.equal(result.filesChecked, 1);
 });
 
-// vault.md: "A `.md` file whose name begins with a dot is not a record" —
-// and ".md" itself begins with a dot, so asset rules apply to it.
+// vault.md: a record is one `.md` file — and a leading dot opens no
+// extension, so a file named exactly ".md" is a whole name with no
+// extension, not an `.md` file. Asset rules apply to it.
 test("a file named exactly .md is not a record; asset rules apply", async () => {
   const config = [
     "global:",
@@ -399,11 +447,10 @@ test("a file named exactly .md is not a record; asset rules apply", async () => 
   assert.match(schema[0]!.message, /title.*required/);
 });
 
-// vault.md: "A `.md` file whose name begins with a dot is not a record: a
-// dot-leading name resolves literally, so no reference could reach it as
-// one." It answers to asset rules, and its content is never parsed,
-// schema-checked, or reference-scanned.
-test("a dot-leading .md file is not a record: asset rules apply, content unscanned", async () => {
+// vault.md: a record is one `.md` file — a dot-leading name included. The
+// records block in force governs it, its references are scanned, and
+// asset rules do not apply.
+test("a dot-leading .md file is a record: schema-checked, reference-scanned, not an asset", async () => {
   const config = [
     "global:",
     "  assets:",
@@ -418,18 +465,21 @@ test("a dot-leading .md file is not a record: asset rules apply, content unscann
   ].join("\n");
   const root = await vault({
     "autofile.yml": config,
-    // Unparseable frontmatter and a dangling body link: were this a
-    // record, parse and reference findings would fire.
-    "notes/.hidden.md": "---\nbad: [\n---\n[[contacts/nowhere]]\n",
+    // No frontmatter and a dangling body link: schema and reference
+    // findings fire now that the file is a record; the asset ban does not.
+    "notes/.hidden.md": "[[contacts/nowhere]]\n",
     "notes/x.md": "---\ntitle: t\n---\n",
   });
   const result = await check(root);
-  const asset = byRule(result, "asset");
-  assert.equal(asset.length, 1);
-  assert.equal(asset[0]!.file, "notes/.hidden.md");
-  assert.deepEqual(byRule(result, "parse"), []);
-  assert.deepEqual(byRule(result, "schema"), []);
-  assert.deepEqual(byRule(result, "reference"), []);
+  assert.deepEqual(byRule(result, "asset"), []);
+  const schema = byRule(result, "schema");
+  assert.equal(schema.length, 1);
+  assert.equal(schema[0]!.file, "notes/.hidden.md");
+  assert.match(schema[0]!.message, /title.*required/);
+  const reference = byRule(result, "reference");
+  assert.equal(reference.length, 1);
+  assert.equal(reference[0]!.file, "notes/.hidden.md");
+  assert.match(reference[0]!.message, /contacts\/nowhere/);
   assert.equal(result.filesChecked, 2);
 });
 
@@ -658,7 +708,9 @@ test("a declared folder that is missing or empty is an empty warning", async () 
 // --- ignore ---
 
 // vault.md: "Ignored files are invisible to `check`" — not checked, not
-// counted, subtree included.
+// counted, subtree included. Ignore precedes recordhood: contacts/.draft.md
+// is a dot-leading record with broken frontmatter, and being ignored, it
+// is never parsed.
 test("ignored files and subtrees are invisible: unchecked and uncounted", async () => {
   const root = await vault({
     "autofile.yml": strictConfig,

@@ -13,11 +13,15 @@ import { starterConfig } from "./starter.js";
 // terminal — the spinner writes to the report stream and erases itself
 // before the report prints, so piped output is plain bytes.
 
-const usage = `Usage:
-  autofile init [path]   Create a vault: the starter autofile.yml and its folders
-  autofile check [path]  Check the vault and report findings
+const usage = `Usage: autofile <command> [path]
 
-[path] defaults to the current directory.
+Predictable filing for agents — scaffold and check Autofile vaults.
+
+  init         create a vault: starter config plus its folders
+  check        validate the vault and report findings
+  path         vault folder (default: current directory)
+  --help       show this help
+  --version    print the version
 `;
 
 const color = process.stdout.isTTY === true;

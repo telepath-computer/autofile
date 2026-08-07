@@ -105,6 +105,25 @@ test("a wikilink inside a larger frontmatter string is not checked", async () =>
   assert.deepEqual(references(result), []);
 });
 
+// vault.md: frontmatter parses to JSON values — an unquoted date next to a
+// wikilink must not disturb extraction.
+test("references extract from frontmatter containing unquoted dates", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/n.md": [
+      "---",
+      "date: 2026-08-05",
+      "spouse: '[[contacts/mira-holt]]'",
+      "---",
+      "",
+    ].join("\n"),
+  });
+  const result = await check(root);
+  const refs = references(result);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0]!.message, "[[contacts/mira-holt]] does not exist");
+});
+
 // --- body forms ---
 
 test("a dangling embed in the body warns with the embed spelling", async () => {
@@ -188,12 +207,114 @@ test("titled and whitespace-containing markdown targets are not references", asy
   assert.deepEqual(references(result), []);
 });
 
-// Bodies are scanned whole — v1 does not parse fences, so a dangling link
-// inside a code fence warns like any other.
-test("a dangling wikilink inside a code fence warns", async () => {
+// --- code is not scanned ---
+
+// vault.md: "Fenced code blocks and inline code spans are not scanned — a
+// link inside code is code."
+test("a dangling wikilink inside a code fence is not scanned", async () => {
   const root = await vault({
     "autofile.yml": config,
     "notes/n.md": ["```", "[[contacts/mira-holt]]", "```", ""].join("\n"),
+  });
+  const result = await check(root);
+  assert.deepEqual(references(result), []);
+});
+
+// The real-world case: shell test syntax inside a fence looks exactly like
+// a wikilink and must not produce a finding. The fence carries a language
+// info string.
+test("shell syntax inside a fenced block produces no finding", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/n.md": ["```bash", '[[ -z "$TMUX" && $- == *i* ]]', "```", ""].join("\n"),
+  });
+  const result = await check(root);
+  assert.deepEqual(references(result), []);
+});
+
+test("an inline code span is not scanned", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/n.md": "see `[[not/a/link]]` here\n",
+  });
+  const result = await check(root);
+  assert.deepEqual(references(result), []);
+});
+
+// A span opens and closes with equal-length backtick runs: a double-run
+// span may hold single backticks, and everything inside is code.
+test("a double-backtick span holding single backticks is not scanned", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/n.md": "`` `[[contacts/mira-holt]]` `` after\n",
+  });
+  const result = await check(root);
+  assert.deepEqual(references(result), []);
+});
+
+// An unmatched backtick run is literal text, not an opener that swallows
+// the rest of the line.
+test("an unmatched backtick does not hide a later reference", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/n.md": "a ` stray backtick and [[contacts/mira-holt]]\n",
+  });
+  const result = await check(root);
+  const refs = references(result);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0]!.message, "[[contacts/mira-holt]] does not exist");
+});
+
+// Blanking a fence must not blind the scanner to the prose around it.
+test("a dangling link in prose between two fences still warns", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/n.md": [
+      "```",
+      "[[contacts/inside-one]]",
+      "```",
+      "real [[contacts/mira-holt]]",
+      "```",
+      "[[contacts/inside-two]]",
+      "```",
+      "",
+    ].join("\n"),
+  });
+  const result = await check(root);
+  const refs = references(result);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0]!.message, "[[contacts/mira-holt]] does not exist");
+});
+
+// An unclosed fence runs to end of file, as in CommonMark: everything
+// after the opener is code.
+test("an unclosed fence swallows the rest of the body", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/n.md": ["before [[contacts/before-fence]]", "```", "[[contacts/inside]]", ""].join("\n"),
+  });
+  const result = await check(root);
+  const refs = references(result);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0]!.message, "[[contacts/before-fence]] does not exist");
+});
+
+test("a tilde fence is not scanned", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/n.md": ["~~~", "[[contacts/mira-holt]]", "~~~", ""].join("\n"),
+  });
+  const result = await check(root);
+  assert.deepEqual(references(result), []);
+});
+
+// Indented (4-space) code blocks stay scanned: the spec excludes fences
+// and spans only, and indentation in vault prose (nested lists, pasted
+// text) is too ambiguous to treat as code.
+test("a dangling link in a 4-space-indented line still warns", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/n.md": "    [[contacts/mira-holt]]\n",
   });
   const result = await check(root);
   const refs = references(result);
@@ -269,10 +390,9 @@ test("findings from a multiline adversarial body never carry a newline", async (
 
 // --- resolution ---
 
-// vault.md: "a target whose final segment contains no dot resolves
-// through `<target>.md`; any dot, leading included, means the literal
-// path".
-test("an extensionless target resolves through .md; an extension through the literal path", async () => {
+// vault.md: "the literal path first, then `<target>.md` when nothing sits
+// at the literal path".
+test("a target resolves through the literal path or the .md fallback", async () => {
   const root = await vault({
     "autofile.yml": config,
     "assets/cat.jpg": "x",
@@ -281,21 +401,77 @@ test("an extensionless target resolves through .md; an extension through the lit
   });
   const result = await check(root);
   const refs = references(result);
-  // assets/cat resolves through assets/cat.md, which does not exist —
-  // the extensionless rule never falls back to other extensions.
+  // assets/cat probes assets/cat, then assets/cat.md; neither exists —
+  // two probes in one order, never a search across other extensions.
   assert.equal(refs.length, 1);
   assert.equal(refs[0]!.message, "[[assets/cat]] does not exist");
 });
 
-// vault.md: "a folder at the target path does not satisfy it".
-test("a folder at the target path dangles", async () => {
+// vault.md: "`docs/v1.2` reaches `docs/v1.2.md`" — a record whose name
+// carries a dot is referenced extensionless like any other: the literal
+// probe misses and the .md fallback resolves.
+test("a dotted-basename record is reachable extensionless", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/v1.2.md": "",
+    "notes/n.md": "[[notes/v1.2]]\n",
+  });
+  const result = await check(root);
+  assert.deepEqual(references(result), []);
+});
+
+// A target already ending in .md gets the same two probes: the record
+// notes/x.md.md is referenced extensionless as [[notes/x.md]], resolving
+// through the fallback when no file sits at the literal path.
+test("a target ending in .md falls back to <target>.md.md", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/x.md.md": "",
+    "notes/n.md": "[[notes/x.md]]\n",
+  });
+  const result = await check(root);
+  assert.deepEqual(references(result), []);
+});
+
+// The literal path is probed first: an extensionless file beside its .md
+// sibling resolves the reference. When both probes would hit, which one
+// won is invisible to dangling detection — the order shows in the tests
+// either side, where exactly one probe hits.
+test("a literal file beside its .md sibling resolves", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/v1.2": "raw",
+    "notes/v1.2.md": "",
+    "notes/n.md": "[[notes/v1.2]]\n",
+  });
+  const result = await check(root);
+  assert.deepEqual(references(result), []);
+});
+
+// vault.md: "A folder at the target path does not satisfy a reference" —
+// and it does not stop the .md fallback either: nothing that could
+// satisfy the reference sits at the literal path, so the second probe
+// runs and finds the record.
+test("a folder at the literal path does not stop the .md fallback", async () => {
+  const root = await vault({
+    "autofile.yml": config,
+    "notes/v1.2/x.md": "",
+    "notes/v1.2.md": "",
+    "notes/n.md": "[[notes/v1.2]]\n",
+  });
+  const result = await check(root);
+  assert.deepEqual(references(result), []);
+});
+
+// vault.md: "A folder at the target path does not satisfy a reference".
+test("a folder at the target path dangles when the fallback misses too", async () => {
   const root = await vault({
     "autofile.yml": config,
     "notes/sub/x.md": "",
     "notes/sub.d/y.md": "",
-    // notes/sub resolves through notes/sub.md; notes/sub.d has an
-    // extension, so it resolves through the literal path — where a folder
-    // sits, and a folder does not satisfy a reference.
+    // Each target probes the literal path — a folder, which does not
+    // satisfy a reference — and then the .md fallback (notes/sub.md,
+    // notes/sub.d.md), which does not exist.
     "notes/n.md": "[[notes/sub]] [[notes/sub.d]]\n",
   });
   const result = await check(root);
@@ -319,9 +495,9 @@ test("a reference to an ignored file is not dangling", async () => {
   assert.equal(result.filesChecked, 1);
 });
 
-// vault.md: "any dot, leading included, means the literal path, so
-// `assets/.env` is reached as written" — and an ignored file exists, so
-// the reference is not dangling.
+// vault.md: "`assets/.env` is reached as written" — the literal probe
+// hits first, and an ignored file exists, so the reference is not
+// dangling.
 test("a dot-leading target resolves through the literal path", async () => {
   const root = await vault({
     "autofile.yml": config,
@@ -332,9 +508,10 @@ test("a dot-leading target resolves through the literal path", async () => {
   assert.deepEqual(references(result), []);
 });
 
-test("a dot-leading target with no file at the literal path dangles", async () => {
+test("a dot-leading target dangles when neither probe hits", async () => {
   const root = await vault({
     "autofile.yml": config,
+    // Neither assets/.env nor the fallback assets/.env.md exists.
     "notes/n.md": "[[assets/.env]]\n",
   });
   const result = await check(root);
@@ -343,19 +520,17 @@ test("a dot-leading target with no file at the literal path dangles", async () =
   assert.equal(refs[0]!.message, "[[assets/.env]] does not exist");
 });
 
-// A dot-leading target never resolves through `<target>.md`, so the
-// extensionless spelling cannot reach a dot-leading record file — only the
-// literal spelling can.
-test("a dot-leading extensionless spelling misses the .md file; the literal spelling reaches it", async () => {
+// A dot-leading .md file — ignored here, but ignored files exist — is
+// reached by the fallback extensionless: [[notes/.hidden]] probes
+// notes/.hidden, then notes/.hidden.md — a file. Both spellings resolve.
+test("a dot-leading .md file is reachable extensionless and literally", async () => {
   const root = await vault({
     "autofile.yml": config,
     "notes/.hidden.md": "",
     "notes/n.md": "[[notes/.hidden]] [[notes/.hidden.md]]\n",
   });
   const result = await check(root);
-  const refs = references(result);
-  assert.equal(refs.length, 1);
-  assert.equal(refs[0]!.message, "[[notes/.hidden]] does not exist");
+  assert.deepEqual(references(result), []);
 });
 
 // cli.md: "Forward links are allowed, so this never fails the check."

@@ -2,10 +2,10 @@ import { lstat, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ErrorObject } from "ajv";
-import { load } from "js-yaml";
+import { CORE_SCHEMA, load } from "js-yaml";
 
 import { loadConfig, resolve, type Config, type RecordsBlock } from "./config.js";
-import { candidatePath, extractReferences } from "./references.js";
+import { candidatePaths, extractReferences } from "./references.js";
 
 // The findings engine: walks a vault and returns findings as data, in a
 // deterministic order — violations before warnings, then by file, then by
@@ -75,13 +75,12 @@ export async function check(
     opts.onFile?.(index + 1);
     checkFilename(config, file, findings);
     const blocks = resolve(config, file);
-    // A record is a `.md` file whose name does not begin with a dot: a
-    // dot-leading name resolves literally, so no reference could reach it
-    // as a record (spec/vault.md). Dot-leading `.md` files — ".md" itself
-    // included — answer to asset rules and are never parse-, schema-,
-    // body-, or reference-checked.
+    // A record is any `.md` file, dot-leading names included
+    // (spec/vault.md). A file named exactly ".md" is not one: a leading
+    // dot opens no extension, so ".md" is a whole name with no
+    // extension — it answers to asset rules.
     const name = file.slice(file.lastIndexOf("/") + 1);
-    if (name.endsWith(".md") && !name.startsWith(".")) {
+    if (name.endsWith(".md") && name !== ".md") {
       let content: string | undefined;
       try {
         content = await readFile(join(vaultRoot, file), "utf8");
@@ -211,9 +210,9 @@ function stripExtension(name: string): string {
   const dot = name.lastIndexOf(".");
   // A leading dot opens no extension: ".env" is a whole name, not an
   // empty stem with an extension. This rule serves filename-pattern
-  // matching only; reference resolution (candidatePath) deliberately
-  // differs — there, any dot in the final segment, leading included,
-  // means the literal path.
+  // matching only; reference resolution (candidatePaths) works
+  // differently — there, the literal path is probed first, then
+  // `<target>.md`.
   return dot > 0 ? name.slice(0, dot) : name;
 }
 
@@ -229,8 +228,10 @@ function checkRecord(
   if (frontmatterSource !== undefined) {
     try {
       // A record with no frontmatter — or an empty block — is checked as
-      // an empty object (spec/vault.md).
-      frontmatter = load(frontmatterSource) ?? {};
+      // an empty object. CORE_SCHEMA parses to JSON values: YAML's
+      // timestamp type is not applied, so an unquoted date stays a string
+      // (spec/vault.md).
+      frontmatter = load(frontmatterSource, { schema: CORE_SCHEMA }) ?? {};
     } catch (error) {
       findings.push({
         rule: "parse",
@@ -273,11 +274,12 @@ function checkRecord(
 
 /**
  * Checks a record's references — a dangling one is a warning, one finding
- * per distinct spelling per record (spec/cli.md). Resolution is by lstat,
- * so an ignored file satisfies a reference and a folder or symlink does
- * not; a target no vault path could satisfy dangles without touching the
- * disk, which keeps `..` and absolute targets from reading outside the
- * vault root.
+ * per distinct spelling per record (spec/cli.md). Each candidate is
+ * probed by lstat in order, the literal path then the `.md` fallback, so
+ * an ignored file satisfies a reference and a folder or symlink does
+ * not — nor does a folder stop the fallback behind it. A target no vault
+ * path could satisfy dangles without touching the disk, which keeps `..`
+ * and absolute targets from reading outside the vault root.
  */
 async function checkReferences(
   vaultRoot: string,
@@ -291,8 +293,14 @@ async function checkReferences(
   for (const reference of extractReferences(frontmatterSource, body)) {
     if (seen.has(reference.asWritten)) continue;
     seen.add(reference.asWritten);
-    const candidate = candidatePath(reference.target);
-    if (candidate !== undefined && (await fileExists(vaultRoot, candidate, existsCache))) continue;
+    let resolved = false;
+    for (const candidate of candidatePaths(reference.target)) {
+      if (await fileExists(vaultRoot, candidate, existsCache)) {
+        resolved = true;
+        break;
+      }
+    }
+    if (resolved) continue;
     findings.push({
       rule: "reference",
       severity: "warning",
