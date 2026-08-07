@@ -8,9 +8,7 @@
     "node": ">=22.18"
   },
   "files": [
-    "dist",
-    "!dist/**/*.test.*",
-    "!dist/*.tsbuildinfo"
+    "dist"
   ],
   "exports": {
     ".": {
@@ -19,15 +17,14 @@
     }
   },
   "bin": {
-    "autofile-md": "./dist/server/cli.js"
+    "autofile-md": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -b",
-    "test": "tsc -b && node --test \"src/**/*.test.ts\"",
-    "typecheck": "tsc -b"
+    "build": "tsc",
+    "pretest": "npm run build",
+    "test": "node --test \"test/**/*.test.ts\""
   },
   "dependencies": {
-    "@autofile/core": "^0.1.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "yaml": "^2.9.0"

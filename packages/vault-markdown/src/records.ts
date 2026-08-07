@@ -3,9 +3,10 @@
  * and the wikilinks in the header that are references.
  */
 
-import type { Fields } from '@autofile/core';
-import { isReference } from '@autofile/core';
 import { parse, stringify } from 'yaml';
+
+import type { Fields } from './model.ts';
+import { isReference } from './references.ts';
 
 /** The extension that makes a file in a record collection a record. */
 export const MARKDOWN = '.md';

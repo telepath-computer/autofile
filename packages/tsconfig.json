@@ -1,7 +1,0 @@
-{
-  // Builds every package, in the order their references imply. npm iterates
-  // workspaces in directory order, which is not dependency order, so the
-  // packages are built through this rather than through `--workspaces`.
-  "files": [],
-  "references": [{ "path": "./core" }, { "path": "./vault-markdown" }]
-}

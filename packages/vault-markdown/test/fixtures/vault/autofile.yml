@@ -1,0 +1,34 @@
+collections:
+  contacts:
+    type: record
+    title: Contacts
+    description: |
+      People and organizations. One record per person or organization.
+    schema:
+      required: [name, type]
+      properties:
+        name: { type: string }
+        type: { enum: [person, organization] }
+    body: false
+
+  events:
+    type: record
+    title: Events
+    description: |
+      Dated records of things that happened: meetings, calls, visits.
+    schema:
+      required: [title, date]
+      properties:
+        title: { type: string }
+        date: { type: string, format: date }
+
+  notes:
+    type: record
+    title: Notes
+    description: |
+      Everything worth keeping that is neither a contact nor an event.
+
+  blobs:
+    type: blob
+    description: |
+      Everything that is not a record: scans, images, downloaded documents.

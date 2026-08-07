@@ -4,7 +4,7 @@ Deferred design. Nothing in `spec/` refers to proxying.
 
 ## The idea
 
-A program that answers [the HTTP API](../../spec/http-api.md) and forwards to
+A program that answers [the HTTP API](../../spec/api.md) and forwards to
 another vault is itself a vault, as far as any client can tell. Nothing about
 the contract says a vault has to store anything.
 

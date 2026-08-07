@@ -1,4 +1,8 @@
 {
+  // The compiler options every package shares, and the config that checks the
+  // whole repository: sources and tests both, since a test that no longer
+  // type-checks is a test that no longer describes the code. Nothing is emitted
+  // from here — a package emits its own `dist` through its own config.
   "compilerOptions": {
     "target": "es2023",
     "lib": ["es2023"],
@@ -21,11 +25,8 @@
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
 
-    "declaration": true,
-    "sourceMap": true,
-    "outDir": "dist",
-    "rootDir": "src",
+    "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src"]
+  "include": ["packages/*/src", "packages/*/test"]
 }

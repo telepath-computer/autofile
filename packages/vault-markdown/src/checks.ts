@@ -5,14 +5,15 @@
  * accepted what `validate` then called a violation would write a vault that
  * fails its own check.
  *
- * `collision` is not here: it is about a whole collection rather than one key,
- * so only a walk over all of them can find it.
+ * `collision` is not here: it is about the whole vault rather than one key, so
+ * only a walk over everything in it can find it.
  */
 
-import type { Fields, Finding } from '@autofile/core';
 import type { ErrorObject, ValidateFunction } from 'ajv/dist/2020.js';
 
 import type { MarkdownCollection } from './config.ts';
+import type { Finding } from './findings.ts';
+import type { Fields } from './model.ts';
 import { BODY } from './records.ts';
 
 /**

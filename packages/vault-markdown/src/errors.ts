@@ -5,7 +5,7 @@
  * reading English out of a message.
  */
 
-import type { Finding } from '@autofile/core';
+import type { Finding } from './findings.ts';
 
 /**
  * The vault could not be opened: its `autofile.yml` cannot be read, does not
@@ -32,6 +32,22 @@ export class UnknownCollectionError extends Error {
     super(`no collection named '${collection}'`);
     this.name = 'UnknownCollectionError';
     this.collection = collection;
+  }
+}
+
+/**
+ * Nothing is filed at an identity the caller expected something at. `get`
+ * answers null for the same absence, since a caller asking what is there has
+ * somewhere to put the answer; a caller telling the vault to remove something
+ * has not, and would otherwise not be told it removed nothing.
+ */
+export class NotFoundError extends Error {
+  readonly id: string;
+
+  constructor(id: string) {
+    super(`nothing is filed at '${id}'`);
+    this.name = 'NotFoundError';
+    this.id = id;
   }
 }
 

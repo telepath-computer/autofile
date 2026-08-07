@@ -9,8 +9,6 @@ import { mkdir, readFile, readdir, rmdir, stat, unlink, writeFile } from 'node:f
 import type { Stats } from 'node:fs';
 import { basename, dirname, join, relative, sep } from 'node:path';
 
-import type { Blob, Fields, Finding, Record, Vault } from '@autofile/core';
-import { splitIdentity } from '@autofile/core';
 import type { ValidateFunction } from 'ajv/dist/2020.js';
 
 import { checkFields, checkKey, violation } from './checks.ts';
@@ -18,14 +16,18 @@ import { type MarkdownCollection, type VaultConfig, readConfig } from './config.
 import {
   InvalidContentError,
   InvalidIdentityError,
+  NotFoundError,
   RecordParseError,
   UnknownCollectionError,
   WrongContentError,
 } from './errors.ts';
+import type { Finding } from './findings.ts';
+import { splitIdentity } from './identity.ts';
 import { mediaType } from './media.ts';
+import type { Blob, Fields, Record } from './model.ts';
 import { MARKDOWN, readFields, writeFields } from './records.ts';
 
-export class MarkdownVault implements Vault {
+export class MarkdownVault {
   readonly root: string;
   readonly collections: { [name: string]: MarkdownCollection };
 
@@ -134,17 +136,19 @@ export class MarkdownVault implements Vault {
     const { collection, key } = this.#resolve(id);
 
     // A `.md` file in a record collection is a record, so the blob collection
-    // does not hold it and removing it is not this identity's to do.
-    if (collection.type === 'blob' && isRecordFile(this.collections, key)) return;
+    // does not hold it: there is nothing at this identity to remove.
+    if (collection.type === 'blob' && isRecordFile(this.collections, key)) {
+      throw new NotFoundError(id);
+    }
 
     const file =
       collection.type === 'record'
         ? join(this.root, collection.name, `${key}${MARKDOWN}`)
         : join(this.root, key);
 
-    // Removing what is not there is not an error: `remove` answers with nothing
-    // either way, so a caller could not tell the two apart to act on it.
-    if ((await statFile(file)) === null) return;
+    // Removing what is not there is an error, rather than answering differently
+    // from `get` about the same absence.
+    if ((await statFile(file)) === null) throw new NotFoundError(id);
     await unlink(file);
 
     // Then any parent folder the file leaves empty, stopping at a collection's
@@ -173,9 +177,16 @@ export class MarkdownVault implements Vault {
       compareBytewise(a.name, b.name),
     );
 
+    // Every collection is walked before anything is reported, because a
+    // collision is over the whole vault: records and blobs share one tree, so a
+    // record's file can collide with a blob's.
+    const found = new Map<string, { key: string; file: string; stats: Stats }[]>();
+    for (const collection of declared) found.set(collection.name, await this.#entries(collection));
+    const collided = collisions(this.collections, found);
+
     for (const collection of declared) {
       const name = collection.name;
-      const entries = await this.#entries(collection);
+      const entries = found.get(name) ?? [];
 
       if (entries.length === 0) {
         // Legitimate when a collection is declared before anything is filed
@@ -189,16 +200,14 @@ export class MarkdownVault implements Vault {
         continue;
       }
 
-      const collided = collisions(entries.map((entry) => entry.key));
-
       for (const { key, file } of entries) {
         violations.push(...checkKey(name, key, collection.type === 'record' ? MARKDOWN : ''));
 
-        const others = collided.get(key);
+        const others = collided.get(`${name}/${key}`);
         if (others !== undefined) {
           const which = others.map((other) => `'${other}'`).join(', ');
           violations.push(
-            violation('collision', name, key, `its key differs only by case from ${which}`),
+            violation('collision', name, key, `its file differs only by case from ${which}`),
           );
         }
 
@@ -291,21 +300,32 @@ export class MarkdownVault implements Vault {
 }
 
 /**
- * The keys that differ from another only by case, each mapped to the others it
- * would be one file with on a filesystem that does not tell them apart. A key
- * with no such twin is not in the map at all.
+ * The identities whose files differ from another's only by case, each mapped to
+ * the others it would be one file with on a filesystem that does not tell them
+ * apart. An identity with no such twin is not in the map at all.
+ *
+ * What is folded is the file each identity claims rather than its key: a
+ * record's is its key under its collection's folder with `.md` on the end, a
+ * blob's is its key from the root. So the whole vault is one namespace here,
+ * which is the one the filesystem holds it in.
  */
-function collisions(keys: string[]): Map<string, string[]> {
+function collisions(
+  collections: { [name: string]: MarkdownCollection },
+  entries: Map<string, { key: string }[]>,
+): Map<string, string[]> {
   const folded = new Map<string, string[]>();
-  for (const key of keys) {
-    const fold = key.toLowerCase();
-    folded.set(fold, [...(folded.get(fold) ?? []), key]);
+  for (const [name, found] of entries) {
+    const record = collections[name]?.type === 'record';
+    for (const { key } of found) {
+      const fold = (record ? `${name}/${key}${MARKDOWN}` : key).toLowerCase();
+      folded.set(fold, [...(folded.get(fold) ?? []), `${name}/${key}`]);
+    }
   }
 
   const collided = new Map<string, string[]>();
   for (const group of folded.values()) {
     if (group.length < 2) continue;
-    for (const key of group) collided.set(key, group.filter((other) => other !== key));
+    for (const id of group) collided.set(id, group.filter((other) => other !== id));
   }
   return collided;
 }

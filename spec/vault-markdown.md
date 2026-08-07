@@ -2,7 +2,7 @@
 
 A *vault* kept as a folder of markdown files. It holds the *collections*
 described by [the vault spec](vault.md); this says how they are stored, and how
-the folder is served as [an Autofile vault](http-api.md).
+the folder is served as [an Autofile vault](api.md).
 
 The folder and the API are two ends of one contract. Obsidian, Dropbox and
 `git diff` see the folder; everything else sees the API; and the program in the
@@ -108,8 +108,9 @@ people edit.
 ## References
 
 `[[…]]` is this *vault*'s spelling of a *reference*. A *field* whose value is a
-wikilink is a *reference* to the *identity* inside it: `[[contacts/priya-narayan]]`
-becomes `{ "$ref": "contacts/priya-narayan" }`.
+wikilink is a *reference* to the *identity* inside it, so
+`related: "[[contacts/priya-narayan]]"` is a *field* pointing at that *record*
+rather than a string containing its *identity*.
 
 Only a whole value converts. A wikilink inside prose is part of that prose —
 `body` is markdown, and its links are markdown's.
@@ -186,7 +187,7 @@ All of those are *violations*. One *warning*:
 ## Interface
 
 The types below are this *vault*'s own. What a *record* or a *blob* looks like
-to a consumer is [the API](http-api.md)'s to say; these are the shapes the
+to a consumer is [the API](api.md)'s to say; these are the shapes the
 program holds in memory between the folder and the wire.
 
 ```ts
@@ -244,7 +245,7 @@ error from `get` and from `list`. `null` means the *collection* holds no such
 ## Serving
 
 `autofile-md serve` opens the folder and answers [the HTTP
-API](http-api.md) for it, holding it open across requests.
+API](api.md) for it, holding it open across requests.
 
 ```
 autofile-md serve --host 127.0.0.1 --port 8787

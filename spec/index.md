@@ -22,7 +22,7 @@ Its goals:
 - [Terms](terms.md) — the vocabulary the specs are written in.
 - [Vault](vault.md) — the model both contracts are written in: collections of
   records and blobs, how they are identified, and how they are referenced.
-- [HTTP API](http-api.md) — the contract a vault answers, and what a vault is
+- [HTTP API](api.md) — the contract a vault answers, and what a vault is
   from outside.
 - [Markdown vault](vault-markdown.md) — the other contract: a vault kept as a
   folder, and the command that serves it.
@@ -33,7 +33,7 @@ Its goals:
 ## Architecture
 
 There is no plugin architecture and no shared vault library. What holds the
-system together is [the API](http-api.md), so a second implementation is a
+system together is [the API](api.md), so a second implementation is a
 second program answering it rather than a package loaded into this one.
 
 Autofile is written in TypeScript for Node, as npm workspaces under

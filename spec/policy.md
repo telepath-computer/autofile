@@ -45,7 +45,7 @@ no longer deserves while the code quietly holds the real rules.
 ## One owner per rule
 
 A rule is stated once, by the spec that owns it, and referred to from anywhere
-else rather than restated. `http-api.md` does not repeat the model it serves.
+else rather than restated. `api.md` does not repeat the model it serves.
 
 ## Terms
 

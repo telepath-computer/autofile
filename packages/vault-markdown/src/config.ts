@@ -7,13 +7,13 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import type { Collection } from '@autofile/core';
 import ajvModule from 'ajv/dist/2020.js';
 import type { ErrorObject, SchemaObject, ValidateFunction } from 'ajv/dist/2020.js';
 import ajvFormatsModule from 'ajv-formats';
 import { parse } from 'yaml';
 
 import { VaultConfigError } from './errors.ts';
+import type { Collection } from './model.ts';
 
 // Both packages are CommonJS with `module.exports` set to the export itself, so
 // Node's ESM interop hands back the class and the function. TypeScript can only
@@ -130,8 +130,21 @@ export async function readConfig(root: string): Promise<VaultConfig> {
   const collections: { [name: string]: MarkdownCollection } = {};
   const schemas: { [name: string]: ValidateFunction } = {};
   let blobs: string | undefined;
+  const folded = new Map<string, string>();
 
   for (const [name, entry] of Object.entries(config.collections ?? {})) {
+    // Two names differing only by case would be one folder, so the second is
+    // refused rather than filed into the first.
+    const fold = name.toLowerCase();
+    const already = folded.get(fold);
+    if (already !== undefined) {
+      throw new VaultConfigError(
+        `${CONFIG_FILE} declares two collections whose names differ only by case, ` +
+          `'${already}' and '${name}'`,
+      );
+    }
+    folded.set(fold, name);
+
     if (entry.type === 'blob') {
       // Two blob collections would claim the same keys with no rule for which
       // wins, so the second is refused rather than shadowing the first.

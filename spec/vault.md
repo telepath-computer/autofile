@@ -57,17 +57,11 @@ refuses the second rather than quietly answering with the first.
 
 ## References
 
-A *reference* is a *field* value pointing at an *identity*: an object whose only
-key is `$ref`, holding that *identity*. An object carrying anything alongside
-`$ref` is not a *reference* but ordinary data, since a form that dropped what it
-could not represent would lose it silently.
+A *field* value may be a *reference*: something that points at an *identity*
+rather than merely containing a string. `contacts/priya-narayan` as text and
+`contacts/priya-narayan` as a link to that *record* are different things, and a
+*field* holding one is not holding the other.
 
-```json
-"related":    [{ "$ref": "events/2026-06-02-zine-paper-chat" }],
-"photo":      { "$ref": "blobs/contacts/priya-narayan.jpg" },
-"filed_from": "contacts/priya-narayan"
-```
-
-`related` and `photo` are *references*. `filed_from` is a string.
-
-A *reference* may appear at any depth in a *field*'s value.
+How a *reference* is written is each contract's own — `{ "$ref": … }` over
+[the API](api.md), `[[…]]` in [a markdown vault](vault-markdown.md) — and a
+*reference* may appear at any depth in a *field*'s value.
