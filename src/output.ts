@@ -1,6 +1,6 @@
 import pc from "picocolors";
 
-import type { CheckResult, Finding } from "./check.js";
+import type { CheckResult } from "./check.js";
 
 // Report rendering and the loading spinner (spec/cli.md "Output").
 // Renderers are pure: the caller decides color, never the renderer, and
@@ -13,79 +13,75 @@ export function renderCheckReport(result: CheckResult, opts: { color: boolean })
   const files = count(result.filesChecked, "file");
   if (result.findings.length === 0) return `${c.green("✓")} ${c.dim(files)}\n`;
 
-  // The file column is padded to the longest file in the report; findings
-  // without a file (config) render as marker, then rule prefix and message.
-  // Padding counts UTF-16 code units (String#length), so wide glyphs (CJK,
-  // emoji) can drift visually — accepted for determinism over a wcwidth
-  // dependency.
-  const width = Math.max(...result.findings.map((f) => f.file?.length ?? 0));
+  // The file column is padded to the longest file in the report.
+  // Combining marks occupy no column. Wide glyphs (CJK, emoji) can still
+  // drift visually — accepted for determinism over a wcwidth dependency.
+  const width = result.findings.reduce((widest, f) => Math.max(widest, fileWidth(f.file)), 0);
   const lines = result.findings.map((finding) => {
     const paint = finding.severity === "violation" ? c.red : c.yellow;
     const marker = paint(finding.severity === "violation" ? "✗" : "!");
     const prefix = paint(`${finding.rule}:`);
-    if (finding.file === undefined) return `${marker} ${prefix} ${finding.message}`;
-    const gap = " ".repeat(width - finding.file.length + 2);
-    return `${marker} ${c.bold(finding.file)}${gap}${prefix} ${finding.message}`;
+    const gap = " ".repeat(width - fileWidth(finding.file) + 2);
+    const message = finding.message.replace(/\s+/gu, " ").trim();
+    return `${marker} ${c.bold(finding.file)}${gap}${prefix} ${message}`;
   });
 
-  const violations = result.findings.filter(isViolation).length;
+  const violations = result.findings.filter((f) => f.severity === "violation").length;
   const warnings = result.findings.length - violations;
-  const summary = c.dim(
-    `${count(violations, "violation")} · ${count(warnings, "warning")} · ${files}`,
-  );
+  const parts = [
+    violations > 0 ? count(violations, "violation") : undefined,
+    warnings > 0 ? count(warnings, "warning") : undefined,
+    files,
+  ].filter((part): part is string => part !== undefined);
+  const summary = c.dim(parts.join(" · "));
   return `${lines.join("\n")}\n\n${summary}\n`;
 }
 
-function isViolation(finding: Finding): boolean {
-  return finding.severity === "violation";
+function fileWidth(file: string): number {
+  return file.replace(/\p{M}/gu, "").length;
 }
 
-function count(n: number, noun: string): string {
+export function count(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
-/** Renders the `autofile init` report; folders get a trailing slash. */
-export function renderInitReport(
-  created: { config: string; folders: string[] },
-  opts: { color: boolean },
-): string {
+/** Renders the `autofile init` report over the path init created. */
+export function renderInitReport(created: string, opts: { color: boolean }): string {
   const c = pc.createColors(opts.color);
-  const entries = [created.config, ...created.folders.map((folder) => `${folder}/`)];
-  const lines = entries.map((entry) => `  ${c.green(entry)}`);
-  return `Initialized an Autofile vault.\n\n${lines.join("\n")}\n`;
+  return `Initialized an Autofile vault.\n\n  ${c.green(created)}\n`;
 }
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const CLEAR_LINE = "\r\x1b[2K";
 const styled = pc.createColors(true);
+/** The wait before the loading state appears at all (spec/cli.md "Output"). */
+const DELAY_MS = 200;
+/** How often the frame advances once it has. */
+const INTERVAL_MS = 80;
 
-/** The slice of a write stream the spinner needs; `process.stderr` fits. */
+/** The slice of the report stream the spinner needs; `process.stdout` fits. */
 export interface SpinnerStream {
   isTTY?: boolean;
   write(chunk: string): boolean;
 }
 
 /**
- * The loading state: nothing for `delayMs`, then a braille spinner — cyan
- * glyph, dim message — redrawn in place every `intervalMs`. `update`
- * changes the message shown on the next frame; `stop` erases the line,
- * leaving no residue. `start` restarts: it stops any spinner already
- * running, then begins a fresh delay and frame sequence — so timers are
- * never orphaned. On a non-TTY stream it never writes at all.
+ * The loading state: nothing for 200 ms, then a braille spinner — cyan
+ * glyph, dim message — redrawn in place every 80 ms. `update` changes the
+ * message shown on the next frame; `stop` erases the line, leaving no
+ * residue. `start` restarts: it stops any spinner already running, then
+ * begins a fresh delay and frame sequence — so timers are never orphaned.
+ * On a non-TTY stream it never writes at all.
  */
 export class Spinner {
   private readonly stream: SpinnerStream;
-  private readonly delayMs: number;
-  private readonly intervalMs: number;
   private message = "";
   private frame = 0;
   private delay: NodeJS.Timeout | undefined;
   private interval: NodeJS.Timeout | undefined;
 
-  constructor(stream: SpinnerStream, opts: { delayMs?: number; intervalMs?: number } = {}) {
+  constructor(stream: SpinnerStream) {
     this.stream = stream;
-    this.delayMs = opts.delayMs ?? 200;
-    this.intervalMs = opts.intervalMs ?? 80;
   }
 
   start(label: string): void {
@@ -98,8 +94,8 @@ export class Spinner {
       this.interval = setInterval(() => {
         this.frame = (this.frame + 1) % FRAMES.length;
         this.draw();
-      }, this.intervalMs);
-    }, this.delayMs);
+      }, INTERVAL_MS);
+    }, DELAY_MS);
   }
 
   update(message: string): void {

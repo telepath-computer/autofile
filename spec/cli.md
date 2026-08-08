@@ -80,6 +80,13 @@ findings of the same rule.
 
 Exit code is zero when there are no violations; warnings do not change it.
 
+`check` scales linearly with the vault, because the vaults it is for hold
+tens of thousands of notes. Link targets therefore resolve against an index
+built once per run — a suffix match ends at a basename, so a map from
+basename to the paths carrying it answers one in a lookup. Scanning the
+file list per link is quadratic and rules the tool out of its own headline
+case.
+
 ```
 ⠋ Checking… 42 files
 ```
@@ -87,20 +94,22 @@ Exit code is zero when there are no violations; warnings do not change it.
 The report is one line per finding: a marker (`✗` violation, `!` warning),
 the file, then what is wrong, prefixed by its rule. Violations before
 warnings, then ordered by path, rule, and message. The file column is
-aligned; a `config` finding names no file and leaves it empty.
+aligned.
 
 ```
-✗ contacts/jules-verne.md            schema: title must be a string
 ✗ contacts/Author Notes.txt          extensions: .txt is not among the extensions this path holds
+✗ contacts/jules-verne.md            schema: title must be a string
 ! events/2026-08-07-studio-visit.md  internal_links.resolve: [[contacts/mira-holt]] does not exist
 
 2 violations · 1 warning · 68 files
 ```
 
-A `config` finding stands alone, its file column empty and nothing counted:
+A `config` finding names `autofile.yml`, and its message names the place
+inside it — a path key, which already begins with `/`, and any setting
+dotted onto it:
 
 ```
-✗  config: paths./contacts: unknown key "shema"
+✗ autofile.yml  config: /contacts has an unknown key "shema"
 
 1 violation · 0 files
 ```

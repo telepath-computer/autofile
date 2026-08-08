@@ -14,7 +14,8 @@ once. It says what to do; why the system is shaped this way belongs here.
   outlive the current task or might be needed for retrieval later. Filing
   is proactive, not only on request.
 - That a config may govern only part of a vault. Paths it does not declare
-  are not the agent's to file into.
+  are not the agent's to file into, and a declared path with no description
+  scopes rules rather than inviting filing.
 - Creating a vault with `autofile init`, and that its paths are then
   decided with the user by editing `autofile.yml` together.
 - How internal links are written: the path to the note without the `.md`

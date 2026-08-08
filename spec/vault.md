@@ -13,6 +13,11 @@ A note is a markdown file in the vault. The extension is exactly `.md`;
 validates. What a note holds — one person, one day, a running log — is the
 path description's to say.
 
+A name's extension is what follows its last dot, unless the name begins
+with that dot: `.env` and `.md` alike have none. So a file named `.md` is
+not a note, and the same reading serves `extensions` and the name
+`filenames.pattern` matches.
+
 A note has two parts, both optional:
 
 - **Frontmatter** — a YAML block opened and closed by a `---` line at the
@@ -79,7 +84,9 @@ An entry may declare any of the settings below.
 What belongs in this scope rather than another, and how to file it — a
 filing instruction rather than documentation.
 
-**Required** on every entry.
+**Default:** none. An entry without one scopes rules rather than inviting
+filing: nothing is filed there, and a file already there answers to the
+nearest description above it.
 
 #### `schema`
 
@@ -148,7 +155,11 @@ resolves.
   therefore keeps an inherited `resolve: false`.
 - A setting's *value* is taken whole. A nearer `schema` replaces an
   inherited one rather than merging with it.
-- A setting written as `null` is unconstrained; omitting it inherits.
+- Writing a setting overrides what an ancestor said; omitting it inherits.
+  An override is a value the setting takes: a boolean is written `true` or
+  `false`, and a setting that can be none — a `schema`, a pattern,
+  `extensions`, a link format — is written `null`, which is also its
+  default.
 - A folder's rules apply to its children, not to the folder itself.
 
 At their defaults the settings constrain nothing, with one exception:
@@ -164,10 +175,10 @@ It may be written as any of:
 - a markdown link `[label](contacts/priya-narayan)` or image
   `![alt](assets/cat.jpg)`. A URL target is not an internal link.
 
-A wikilink may carry an alias or heading —
-`[[contacts/priya-narayan|Priya]]`, `[[contacts/priya-narayan#history]]` —
-and the link is the part before the first `|` or `#`. Markdown targets are
-URL-decoded.
+A link may carry a heading, and a wikilink may also carry an alias —
+`[[contacts/priya-narayan|Priya]]`, `[[contacts/priya-narayan#history]]`,
+`[Priya](contacts/priya-narayan#history)`. The link is the part before the
+first `|` or `#`. Markdown targets are URL-decoded before that.
 
 A target is matched against the vault as a path suffix: `contacts/priya`
 finds a file whose path ends in those segments wherever it sits, and a bare
@@ -231,7 +242,9 @@ Two conditions are advisory and leave a vault valid either way:
 
 - A link that resolves to nothing, since a note may be linked before it is
   filed — `internal_links.resolve`.
-- A declared path with no folder yet — `empty`.
+- A declared path with no folder yet — `missing`. A folder that exists
+  but holds nothing is not one: a mistyped key leaves no folder at all, so
+  an empty folder carries no signal beyond "nothing filed here yet".
 
 Patterns are JavaScript `RegExp` syntax. No rule governs `autofile.yml`
 itself.

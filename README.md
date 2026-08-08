@@ -106,5 +106,5 @@ offset that Obsidian does not write; `internal-link` types a link, and
 
 ## Spec
 
-[`spec/index.md`](spec/index.md) is authoritative: the vault format, the
-CLI, and what the skill must cover.
+[`spec/index.md`](https://github.com/telepath-computer/autofile/blob/main/spec/index.md)
+is authoritative: the vault format, the CLI, and what the skill must cover.

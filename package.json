@@ -3,6 +3,9 @@
   "version": "0.0.1",
   "description": "Predictable filing for agents.",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "autofile": "./dist/cli.js"
@@ -11,16 +14,15 @@
     ".": "./dist/index.js"
   },
   "files": [
-    "dist",
-    "!dist/test"
+    "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepack": "npm run build",
     "prelint": "npm run build",
     "lint": "tsc -p tsconfig.json",
-    "pretest": "npm run build && tsc -p tsconfig.test.json",
-    "test": "node --test dist/test/*.test.js"
+    "pretest": "npm run build",
+    "test": "node --test test/*.test.ts"
   },
   "engines": {
     "node": ">=20"
