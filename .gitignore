@@ -1,3 +1,9 @@
 node_modules/
 .DS_Store
 dist/
+
+# Compiled output belongs in dist/. A stray `tsc` without -p drops it beside
+# the sources instead; ignore it there so it is never committed.
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts

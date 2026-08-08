@@ -4,351 +4,196 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { loadConfig, parseConfig, starterConfig, type Config } from "@telepath-computer/autofile";
+import { loadConfig, parseConfig, type Config } from "../dist/config.js";
 
-// spec/vault.md example config, verbatim.
-const vaultExample = String.raw`global:
-  ignore:
-    pattern: '^\.'
-  filenames:
-    pattern: '^[a-z0-9][a-z0-9-]*$'
-  assets:
-    allowed: false
-
-paths:
-  contacts:
-    description: |
-      People and organizations. One record per person or organization.
-      Update the existing record when someone's details change.
-    records:
-      schema:
-        required: [name, type]
-        properties:
-          name: { type: string }
-          type: { enum: [person, organization] }
-      body:
-        allowed: false
-
-  events:
-    description: |
-      Dated records of things that happened: meetings, calls, visits.
-    records:
-      schema:
-        required: [title, date]
-        properties:
-          title: { type: string }
-          date: { type: string, format: date }
-
-  assets:
-    description: |
-      Source material and attached files: scans, photos, downloads.
-    assets:
-      allowed: true
-`;
-
-function mustParse(source: string): Config {
+function valid(source: string): Config {
   const result = parseConfig(source);
-  assert.ok(result.ok, `expected valid config, got: ${JSON.stringify(!result.ok && result.errors)}`);
+  assert.ok(result.ok, JSON.stringify(!result.ok && result.errors));
   return result.config;
 }
 
-function mustFail(source: string): { message: string }[] {
+function invalid(source: string): string[] {
   const result = parseConfig(source);
   assert.ok(!result.ok, "expected config errors");
-  assert.ok(result.errors.length > 0, "expected at least one error");
-  for (const error of result.errors) assert.equal(typeof error.message, "string");
-  return result.errors;
+  return result.errors.map(({ message }) => message);
 }
 
-// vault.md: the example config is a valid config.
-test("vault.md example config parses into the model", () => {
-  const config = mustParse(vaultExample);
-  assert.deepEqual([...config.paths.keys()], ["contacts", "events", "assets"]);
-
-  assert.equal(config.global?.assets?.allowed, false);
-  assert.equal(config.global?.ignore?.pattern?.source, String.raw`^\.`);
-  assert.equal(config.global?.filenames?.pattern?.source, "^[a-z0-9][a-z0-9-]*$");
-
-  const contacts = config.paths.get("contacts");
-  assert.ok(contacts);
-  assert.match(contacts.description, /People and organizations/);
-  assert.equal(contacts.records?.body?.allowed, false);
-  assert.ok(contacts.records?.schema);
-  assert.equal(contacts.records.schema.validate({ name: "Priya Narayan", type: "person" }), true);
-  assert.equal(contacts.records.schema.validate({ name: 42, type: "person" }), false);
-  assert.equal(contacts.records.schema.validate({}), false);
-
-  const assets = config.paths.get("assets");
-  assert.equal(assets?.assets?.allowed, true);
-  assert.equal(assets?.records, undefined);
-});
-
-// vault.md: "`format` is asserted, so `format: date` must hold a date."
-test("schema formats are asserted", () => {
-  const config = mustParse(vaultExample);
-  const schema = config.paths.get("events")?.records?.schema;
-  assert.ok(schema);
-  assert.equal(schema.validate({ title: "Studio visit", date: "2026-08-07" }), true);
-  assert.equal(schema.validate({ title: "Studio visit", date: "not a date" }), false);
-});
-
-// cli.md: the starter config is a valid config.
-test("cli.md starter config parses into the model", () => {
-  const config = mustParse(starterConfig);
-  assert.deepEqual([...config.paths.keys()], ["datasets", "assets", "topics"]);
-
-  const datasets = config.paths.get("datasets");
-  assert.ok(datasets?.records?.schema);
-  assert.equal(datasets.records.schema.validate({ title: "t", description: "d", data: [1, 2] }), true);
-  assert.equal(datasets.records.schema.validate({ title: "t", description: "d" }), false);
-
-  const topics = config.paths.get("topics");
-  assert.ok(topics?.records?.schema);
-  assert.equal(topics.records.schema.validate({ title: "t", description: "d" }), true);
-});
-
-// vault.md: "Both top-level keys are optional — a config that declares
-// neither is a valid vault with no rules."
-test("empty configs are valid", () => {
-  for (const source of ["", "{}", "\n# just a comment\n"]) {
-    const config = mustParse(source);
-    assert.equal(config.global, undefined);
+test("empty and comment-only configs declare nothing and strict defaults false", () => {
+  for (const source of ["", "{}", "# only a comment\n"]) {
+    const config = valid(source);
+    assert.equal(config.strict, false);
     assert.equal(config.paths.size, 0);
   }
 });
 
-test("config with only global, or only paths, is valid", () => {
-  const globalOnly = mustParse("global:\n  assets:\n    allowed: false\n");
-  assert.equal(globalOnly.global?.assets?.allowed, false);
-  assert.equal(globalOnly.paths.size, 0);
-
-  const pathsOnly = mustParse("paths:\n  notes:\n    description: Notes.\n");
-  assert.equal(pathsOnly.global, undefined);
-  assert.equal(pathsOnly.paths.get("notes")?.description, "Notes.");
+test("parses every setting at root and arbitrarily deep overlapping paths", () => {
+  const config = valid(String.raw`strict: true
+paths:
+  /:
+    description: Everything.
+    schema: { type: object }
+    body: { allowed: false }
+    extensions: [md, pdf]
+    filenames: { pattern: '[a-z]+' }
+    internal_links: { resolve: false, format: wikilink }
+    ignore: { dotfiles: false, pattern: 'tmp' }
+  /personal:
+    description: Personal.
+  /personal/misc/video games:
+    description: Games.
+`);
+  assert.equal(config.strict, true);
+  assert.deepEqual([...config.paths.keys()], ["/", "/personal", "/personal/misc/video games"]);
+  const root = config.paths.get("/")!;
+  assert.equal(root.schema?.validate({}), true);
+  assert.equal(root.body?.allowed, false);
+  assert.deepEqual(root.extensions, ["md", "pdf"]);
+  assert.equal(root.filenames?.pattern?.regex.test("abc"), true);
+  assert.equal(root.filenames?.pattern?.regex.test("abc!"), false);
+  assert.deepEqual(root.internal_links, { resolve: false, format: "wikilink" });
+  assert.equal(root.ignore?.dotfiles, false);
+  assert.equal(root.ignore?.pattern?.regex.test("x-tmp-y"), true);
 });
 
-// vault.md: "Unknown keys are rejected at every level".
-test("unknown key at top level is rejected", () => {
-  const errors = mustFail("extra: 1\n");
-  assert.match(errors[0]!.message, /extra/);
+test("standard and custom schema formats are asserted", () => {
+  const schema = valid(`paths:\n  /notes:\n    description: Notes.\n    schema:\n      type: object\n      properties:\n        date: { type: string, format: date }\n        link: { type: string, format: internal-link }\n        local: { type: string, format: datetime }\n`).paths.get("/notes")!.schema!;
+  assert.equal(schema.validate({ date: "2026-08-08", link: "[[a/b|B]]", local: "2026-08-08T10:00" }), true);
+  assert.equal(schema.validate({ link: "prefix [[a]]" }), false);
+  assert.equal(schema.validate({ link: "![[photo.png#crop]]" }), true);
+  assert.equal(schema.validate({ link: "[[a[b]]" }), false);
+  assert.equal(schema.validate({ link: "[[a\rb]]" }), false);
+  assert.equal(schema.validate({ local: "2026-08-08T10:00:00" }), true);
+  assert.equal(schema.validate({ local: "2026-08-08T10:00Z" }), false);
+  assert.equal(schema.validate({ local: "2026-08-08" }), false);
+  assert.equal(schema.validate({ local: "2026-02-30T10:00" }), false);
+  assert.equal(schema.validate({ date: "not-a-date" }), false);
 });
 
-test("unknown key in global is rejected", () => {
-  const errors = mustFail("global:\n  colour: red\n");
-  assert.match(errors[0]!.message, /colour/);
+test("boolean JSON Schemas compile", () => {
+  const schema = valid("paths:\n  /notes:\n    description: Notes.\n    schema: false\n").paths.get("/notes")!.schema!;
+  assert.equal(schema.validate({}), false);
 });
 
-test("unknown key in a path entry is rejected", () => {
-  const errors = mustFail("paths:\n  notes:\n    description: Notes.\n    recordz: {}\n");
-  assert.match(errors[0]!.message, /recordz/);
+test("loads the README schema shape without an explicit object type", () => {
+  const schema = valid(`paths:
+  /contacts:
+    description: Contacts.
+    schema:
+      required: [title, kind]
+      properties:
+        title: { type: string }
+        kind: { enum: [person, organization] }
+`).paths.get("/contacts")!.schema!;
+  assert.equal(schema.validate({ title: "Priya", kind: "person" }), true);
+  assert.equal(schema.validate({ title: "Priya" }), false);
 });
 
-test("unknown key in a records block is rejected", () => {
-  const errors = mustFail("paths:\n  notes:\n    description: Notes.\n    records:\n      strict: true\n");
-  assert.match(errors[0]!.message, /strict/);
+test("rejects unknown keys at every config level, including removed old keys", () => {
+  const cases: Array<[string, string]> = [
+    ["wat: true\n", "wat"],
+    ["global: {}\n", "global"],
+    ["paths:\n  /x:\n    description: X.\n    records: {}\n", "records"],
+    ["paths:\n  /x:\n    description: X.\n    assets: {}\n", "assets"],
+    ["paths:\n  /x:\n    description: X.\n    body: { allowed: true, extra: 1 }\n", "extra"],
+    ["paths:\n  /x:\n    description: X.\n    filenames: { flags: i }\n", "flags"],
+    ["paths:\n  /x:\n    description: X.\n    internal_links: { style: wiki }\n", "style"],
+    ["paths:\n  /x:\n    description: X.\n    ignore: { subtree: true }\n", "subtree"],
+  ];
+  for (const [source, key] of cases) assert.ok(invalid(source).some((message) => message.includes(key)));
+  assert.deepEqual(invalid("extra: true\npaths:\n  /contacts:\n    shema: {}\n"), [
+    'unknown key "extra"',
+    '/contacts has an unknown key "shema"',
+  ]);
 });
 
-test("unknown key in a body block is rejected", () => {
-  const errors = mustFail(
-    "paths:\n  notes:\n    description: Notes.\n    records:\n      body:\n        allowed: false\n        max: 3\n",
+test("validates top-level, path entry, and setting value types", () => {
+  const cases: Array<[string, string]> = [
+    ["strict: yes\n", "strict must be a boolean"],
+    ["paths: []\n", "paths must be a mapping"],
+    ["paths:\n  /x: nope\n", "/x must be a mapping"],
+    ["paths:\n  /x:\n    description: 3\n", "/x.description must be text"],
+    ["paths:\n  /x:\n    description: X.\n    body: { allowed: no }\n", "/x.body.allowed takes true or false"],
+    ["paths:\n  /x:\n    description: X.\n    extensions: md\n", "/x.extensions must be a list of extensions, or null"],
+    ["paths:\n  /x:\n    description: X.\n    extensions: [md, 3]\n", "/x.extensions must be a list of extensions, or null"],
+    ["paths:\n  /x:\n    description: X.\n    internal_links: { format: html }\n", "/x.internal_links.format must be wikilink, markdown-relative, markdown-absolute, or null"],
+    ["paths:\n  /x:\n    description: X.\n    ignore: { dotfiles: no }\n", "/x.ignore.dotfiles takes true or false"],
+  ];
+  for (const [source, message] of cases) assert.deepEqual(invalid(source), [message]);
+});
+
+test("internal link format must be a valid string", () => {
+  assert.deepEqual(
+    invalid("paths:\n  /x:\n    description: X.\n    internal_links: { format: [wikilink] }\n"),
+    ["/x.internal_links.format must be wikilink, markdown-relative, markdown-absolute, or null"],
   );
-  assert.match(errors[0]!.message, /max/);
-});
-
-test("unknown key in an assets block is rejected", () => {
-  const errors = mustFail("global:\n  assets:\n    allowed: true\n    kinds: [pdf]\n");
-  assert.match(errors[0]!.message, /kinds/);
-});
-
-test("unknown key in a filenames block is rejected", () => {
-  const errors = mustFail("global:\n  filenames:\n    pattern: abc\n    flags: i\n");
-  assert.match(errors[0]!.message, /flags/);
-});
-
-test("unknown key in an ignore block is rejected", () => {
-  const errors = mustFail("global:\n  ignore:\n    pattern: abc\n    subtree: false\n");
-  assert.match(errors[0]!.message, /subtree/);
-});
-
-// vault.md: "`description` — ... Path entries only, and required on each."
-test("path entry without a description is rejected", () => {
-  const errors = mustFail("paths:\n  notes:\n    records: {}\n");
-  assert.match(errors[0]!.message, /notes/);
-  assert.match(errors[0]!.message, /description/);
-});
-
-test("description on global is rejected", () => {
-  const errors = mustFail("global:\n  description: The vault.\n");
-  assert.match(errors[0]!.message, /global/);
-  assert.match(errors[0]!.message, /description/);
-});
-
-// vault.md: paths are "keyed by folder name — a single path segment, no `/`".
-test("a paths key containing a slash is rejected", () => {
-  const errors = mustFail("paths:\n  notes/daily:\n    description: Daily notes.\n");
-  assert.match(errors[0]!.message, /notes\/daily/);
-});
-
-// vault.md: a paths key names a folder, so it must be a name every
-// filesystem can hold: "no empty path segments, no `.` or `..` segments,
-// no control characters, Unicode NFC".
-test("an empty paths key is rejected", () => {
-  const errors = mustFail("paths:\n  '':\n    description: Nameless.\n");
-  assert.match(errors[0]!.message, /paths/);
-  assert.match(errors[0]!.message, /empty/);
-});
-
-test("a paths key of . or .. is rejected", () => {
-  const dot = mustFail("paths:\n  '.':\n    description: Here.\n");
-  assert.match(dot[0]!.message, /paths\."\."/);
-
-  const dotdot = mustFail("paths:\n  '..':\n    description: Up.\n");
-  assert.match(dotdot[0]!.message, /paths\."\.\."/);
-});
-
-test("a paths key containing a control character is rejected", () => {
-  const errors = mustFail('paths:\n  "a\\tb":\n    description: Tabbed.\n');
-  assert.match(errors[0]!.message, /control character/);
-});
-
-test("a paths key that is not Unicode NFC is rejected", () => {
-  // "café" with a combining acute accent — the decomposed (NFD) form.
-  const errors = mustFail('paths:\n  "cafe\\u0301":\n    description: Coffee.\n');
-  assert.match(errors[0]!.message, /NFC/);
-});
-
-// vault.md: "Two paths that differ only by case are rejected".
-test("two paths keys differing only by case are rejected", () => {
-  const errors = mustFail(
-    "paths:\n  Notes:\n    description: Notes.\n  notes:\n    description: Also notes.\n",
+  assert.equal(
+    valid("paths:\n  /x:\n    description: X.\n    internal_links: { format: wikilink }\n").paths.get("/x")!.internal_links?.format,
+    "wikilink",
   );
-  assert.match(errors[0]!.message, /[Nn]otes/);
 });
 
-// vault.md: "A schema that does not compile as JSON Schema ... is rejected".
-test("an uncompilable schema is rejected, naming the location", () => {
-  const errors = mustFail(
-    "paths:\n  notes:\n    description: Notes.\n    records:\n      schema:\n        type: 42\n",
-  );
-  assert.match(errors[0]!.message, /paths\.notes\.records\.schema/);
+test("description is optional, and non-text is rejected", () => {
+  const ok = parseConfig("paths:\n  /notes:\n    extensions: [md]\n");
+  assert.ok(ok.ok, "an entry may scope rules without inviting filing");
+  assert.equal(ok.ok && ok.config.paths.get("/notes")?.description, undefined);
+  assert.ok(invalid("paths:\n  /notes:\n    description: 3\n").some((m) => /description must be text/.test(m)));
 });
 
-// vault.md: "Schemas compile strictly, so an unknown schema keyword is
-// rejected like any other misspelled key."
-test("a schema with an unknown keyword is rejected, naming the strict rejection", () => {
-  const errors = mustFail(
-    "paths:\n  notes:\n    description: Notes.\n    records:\n      schema:\n        requird: [name]\n",
-  );
-  assert.match(errors[0]!.message, /paths\.notes\.records\.schema/);
-  assert.match(errors[0]!.message, /strict mode/);
-  assert.match(errors[0]!.message, /requird/);
+test("path keys start with slash, have no trailing slash, and contain valid segments", () => {
+  for (const key of ["notes", "/notes/", "//notes", "/a//b", "/a/./b", "/a/../b"]) {
+    assert.ok(invalid(`paths:\n  '${key}':\n    description: X.\n`).some((m) => m.includes(key)));
+  }
 });
 
-// A schema that is legal JSON Schema but rejected by strict mode: the
-// error must say what happened — a strict rejection, not a compile failure.
-test("a legal schema rejected by strict mode names the strict rejection", () => {
-  const errors = mustFail(
-    "paths:\n  notes:\n    description: Notes.\n    records:\n      schema:\n        if:\n          required: [name]\n",
-  );
-  assert.match(errors[0]!.message, /paths\.notes\.records\.schema/);
-  assert.match(errors[0]!.message, /strict mode/);
-  assert.doesNotMatch(errors[0]!.message, /does not compile/);
+test("rejects path keys differing only by case or Unicode normalization", () => {
+  const caseErrors = invalid("paths:\n  /Notes:\n    description: A.\n  /notes:\n    description: B.\n");
+  assert.deepEqual(caseErrors, ["/Notes and /notes differ only by case or Unicode normalization"]);
+  const unicodeErrors = invalid('paths:\n  "/caf\\u00e9":\n    description: A.\n  "/cafe\\u0301":\n    description: B.\n');
+  assert.ok(unicodeErrors.some((m) => /normalization/.test(m) && /caf/.test(m)));
 });
 
-// vault.md: "a pattern that does not compile as a regular expression, is
-// rejected".
-test("an uncompilable pattern is rejected, naming the location", () => {
-  const globalErrors = mustFail("global:\n  filenames:\n    pattern: '('\n");
-  assert.match(globalErrors[0]!.message, /global\.filenames\.pattern/);
-
-  const pathErrors = mustFail("paths:\n  notes:\n    description: Notes.\n    ignore:\n      pattern: '['\n");
-  assert.match(pathErrors[0]!.message, /paths\.notes\.ignore\.pattern/);
+test("schemas compile strictly and patterns compile as JavaScript regexps", () => {
+  assert.ok(invalid("paths:\n  /x:\n    description: X.\n    schema: { requird: [x] }\n").some((m) => /schema.*strict mode.*requird/.test(m)));
+  assert.ok(invalid("paths:\n  /x:\n    description: X.\n    schema: { type: 42 }\n").some((m) => /schema.*compile/.test(m)));
+  assert.ok(invalid("paths:\n  /x:\n    description: X.\n    filenames: { pattern: '(' }\n    ignore: { pattern: '[' }\n").filter((m) => /pattern.*regular expression/.test(m)).length === 2);
 });
 
-test("a non-string pattern and a non-boolean allowed are rejected", () => {
-  const patternErrors = mustFail("global:\n  ignore:\n    pattern: 3\n");
-  assert.match(patternErrors[0]!.message, /global\.ignore\.pattern/);
-
-  const allowedErrors = mustFail("global:\n  assets:\n    allowed: sometimes\n");
-  assert.match(allowedErrors[0]!.message, /global\.assets\.allowed/);
+test("null clears nullable settings but boolean settings take true or false", () => {
+  valid("paths:\n  /:\n    description: Root.\n    schema: null\n    extensions: null\n    filenames: { pattern: null }\n    internal_links: { format: null }\n    ignore: { pattern: null }\n");
+  assert.deepEqual(invalid("paths:\n  /x:\n    body: { allowed: null }\n    internal_links: { resolve: null }\n    ignore: { dotfiles: null }\n"), [
+    "/x.body.allowed takes true or false",
+    "/x.internal_links.resolve takes true or false",
+    "/x.ignore.dotfiles takes true or false",
+  ]);
+  assert.deepEqual(invalid("paths:\n  /x:\n    description: X.\n    body: null\n"), ["/x.body must be a mapping"]);
 });
 
-// vault.md: an autofile.yml that "does not parse, or does not match the
-// above makes the vault invalid" — reported as data, not thrown.
-test("unparseable YAML is a config error, not an exception", () => {
-  const errors = mustFail("global: [unclosed\n");
-  assert.equal(typeof errors[0]!.message, "string");
+test("parse and read failures are returned as data and errors are collected", async () => {
+  assert.ok(invalid("paths: [unclosed\n")[0]!.includes("does not parse"));
+  assert.ok(invalid("- not\n- a mapping\n")[0]!.includes("mapping"));
+  const many = invalid("strict: nope\nextra: 1\npaths:\n  /x:\n    filenames: { pattern: '(' }\n");
+  assert.deepEqual(many, [
+    'unknown key "extra"',
+    "strict must be a boolean",
+    "/x.filenames.pattern does not compile as a regular expression: Invalid regular expression: /^(?:()$/: Unterminated group",
+  ]);
+  const missing = await loadConfig("/definitely/missing/autofile.yml");
+  assert.ok(!missing.ok && /cannot be read/.test(missing.errors[0]!.message));
 });
 
-test("a non-mapping document is a config error", () => {
-  mustFail("- a\n- b\n");
-  mustFail("just a string\n");
-});
-
-// vault.md: "An `autofile.yml` that cannot be read ... makes the vault
-// invalid" — reported as a config error, not thrown.
-test("a missing config file is a config error, not an exception", async () => {
-  const result = await loadConfig("/nonexistent/autofile.yml");
-  assert.ok(!result.ok, "expected config errors");
-  assert.match(result.errors[0]!.message, /cannot be read/);
-});
-
-// The on-disk success path: the spec/cli.md starter config, written to a
-// file and loaded, yields the full compiled model.
-test("loadConfig loads the starter config from disk", async () => {
+test("loadConfig loads a valid config from disk", async () => {
   const dir = await mkdtemp(join(tmpdir(), "autofile-config-"));
   try {
-    const filePath = join(dir, "autofile.yml");
-    await writeFile(filePath, starterConfig);
-    const result = await loadConfig(filePath);
-    assert.ok(result.ok, "expected the starter config to load");
-    const config = result.config;
-    assert.deepEqual([...config.paths.keys()], ["datasets", "assets", "topics"]);
-    assert.equal(config.global?.assets?.allowed, false);
-    assert.equal(config.global?.filenames?.pattern?.source, "^[a-z0-9][a-z0-9-]*$");
-    const schema = config.paths.get("datasets")?.records?.schema;
-    assert.ok(schema !== undefined, "expected the datasets schema compiled");
-    assert.equal(schema.validate({ title: "T", description: "D", data: 1 }), true);
-    assert.equal(schema.validate({}), false);
+    const path = join(dir, "autofile.yml");
+    await writeFile(path, "paths:\n  /notes:\n    description: Notes.\n");
+    const result = await loadConfig(path);
+    assert.ok(result.ok);
+    assert.equal(result.config.paths.get("/notes")?.description, "Notes.");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-// YAML leaves a bare key null; a bare rule-block key declares an empty
-// block, same as an explicit `records: {}`.
-test("a bare rule-block key behaves as an empty block", () => {
-  const config = mustParse(
-    "global:\n  ignore:\npaths:\n  notes:\n    description: Notes.\n    records:\n",
-  );
-  assert.deepEqual(config.global?.ignore, {});
-  assert.deepEqual(config.paths.get("notes")?.records, {});
-});
-
-test("duplicate YAML keys are a parse error", () => {
-  const errors = mustFail("global:\n  ignore: {}\n  ignore: {}\n");
-  assert.match(errors[0]!.message, /does not parse/);
-});
-
-test("global as a scalar or an array is a config error", () => {
-  const scalarErrors = mustFail("global: strict\n");
-  assert.match(scalarErrors[0]!.message, /global.*must be a mapping/);
-
-  const arrayErrors = mustFail("global:\n  - ignore\n");
-  assert.match(arrayErrors[0]!.message, /global.*must be a mapping/);
-});
-
-test("paths as a scalar or an array is a config error", () => {
-  const scalarErrors = mustFail("paths: notes\n");
-  assert.match(scalarErrors[0]!.message, /paths.*must be a mapping/);
-
-  const arrayErrors = mustFail("paths:\n  - notes\n");
-  assert.match(arrayErrors[0]!.message, /paths.*must be a mapping/);
-});
-
-test("all errors are collected, not just the first", () => {
-  const errors = mustFail(
-    "global:\n  filenames:\n    pattern: '('\n  ignore:\n    pattern: '['\npaths:\n  notes:\n    records: {}\n",
-  );
-  assert.ok(errors.length >= 3, `expected 3 errors, got ${errors.length}`);
+test("duplicate YAML keys are parse errors", () => {
+  assert.ok(invalid("strict: true\nstrict: false\n")[0]!.includes("does not parse"));
 });

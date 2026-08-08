@@ -1,30 +1,69 @@
-import { CORE_SCHEMA, load } from "js-yaml";
+import { posix } from "node:path";
 
-// The reference grammar (spec/vault.md): what counts as a reference in a
-// record, and the vault-relative path a target resolves through. Pure text
-// work — resolving against the disk is check's job.
+// Pure internal-link API for the check engine:
+// - extractReferences scans parsed frontmatter and body into the spelling
+//   shown to users plus the target used for resolution.
+// - resolveReference selects a vault-relative file path from the check
+//   engine's file index, given the linking note's vault-relative path.
+// The caller builds the index and includes files only, never folders.
 
 export interface Reference {
-  /** The reference's source text, exactly as written in the record. */
+  /** The reference's source text, exactly as written in the note. */
   asWritten: string;
   /** The part that resolves: the target before any `|` or `#`. */
   target: string;
+}
+
+interface IndexedFile {
+  path: string;
+  normalizedPath: string;
+}
+
+export interface ReferenceIndex {
+  byBasename: Map<string, IndexedFile[]>;
+  byFullPath: Map<string, IndexedFile[]>;
+}
+
+/** Builds the opaque lookup structure used to resolve vault references. */
+export function buildIndex(files: readonly string[]): ReferenceIndex {
+  const byBasename = new Map<string, IndexedFile[]>();
+  const byFullPath = new Map<string, IndexedFile[]>();
+  for (const path of files) {
+    const normalizedPath = comparable(toPosixSeparators(path));
+    const file = { path, normalizedPath };
+    addToIndex(byBasename, posix.basename(normalizedPath), file);
+    addToIndex(byFullPath, normalizedPath, file);
+  }
+  return { byBasename, byFullPath };
+}
+
+function addToIndex(index: Map<string, IndexedFile[]>, key: string, file: IndexedFile): void {
+  const matches = index.get(key);
+  if (matches === undefined) index.set(key, [file]);
+  else matches.push(file);
 }
 
 // A wikilink `[[target]]` or embed `![[target]]`: brackets holding at
 // least one character, none of them a bracket or newline — a reference is
 // a single-line construct, so an unclosed `[[` never fuses with a stray
 // `]]` on a later line.
-const wikilink = /!?\[\[([^\][\n]+)\]\]/g;
-const wholeWikilink = /^!?\[\[([^\][\n]+)\]\]$/;
+const wikilinkInner = String.raw`[^\][\r\n]+`;
+const wikilink = new RegExp(String.raw`!?\[\[(${wikilinkInner})\]\]`, "g");
+const wholeWikilink = new RegExp(String.raw`^!?\[\[(${wikilinkInner})\]\]$`);
+
+/** Whether a string consists entirely of one valid wikilink or embed. */
+export function isWholeWikilink(value: string): boolean {
+  return wholeWikilink.test(value);
+}
 // A markdown link `[label](target)` or image `![alt](target)`: no brackets
-// or newlines in the label, no parentheses or newlines in the target.
-// Deliberately simple; nested brackets, angle-bracket destinations, and
-// labels wrapped across lines are out of scope.
-const markdownLink = /!?\[([^\][\n]*)\]\(([^()\n]*)\)/g;
+// or newlines in the label. Destinations may be angle-bracketed and may
+// carry a double-quoted, single-quoted, or parenthesized title. Deliberate
+// simplifications: nested brackets, nested parentheses in destinations or
+// titles, and labels wrapped across lines are out of scope.
+const markdownLink = /!?\[([^\][\n]*)\]\((<[^>\n]*>|(?:[^()\n]|\([^()\n]*\))*)\)/g;
 
 /**
- * Extracts a record's references: whole-value wikilinks at any depth in
+ * Extracts a note's references: whole-value wikilinks at any depth in
  * the frontmatter — a wikilink inside larger prose in a frontmatter string
  * is body-level prose, not a typed link, and is not extracted — and both
  * wikilink and markdown forms anywhere in the body outside code: fenced
@@ -32,32 +71,30 @@ const markdownLink = /!?\[([^\][\n]*)\]\(([^()\n]*)\)/g;
  * Frontmatter that does not parse or is not a mapping is skipped; the body
  * is always scanned.
  */
-export function extractReferences(frontmatterSource: string | undefined, body: string): Reference[] {
+export function extractReferences(frontmatter: unknown, body: string): Reference[] {
   const references: Reference[] = [];
-  if (frontmatterSource !== undefined) {
-    let frontmatter: unknown;
-    try {
-      // CORE_SCHEMA, matching the record checker: frontmatter parses to
-      // JSON values, so an unquoted date stays a string (spec/vault.md).
-      frontmatter = load(frontmatterSource, { schema: CORE_SCHEMA });
-    } catch {
-      frontmatter = undefined;
-    }
-    // Only a mapping is frontmatter proper — anything else is the record's
-    // parse problem, not a place references live.
-    if (typeof frontmatter === "object" && frontmatter !== null && !Array.isArray(frontmatter)) {
-      collectFrontmatter(frontmatter, new Set(), references);
-    }
+  // Only a mapping is frontmatter proper — anything else is the note's
+  // parse problem, not a place references live.
+  if (typeof frontmatter === "object" && frontmatter !== null && !Array.isArray(frontmatter)) {
+    collectFrontmatter(frontmatter, new Set(), references);
   }
   const scanned = blankCode(body);
+  const bodyReferences: Array<Reference & { index: number }> = [];
   for (const match of scanned.matchAll(wikilink)) {
     const target = targetOf(match[1]!);
-    if (target !== "") references.push({ asWritten: match[0], target });
+    if (target !== "") bodyReferences.push({ asWritten: match[0], target, index: match.index });
   }
   for (const match of scanned.matchAll(markdownLink)) {
-    const target = match[2]!.trim();
-    if (isVaultRelative(target)) references.push({ asWritten: match[0], target });
+    const encoded = markdownDestination(match[2]!);
+    const decoded = decodeTarget(encoded);
+    const heading = decoded.indexOf("#");
+    const target = heading === -1 ? decoded : decoded.slice(0, heading);
+    if (isInternalTarget(target)) {
+      bodyReferences.push({ asWritten: match[0], target, index: match.index });
+    }
   }
+  bodyReferences.sort((left, right) => left.index - right.index);
+  references.push(...bodyReferences.map(({ asWritten, target }) => ({ asWritten, target })));
   return references;
 }
 
@@ -154,35 +191,91 @@ function targetOf(inner: string): string {
   return cut === -1 ? inner : inner.slice(0, cut);
 }
 
-/**
- * Whether a markdown-link target is a vault-relative path (spec/vault.md):
- * a URL is not a reference, nor is a target with `./` or `../` segments or
- * URL-encoding. Nor, beyond those, anything that cannot name a vault file:
- * an empty target, a bare `#fragment`, an absolute path or empty segment,
- * or whitespace, which a bare markdown destination cannot hold.
- */
-function isVaultRelative(target: string): boolean {
+/** Whether a decoded markdown destination is internal rather than a URL. */
+function isInternalTarget(target: string): boolean {
   if (target === "" || target.startsWith("#")) return false;
   if (/^[a-z][a-z0-9+.-]*:/i.test(target)) return false;
-  if (/%[0-9a-f]{2}/i.test(target)) return false;
-  if (/\s/.test(target)) return false;
-  return target.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+  if (target.startsWith("//")) return false;
+  return true;
+}
+
+/** Removes a markdown title and angle brackets, yielding the encoded destination. */
+function markdownDestination(contents: string): string {
+  let destination = contents.trim();
+  const title = /\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\))\s*$/u.exec(destination);
+  if (title !== null) destination = destination.slice(0, title.index).trimEnd();
+  if (destination.startsWith("<") && destination.endsWith(">")) return destination.slice(1, -1);
+  return destination;
+}
+
+function decodeTarget(target: string): string {
+  try {
+    return decodeURIComponent(target);
+  } catch {
+    return target;
+  }
 }
 
 /**
- * The vault-relative paths a target resolves through, in probe order: the
- * literal path first, then `<target>.md` — so `contacts/priya-narayan`
- * reaches `contacts/priya-narayan.md`, `docs/v1.2` reaches `docs/v1.2.md`,
- * and `assets/.env` is reached as written (spec/vault.md). Two probes in
- * one order, never a search; the paths always differ, `.md`-suffixed
- * targets included, since the fallback appends. Empty when no path inside
- * the vault could satisfy the target (empty, absolute, or a `.`/`..`
- * segment), so resolution must not touch the disk.
+ * Resolves an extracted target against an index of vault-relative file
+ * paths. Plain targets suffix-match; `./` and `../` targets are relative to
+ * the linking note's folder; `/` targets are vault-absolute. The literal
+ * target is tried before its `.md` fallback. Among suffix matches, the file
+ * with the fewest segments in its relative path from the note wins, with a
+ * lexicographic path tie-break. Comparisons use NFC Unicode normalization;
+ * the selected path is returned exactly as supplied by the index.
  */
-export function candidatePaths(target: string): string[] {
-  const escapes = target
-    .split("/")
-    .some((segment) => segment === "" || segment === "." || segment === "..");
-  if (escapes) return [];
-  return [target, `${target}.md`];
+export function resolveReference(
+  target: string,
+  linkingNotePath: string,
+  index: ReferenceIndex,
+): string | undefined {
+  const noteFolder = posix.dirname(toPosixSeparators(linkingNotePath));
+  const relative = target.startsWith("./") || target.startsWith("../");
+  const absolute = target.startsWith("/");
+  const written = toPosixSeparators(target);
+
+  const base = relative
+    ? posix.normalize(posix.join(noteFolder, written))
+    : posix.normalize(absolute ? written.slice(1) : written);
+  // A target that climbs past the vault root, or is rooted outside it, names
+  // no vault file. "." is rejected only on the plain branch: an absolute "/"
+  // normalizes to "." too, and there it still probes the root ".md" file.
+  if (base === ".." || base.startsWith("../") || posix.isAbsolute(base)) return undefined;
+  if (base === "." && !relative && !absolute) return undefined;
+
+  for (const probe of [base, `${base}.md`]) {
+    const normalizedProbe = comparable(probe);
+    const matches = relative || absolute
+      ? index.byFullPath.get(normalizedProbe) ?? []
+      : (index.byBasename.get(posix.basename(normalizedProbe)) ?? []).filter((file) =>
+        file.normalizedPath === normalizedProbe || file.normalizedPath.endsWith(`/${normalizedProbe}`));
+    if (matches.length > 0) return nearest(matches, noteFolder).path;
+  }
+  return undefined;
+}
+
+// Link targets are authored by hand, so a Windows-style separator can reach
+// us in one; vault paths from the walk are always `/`-joined already.
+function toPosixSeparators(path: string): string {
+  return path.replaceAll("\\", "/");
+}
+
+function comparable(path: string): string {
+  return path.normalize("NFC");
+}
+
+function nearest(files: readonly IndexedFile[], noteFolder: string): IndexedFile {
+  const normalizedNoteFolder = comparable(noteFolder);
+  return [...files].sort((left, right) => {
+    const leftDistance = distance(normalizedNoteFolder, left.normalizedPath);
+    const rightDistance = distance(normalizedNoteFolder, right.normalizedPath);
+    if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+    return left.normalizedPath < right.normalizedPath ? -1 : left.normalizedPath > right.normalizedPath ? 1 : 0;
+  })[0]!;
+}
+
+function distance(normalizedNoteFolder: string, normalizedFile: string): number {
+  const relative = posix.relative(normalizedNoteFolder, normalizedFile);
+  return relative === "" ? 0 : relative.split("/").length;
 }

@@ -1,10 +1,9 @@
 #!/usr/bin/env node
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { check } from "./check.js";
-import { parseConfig } from "./config.js";
-import { renderCheckReport, renderInitReport, Spinner } from "./output.js";
+import { count, renderCheckReport, renderInitReport, Spinner } from "./output.js";
 import { starterConfig } from "./starter.js";
 
 // The `autofile` binary (spec/cli.md): two commands and two flags, parsed
@@ -15,9 +14,9 @@ import { starterConfig } from "./starter.js";
 
 const usage = `Usage: autofile <command> [path]
 
-Predictable filing for agents — scaffold and check Autofile vaults.
+Predictable filing for agents — initialize and check Autofile vaults.
 
-  init         create a vault: starter config plus its folders
+  init         create an empty Autofile configuration
   check        validate the vault and report findings
   path         vault folder (default: current directory)
   --help       show this help
@@ -82,7 +81,7 @@ async function main(argv: string[]): Promise<number> {
   return 1;
 }
 
-/** `autofile init`: the starter config and its folders; never overwrites. */
+/** `autofile init`: write only the comments-only config; never overwrite. */
 async function init(vaultRoot: string): Promise<number> {
   if (await fileExists(join(vaultRoot, "autofile.yml"))) {
     process.stderr.write("autofile.yml already exists; init never overwrites.\n");
@@ -92,13 +91,10 @@ async function init(vaultRoot: string): Promise<number> {
   clearSpinnerOnSigint(spinner);
   spinner.start("Initializing…");
   try {
-    await mkdir(vaultRoot, { recursive: true });
     // wx: even against a config racing into place, init never overwrites.
     await writeFile(join(vaultRoot, "autofile.yml"), starterConfig, { flag: "wx" });
-    const folders = starterFolders();
-    for (const folder of folders) await mkdir(join(vaultRoot, folder), { recursive: true });
     spinner.stop();
-    process.stdout.write(renderInitReport({ config: "autofile.yml", folders }, { color }));
+    process.stdout.write(renderInitReport("autofile.yml", { color }));
     return 0;
   } catch (error) {
     spinner.stop();
@@ -107,22 +103,19 @@ async function init(vaultRoot: string): Promise<number> {
   }
 }
 
-/** The folder for each path the starter describes, in declaration order. */
-function starterFolders(): string[] {
-  const parsed = parseConfig(starterConfig);
-  if (!parsed.ok) throw new Error("the starter config does not parse");
-  return [...parsed.config.paths.keys()];
-}
-
 /** `autofile check`: exit 0 iff no violations; warnings do not change it. */
 async function runCheck(vaultRoot: string): Promise<number> {
+  if (!await fileExists(join(vaultRoot, "autofile.yml"))) {
+    process.stderr.write("autofile.yml not found; this folder is not an Autofile vault.\n");
+    return 1;
+  }
   const spinner = new Spinner(process.stdout);
   clearSpinnerOnSigint(spinner);
-  spinner.start("Checking… 0 files");
+  spinner.start(`Checking… ${count(0, "file")}`);
   let result;
   try {
     result = await check(vaultRoot, {
-      onFile: (count) => spinner.update(`Checking… ${count} file${count === 1 ? "" : "s"}`),
+      onFile: (files) => spinner.update(`Checking… ${count(files, "file")}`),
     });
   } catch (error) {
     // An environment error — e.g. an unreadable directory — not findings.

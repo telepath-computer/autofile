@@ -2,788 +2,335 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { after, test } from "node:test";
 
-import { check, starterConfig, type CheckResult, type Finding } from "@telepath-computer/autofile";
-
-// A small strict-idiom config for targeted tests.
-const strictConfig = [
-  "global:",
-  "  ignore:",
-  "    pattern: '^\\.'",
-  "  filenames:",
-  "    pattern: '^[a-z0-9][a-z0-9-]*$'",
-  "  assets:",
-  "    allowed: false",
-  "paths:",
-  "  contacts:",
-  "    description: People.",
-  "    records:",
-  "      schema:",
-  "        required: [name, type]",
-  "        properties:",
-  "          name: { type: string }",
-  "          type: { enum: [person, organization] }",
-  "      body:",
-  "        allowed: false",
-  "  notes:",
-  "    description: Notes.",
-  "    records: {}",
-  "  assets:",
-  "    description: Files.",
-  "    assets:",
-  "      allowed: true",
-  "",
-].join("\n");
+import { check, type CheckResult, type Finding, type Rule } from "@telepath-computer/autofile";
 
 const roots: string[] = [];
-after(async () => {
-  for (const root of roots) await rm(root, { recursive: true, force: true });
-});
+after(async () => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
 
-/**
- * Builds a vault on disk from a map of vault-relative paths to contents;
- * a path ending in "/" creates an empty folder.
- */
-async function vault(files: Record<string, string>): Promise<string> {
+async function vault(entries: Record<string, string>): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "autofile-check-"));
   roots.push(root);
-  for (const [path, content] of Object.entries(files)) {
-    if (path.endsWith("/")) {
-      await mkdir(join(root, path), { recursive: true });
-    } else {
+  for (const [path, contents] of Object.entries(entries)) {
+    if (path.endsWith("/")) await mkdir(join(root, path), { recursive: true });
+    else {
       await mkdir(dirname(join(root, path)), { recursive: true });
-      await writeFile(join(root, path), content);
+      await writeFile(join(root, path), contents);
     }
   }
   return root;
 }
 
-function byRule(result: CheckResult, rule: string): Finding[] {
+function findings(result: CheckResult, rule: Rule): Finding[] {
   return result.findings.filter((finding) => finding.rule === rule);
 }
 
-function violations(result: CheckResult): Finding[] {
-  return result.findings.filter((finding) => finding.severity === "violation");
-}
+test("an Obsidian-shaped vault with a config declaring nothing has no findings and counts nothing", async () => {
+  const root = await vault({
+    "autofile.yml": "# Deliberately declares nothing.\n",
+    ".obsidian/workspace.json": "{}",
+    "Daily Notes/2026-08-08.md": "[[Mira Holt]]\n",
+    "People/Mira Holt.md": "---\nname: Mira\n---\n",
+    "Templates/Person.md": "---\nname: {{name}}\n---\n",
+    ["Archive/cafe\u0301.md"]: "NFD filename\n",
+  });
+  assert.deepEqual(await check(root), { findings: [], filesChecked: 0 });
+});
 
-// --- config ---
-
-// vault.md: "An `autofile.yml` that cannot be read, does not parse, or does
-// not match the above makes the vault invalid; nothing else is checked".
-test("a missing config is a config violation and nothing else is checked", async () => {
-  const root = await vault({ "stray.txt": "x", "junk/deep.md": "---\nbad: [\n---\n" });
-  const result = await check(root);
-  assert.ok(result.findings.length > 0);
-  for (const finding of result.findings) {
-    assert.equal(finding.rule, "config");
-    assert.equal(finding.severity, "violation");
+test("config read, parse, and validation failures are the only findings", async () => {
+  const cases: Array<Record<string, string>> = [
+    { "notes/bad.md": "---\nx: [\n---\n" },
+    { "autofile.yml": "paths: [\n", "notes/bad.md": "---\nx: [\n---\n" },
+    { "autofile.yml": "paths:\n  /notes:\n    description: Notes\n    shema: {}\n", "notes/bad.md": "x" },
+  ];
+  for (const entries of cases) {
+    const result = await check(await vault(entries));
+    assert.equal(result.findings.length, 1);
+    assert.ok(result.findings.every((finding) => finding.rule === "config" && finding.file === "autofile.yml"));
+    assert.equal(result.filesChecked, 0);
   }
-  assert.match(result.findings[0]!.message, /cannot be read/);
-  assert.equal(result.filesChecked, 0);
+  assert.deepEqual(await check(await vault({ "autofile.yml": "# valid empty config\n" })), {
+    findings: [], filesChecked: 0,
+  });
 });
 
-test("an unparseable config is a config violation", async () => {
-  const root = await vault({ "autofile.yml": "global: [unclosed\n" });
-  const result = await check(root);
-  assert.equal(result.findings.length, 1);
-  assert.equal(result.findings[0]!.rule, "config");
-  assert.match(result.findings[0]!.message, /does not parse/);
-  assert.equal(result.filesChecked, 0);
-});
-
-test("an invalid config reports config findings only, however broken the vault", async () => {
+test("description alone governs its subtree and activates parse, name, collision, and links only there", async () => {
   const root = await vault({
-    "autofile.yml": "paths:\n  notes:\n    records: {}\n", // missing description
-    "loose.txt": "x",
-    "undeclared/x.md": "no frontmatter",
+    "autofile.yml": "paths:\n  /Notes:\n    description: Notes only\n",
+    "Notes/broken.md": "---\nx: [\n---\n",
+    "Notes/control\u0007.md": "",
+    "Notes/Twin.md": "",
+    "Notes/twin.md": "[[missing]]\n",
+    "Outside/broken.md": "---\nx: [\n---\n[[also-missing]]\n",
   });
   const result = await check(root);
-  assert.ok(result.findings.length > 0);
-  for (const finding of result.findings) assert.equal(finding.rule, "config");
-  assert.equal(result.filesChecked, 0);
+  assert.equal(result.filesChecked, 4);
+  assert.equal(findings(result, "parse").length, 1);
+  assert.equal(findings(result, "name").length, 1);
+  assert.equal(findings(result, "collision").length, 2);
+  assert.equal(findings(result, "internal_links.resolve").length, 1);
+  assert.ok(result.findings.every((finding) => finding.file?.startsWith("Notes/") ?? true));
 });
 
-// --- the starter shape ---
-
-// cli.md starter on a fresh-init-shaped vault: no violations; the declared
-// folders are empty, which is the legitimate fresh state — warnings only.
-test("the starter config passes clean on a fresh-init-shaped vault", async () => {
-  const root = await vault({
-    "autofile.yml": starterConfig,
-    "datasets/": "",
-    "assets/": "",
-    "topics/": "",
-  });
-  const result = await check(root);
-  assert.deepEqual(violations(result), []);
-  assert.equal(result.findings.length, 3);
-  for (const finding of result.findings) {
-    assert.equal(finding.rule, "empty");
-    assert.equal(finding.severity, "warning");
-  }
-  assert.deepEqual(
-    result.findings.map((finding) => finding.file).sort(),
-    ["assets", "datasets", "topics"],
-  );
-  assert.equal(result.filesChecked, 0);
+test("parse accepts absent or mapping frontmatter and reports invalid YAML and non-mappings", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /n:\n    description: Notes\n",
+    "n/plain.md": "body",
+    "n/map.md": "---\na: 1\n---\n",
+    "n/yaml.md": "---\na: [\n---\n",
+    "n/list.md": "---\n- a\n---\n",
+    "n/null.md": "---\nnull\n---\n",
+  }));
+  assert.deepEqual(findings(result, "parse").map((finding) => finding.file), ["n/list.md", "n/null.md", "n/yaml.md"]);
 });
 
-test("a populated valid starter vault has no findings", async () => {
-  const root = await vault({
-    "autofile.yml": starterConfig,
-    "datasets/pets.md": "---\ntitle: Pets\ndescription: Our pets.\ndata: [1, 2]\n---\n",
-    "assets/photo.jpg": "not really a jpeg",
-    "topics/autofile.md": "---\ntitle: Autofile\ndescription: The filing system.\n---\n\nNotes here.\n",
+test("schema reports every failure while valid frontmatter passes", async () => {
+  const result = await check(await vault({
+    "autofile.yml": ["paths:", "  /people:", "    description: People", "    schema:",
+      "      type: object", "      required: [name, age]", "      properties:",
+      "        name: { type: string }", "        age: { type: integer }", ""].join("\n"),
+    "people/good.md": "---\nname: Mira\nage: 3\n---\n",
+    "people/bad.md": "---\nname: 7\n---\n",
+  }));
+  assert.equal(findings(result, "schema").length, 2);
+  assert.ok(findings(result, "schema").every((finding) => finding.file === "people/bad.md"));
+});
+
+test("schema messages cover additional fields and integer, object, array, and null types", async () => {
+  const result = await check(await vault({
+    "autofile.yml": `paths:
+  /n:
+    schema:
+      type: object
+      additionalProperties: false
+      properties:
+        integer: { type: integer }
+        object: { type: object }
+        array: { type: array }
+        null: { type: "null" }
+`,
+    "n/bad.md": "---\ninteger: nope\nobject: nope\narray: nope\nnull: nope\nextra: nope\n---\n",
+  }));
+  assert.deepEqual(findings(result, "schema").map(({ message }) => message), [
+    "array must be an array",
+    "extra is not an allowed field",
+    "integer must be an integer",
+    "null must be null",
+    "object must be an object",
+  ]);
+});
+
+test("symbolic links are skipped rather than traversed as vault content", async () => {
+  const root = await vault({ "autofile.yml": "strict: true\n" });
+  const target = await mkdtemp(join(tmpdir(), "autofile-symlink-target-"));
+  roots.push(target);
+  await writeFile(join(target, "note.md"), "outside the vault\n");
+  await symlink(target, join(root, "linked"), "dir");
+  assert.deepEqual(await check(root), { findings: [], filesChecked: 0 });
+});
+
+test("body.allowed rejects non-whitespace bodies and accepts absent or whitespace-only bodies", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /data:\n    description: Data\n    body:\n      allowed: false\n",
+    "data/empty.md": "---\na: 1\n---\n \t\n",
+    "data/full.md": "---\na: 1\n---\nprose\n",
+  }));
+  assert.deepEqual(findings(result, "body.allowed").map((finding) => finding.file), ["data/full.md"]);
+});
+
+test("extensions rejects only extensions outside the declared list", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /assets:\n    description: Assets\n    extensions: [pdf, png]\n",
+    "assets/good.pdf": "%PDF", "assets/good.png": "png", "assets/bad.md": "text",
+  }));
+  assert.deepEqual(findings(result, "extensions").map((finding) => finding.file), ["assets/bad.md"]);
+});
+
+test("filenames.pattern checks every segment below the entry and strips the file extension", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /notes:\n    description: Notes\n    filenames:\n      pattern: '^[a-z-]+$'\n",
+    "notes/good-name.md": "", "notes/Bad/name.md": "", "notes/Bad Folder/Bad Name.md": "",
+  }));
+  assert.deepEqual(findings(result, "filenames.pattern").map((finding) => finding.file), [
+    "notes/Bad Folder/Bad Name.md", "notes/Bad Folder/Bad Name.md", "notes/Bad/name.md",
+  ]);
+});
+
+test("a file named .md has no extension, is not a note, and filenames.pattern matches its whole name", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /notes:\n    description: Notes\n    schema:\n      required: [target]\n    extensions: [md]\n    filenames:\n      pattern: '^\\.md$'\n    ignore:\n      dotfiles: false\n",
+    "notes/.md": "---\nnot: valid: yaml\n---\n",
+  }));
+  assert.deepEqual(result, {
+    findings: [{ rule: "extensions", severity: "violation", file: "notes/.md", message: "no extension is not among the extensions this path holds" }],
+    filesChecked: 1,
   });
-  const result = await check(root);
-  assert.deepEqual(result.findings, []);
+});
+
+test("whole-value frontmatter wikilinks are typed while body wikilinks must use the prose format", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /notes:\n    description: Notes\n    internal_links:\n      format: markdown-relative\n",
+    "notes/source.md": "---\ntarget: '[[target]]'\n---\n[[target]]\n",
+    "notes/target.md": "",
+  }));
+  assert.deepEqual(result, {
+    findings: [{ rule: "internal_links.format", severity: "violation", file: "notes/source.md", message: "[[target]] is not markdown-relative" }],
+    filesChecked: 2,
+  });
+});
+
+test("invalid and non-mapping frontmatter skip typed links but still scan the body", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /notes:\n    description: Notes\n",
+    "notes/invalid.md": "---\nbroken: [\n---\n[[body-invalid]]",
+    "notes/list.md": "---\n- '[[frontmatter-list]]'\n---\n[[body-list]]",
+  }));
+  assert.deepEqual(findings(result, "internal_links.resolve").map((finding) => finding.message), [
+    "[[body-invalid]] does not exist",
+    "[[body-list]] does not exist",
+  ]);
+  assert.equal(findings(result, "parse").length, 2);
+});
+
+test("internal link format distinguishes wikilinks, relative markdown, and absolute markdown", async () => {
+  const root = await vault({
+    "autofile.yml": "paths:\n  /wiki:\n    description: Wiki\n    internal_links:\n      format: wikilink\n  /relative:\n    description: Relative\n    internal_links:\n      format: markdown-relative\n  /absolute:\n    description: Absolute\n    internal_links:\n      format: markdown-absolute\n",
+    "target.md": "",
+    "wiki/good.md": "[[target]]", "wiki/bad.md": "[t](/target.md)",
+    "relative/good.md": "[t](../target.md)", "relative/bad.md": "[[target]]",
+    "absolute/good.md": "[t](/target.md)", "absolute/bad.md": "[t](../target.md)",
+  });
+  assert.deepEqual(findings(await check(root), "internal_links.format").map((finding) => finding.file), [
+    "absolute/bad.md", "relative/bad.md", "wiki/bad.md",
+  ]);
+});
+
+test("dead links warn once per occurrence while ignored and undeclared target files resolve", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /notes:\n    description: Notes\n    ignore:\n      pattern: '^ignored$'\n",
+    "notes/source.md": "[[ignored/hidden]] [[Outside Target]] [[gone]] [[gone]]",
+    "notes/ignored/hidden.md": "---\nbroken: [\n---\n",
+    "Elsewhere/Outside Target.md": "",
+  }));
+  assert.equal(result.filesChecked, 1);
+  const dead = findings(result, "internal_links.resolve");
+  assert.equal(dead.length, 2);
+  assert.ok(dead.every((finding) => finding.severity === "warning" && finding.message.includes("[[gone]]")));
+});
+
+test("wikilink and markdown headings resolve while a dead markdown link still warns", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /n:\n    description: Notes\n",
+    "n/a.md": "[[n/roadmap#goals]] [relative](roadmap.md#goals) [encoded](Some%20Note.md#goals) [dead](missing.md#goals)",
+    "n/roadmap.md": "# Goals\n",
+    "n/Some Note.md": "# Goals\n",
+  }));
+  assert.deepEqual(findings(result, "internal_links.resolve"), [
+    {
+      rule: "internal_links.resolve",
+      severity: "warning",
+      file: "n/a.md",
+      message: "[dead](missing.md#goals) does not exist",
+    },
+  ]);
+});
+
+test("internal_links.resolve false suppresses dead-link warnings", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /notes:\n    description: Notes\n    internal_links:\n      resolve: false\n",
+    "notes/x.md": "[[missing]]",
+  }));
+  assert.deepEqual(findings(result, "internal_links.resolve"), []);
+});
+
+test("strict reports each undeclared file, does not report declared files, and counts both", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "strict: true\npaths:\n  /notes:\n    description: Notes\n",
+    "notes/declared.txt": "", "loose.txt": "", "other/deep.txt": "",
+  }));
+  assert.deepEqual(findings(result, "strict").map((finding) => finding.file), ["loose.txt", "other/deep.txt"]);
   assert.equal(result.filesChecked, 3);
 });
 
-// --- parse ---
-
-test("a governed record whose frontmatter is not valid YAML is a parse violation", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/jules-verne.md": "---\nname: [unclosed\n---\n",
-  });
-  const result = await check(root);
-  const parse = byRule(result, "parse");
-  assert.equal(parse.length, 1);
-  assert.equal(parse[0]!.severity, "violation");
-  assert.equal(parse[0]!.file, "contacts/jules-verne.md");
-  assert.match(parse[0]!.message, /not valid YAML/);
-  // A parse failure precludes schema and body checks for the file.
-  assert.equal(byRule(result, "schema").length, 0);
-  assert.equal(byRule(result, "body").length, 0);
+test("strict accepts files under both described and undescribed path entries", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "strict: true\npaths:\n  /described:\n    description: Notes\n  /rules-only:\n    extensions: [md]\n",
+    "described/a.md": "", "rules-only/b.md": "", "loose.md": "",
+  }));
+  assert.deepEqual(findings(result, "strict").map((finding) => finding.file), ["loose.md"]);
+  assert.equal(result.filesChecked, 3);
 });
 
-// vault.md: "When present, the block must parse to a mapping" — a
-// structural rule of its own; a non-mapping is a parse violation and is
-// not schema-checked.
-for (const [shape, frontmatter] of [
-  ["a scalar", "42"],
-  ["a sequence", "- a\n- b"],
-  ["a bare string", "just a string"],
-] as const) {
-  test(`frontmatter that parses to ${shape} is a parse violation, not schema-checked`, async () => {
-    const root = await vault({
-      "autofile.yml": strictConfig,
-      "contacts/odd.md": `---\n${frontmatter}\n---\n`,
-    });
-    const result = await check(root);
-    const parse = byRule(result, "parse");
-    assert.equal(parse.length, 1);
-    assert.equal(parse[0]!.severity, "violation");
-    assert.equal(parse[0]!.file, "contacts/odd.md");
-    assert.match(parse[0]!.message, /not a mapping/);
-    assert.equal(byRule(result, "schema").length, 0);
-    assert.deepEqual(violations(result), parse);
-  });
-}
-
-// vault.md: "A record with no frontmatter is checked as an empty object" —
-// an empty block parses to null and stays {}, not a parse violation.
-test("an empty frontmatter block is checked as an empty object, not a parse violation", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/blank-block.md": "---\n---\n",
-  });
-  const result = await check(root);
-  assert.equal(byRule(result, "parse").length, 0);
-  const schema = byRule(result, "schema");
-  assert.ok(schema.length >= 1);
-  for (const finding of schema) assert.match(finding.message, /required/);
+test("collision reports both governed paths, while distinct paths do not collide", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /notes:\n    description: Notes\n",
+    "notes/A.md": "", "notes/a.md": "", "notes/b.md": "",
+  }));
+  assert.deepEqual(findings(result, "collision"), [
+    { rule: "collision", severity: "violation", file: "notes/A.md", message: 'collides with "notes/a.md"' },
+    { rule: "collision", severity: "violation", file: "notes/a.md", message: 'collides with "notes/A.md"' },
+  ]);
 });
 
-// cli.md: "a file no entry governs has nothing to violate" — an ungoverned
-// .md is never parsed.
-test("an ungoverned record is not parsed at all", async () => {
-  const root = await vault({
-    "autofile.yml": "paths:\n  notes:\n    description: Notes.\n",
-    "notes/broken.md": "---\nname: [unclosed\n---\n",
-  });
-  const result = await check(root);
-  assert.deepEqual(result.findings, []);
+test("missing warns only for an absent declared folder", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /missing:\n    description: Missing\n  /empty:\n    description: Empty\n  /ignored-only:\n    description: Ignored\n    ignore:\n      pattern: '^ignored\\.txt$'\n  /full:\n    description: Full\n",
+    "empty/": "", "ignored-only/ignored.txt": "", "full/x.txt": "",
+  }));
+  assert.deepEqual(findings(result, "missing"), [
+    { rule: "missing", severity: "warning", file: "missing", message: "declared path is missing" },
+  ]);
+});
+
+test("missing compares configured and on-disk paths after Unicode normalization", async () => {
+  const result = await check(await vault({
+    "autofile.yml": "paths:\n  /caf\u00e9:\n    extensions: [md]\n",
+    ["cafe\u0301/note.md"]: "",
+  }));
+  assert.deepEqual(findings(result, "missing"), []);
   assert.equal(result.filesChecked, 1);
 });
 
-// --- schema ---
-
-test("schema findings are plain prose per field", async () => {
+test("findings are deterministic and ordered by severity, path, rule, then message", async () => {
   const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/jules-verne.md": "---\nname: 42\ntype: person\n---\n",
+    "autofile.yml": "strict: true\npaths:\n  /n:\n    description: Notes\n    schema:\n      required: [z, a]\n",
+    "n/b.md": "[[missing]]", "n/a.md": "---\nx: 1\n---\n[[missing]]", "loose.txt": "",
   });
-  const result = await check(root);
-  const schema = byRule(result, "schema");
-  assert.equal(schema.length, 1);
-  assert.equal(schema[0]!.severity, "violation");
-  assert.equal(schema[0]!.file, "contacts/jules-verne.md");
-  // cli.md's example message, verbatim.
-  assert.equal(schema[0]!.message, "name must be a string");
+  const first = await check(root);
+  assert.deepEqual(await check(root), first);
+  assert.equal(first.findings.length, 7);
+  const keys = first.findings.map((finding) => `${finding.severity === "violation" ? 0 : 1}\0${finding.file}\0${finding.rule}\0${finding.message}`);
+  assert.deepEqual(keys, [...keys].sort());
 });
 
-test("a missing required field is reported by name", async () => {
+test("progress fires once per governed file with the governed running count", async () => {
   const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/nameless.md": "---\ntype: person\n---\n",
+    "autofile.yml": "paths:\n  /n:\n    description: Notes\n", "n/a.md": "", "n/b.md": "", "outside.md": "",
   });
-  const result = await check(root);
-  const schema = byRule(result, "schema");
-  assert.equal(schema.length, 1);
-  assert.match(schema[0]!.message, /^name\b/);
-  assert.match(schema[0]!.message, /required/);
-});
-
-test("an enum failure names the allowed values", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/pet.md": "---\nname: Rex\ntype: dog\n---\n",
-  });
-  const result = await check(root);
-  const schema = byRule(result, "schema");
-  assert.equal(schema.length, 1);
-  assert.match(schema[0]!.message, /^type /);
-  assert.match(schema[0]!.message, /person/);
-  assert.match(schema[0]!.message, /organization/);
-});
-
-test("nested failures use dotted paths", async () => {
-  const root = await vault({
-    "autofile.yml": [
-      "paths:",
-      "  contacts:",
-      "    description: People.",
-      "    records:",
-      "      schema:",
-      "        properties:",
-      "          address:",
-      "            type: object",
-      "            properties:",
-      "              city: { type: string }",
-      "",
-    ].join("\n"),
-    "contacts/x.md": "---\naddress:\n  city: 7\n---\n",
-  });
-  const result = await check(root);
-  const schema = byRule(result, "schema");
-  assert.equal(schema.length, 1);
-  assert.equal(schema[0]!.message, "address.city must be a string");
-});
-
-// vault.md: "A record with no frontmatter is checked as an empty object."
-test("a record with no frontmatter is checked as an empty object", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/blank.md": "",
-  });
-  const result = await check(root);
-  const schema = byRule(result, "schema");
-  assert.ok(schema.length >= 1);
-  for (const finding of schema) assert.match(finding.message, /required/);
-});
-
-test("every schema failure is reported, not just the first", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/bad.md": "---\nname: 42\ntype: dog\n---\n",
-  });
-  const result = await check(root);
-  const messages = byRule(result, "schema").map((finding) => finding.message);
-  assert.equal(messages.length, 2);
-  assert.ok(messages.some((message) => message.startsWith("name ")));
-  assert.ok(messages.some((message) => message.startsWith("type ")));
-});
-
-// vault.md: "Frontmatter parses to JSON values: YAML's timestamp type is
-// not applied, so an unquoted date stays the string it was written as."
-test("an unquoted date satisfies a string schema, same as a quoted one", async () => {
-  const root = await vault({
-    "autofile.yml": [
-      "paths:",
-      "  contacts:",
-      "    description: People.",
-      "    records:",
-      "      schema:",
-      "        properties:",
-      "          date: { type: string }",
-      "          quoted: { type: string }",
-      "",
-    ].join("\n"),
-    "contacts/x.md": "---\ndate: 2026-08-05\nquoted: '2026-08-05'\n---\n",
-  });
-  const result = await check(root);
-  assert.deepEqual(byRule(result, "schema"), []);
-});
-
-// Dropping the timestamp type must not drop the rest of YAML's core
-// scalars: booleans and numbers keep their JSON types.
-test("unquoted booleans and numbers still parse to their JSON types", async () => {
-  const root = await vault({
-    "autofile.yml": [
-      "paths:",
-      "  contacts:",
-      "    description: People.",
-      "    records:",
-      "      schema:",
-      "        properties:",
-      "          active: { type: boolean }",
-      "          count: { type: number }",
-      "          name: { type: string }",
-      "",
-    ].join("\n"),
-    "contacts/x.md": "---\nactive: true\ncount: 42\nname: true\n---\n",
-  });
-  const result = await check(root);
-  const schema = byRule(result, "schema");
-  // active and count pass as boolean and number; name fails because an
-  // unquoted true is a boolean, not a string.
-  assert.equal(schema.length, 1);
-  assert.equal(schema[0]!.message, "name must be a string");
-});
-
-// --- body ---
-
-test("a body where body.allowed is false is a violation", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/chatty.md": "---\nname: A\ntype: person\n---\n\nSome prose.\n",
-  });
-  const result = await check(root);
-  const body = byRule(result, "body");
-  assert.equal(body.length, 1);
-  assert.equal(body[0]!.severity, "violation");
-  assert.equal(body[0]!.file, "contacts/chatty.md");
-});
-
-// vault.md: "Whitespace alone is no body."
-test("whitespace below the frontmatter is no body", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/tidy.md": "---\nname: A\ntype: person\n---\n\n   \n\t\n",
-  });
-  const result = await check(root);
-  assert.equal(byRule(result, "body").length, 0);
-});
-
-// vault.md: "Bodies are allowed by default."
-test("bodies are allowed by default", async () => {
-  const root = await vault({
-    "autofile.yml": "paths:\n  notes:\n    description: Notes.\n    records: {}\n",
-    "notes/x.md": "---\na: 1\n---\n\nA body.\n",
-  });
-  const result = await check(root);
-  assert.deepEqual(result.findings, []);
-});
-
-// vault.md: frontmatter is "a YAML block opened and closed by a `---` line"
-// — an unclosed block is not frontmatter, so the whole file is body.
-test("an unterminated frontmatter block is body, not frontmatter", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/unclosed.md": "---\nname: A\ntype: person\n",
-  });
-  const result = await check(root);
-  assert.equal(byRule(result, "body").length, 1);
-  // The frontmatter is the empty object, so required fields are missing.
-  assert.ok(byRule(result, "schema").length >= 1);
-});
-
-// --- asset ---
-
-test("a non-record file where assets are forbidden is an asset violation", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/scan.pdf": "%PDF",
-  });
-  const result = await check(root);
-  const asset = byRule(result, "asset");
-  assert.equal(asset.length, 1);
-  assert.equal(asset[0]!.severity, "violation");
-  assert.equal(asset[0]!.file, "contacts/scan.pdf");
-  assert.equal(asset[0]!.message, "not a record, in a path that forbids assets");
-});
-
-test("an asset in a path that allows assets is fine", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "assets/scan.pdf": "%PDF",
-  });
-  const result = await check(root);
-  assert.equal(byRule(result, "asset").length, 0);
-  assert.equal(result.filesChecked, 1);
-});
-
-// vault.md: a record is one `.md` file — and a leading dot opens no
-// extension, so a file named exactly ".md" is a whole name with no
-// extension, not an `.md` file. Asset rules apply to it.
-test("a file named exactly .md is not a record; asset rules apply", async () => {
-  const config = [
-    "global:",
-    "  assets:",
-    "    allowed: false",
-    "paths:",
-    "  notes:",
-    "    description: Notes.",
-    "    records:",
-    "      schema:",
-    "        required: [title]",
-    "",
-  ].join("\n");
-  const root = await vault({
-    "autofile.yml": config,
-    "notes/.md": "",
-    "notes/x.md": "",
-  });
-  const result = await check(root);
-  const asset = byRule(result, "asset");
-  assert.equal(asset.length, 1);
-  assert.equal(asset[0]!.file, "notes/.md");
-  const schema = byRule(result, "schema");
-  assert.equal(schema.length, 1);
-  assert.equal(schema[0]!.file, "notes/x.md");
-  assert.match(schema[0]!.message, /title.*required/);
-});
-
-// vault.md: a record is one `.md` file — a dot-leading name included. The
-// records block in force governs it, its references are scanned, and
-// asset rules do not apply.
-test("a dot-leading .md file is a record: schema-checked, reference-scanned, not an asset", async () => {
-  const config = [
-    "global:",
-    "  assets:",
-    "    allowed: false",
-    "paths:",
-    "  notes:",
-    "    description: Notes.",
-    "    records:",
-    "      schema:",
-    "        required: [title]",
-    "",
-  ].join("\n");
-  const root = await vault({
-    "autofile.yml": config,
-    // No frontmatter and a dangling body link: schema and reference
-    // findings fire now that the file is a record; the asset ban does not.
-    "notes/.hidden.md": "[[contacts/nowhere]]\n",
-    "notes/x.md": "---\ntitle: t\n---\n",
-  });
-  const result = await check(root);
-  assert.deepEqual(byRule(result, "asset"), []);
-  const schema = byRule(result, "schema");
-  assert.equal(schema.length, 1);
-  assert.equal(schema[0]!.file, "notes/.hidden.md");
-  assert.match(schema[0]!.message, /title.*required/);
-  const reference = byRule(result, "reference");
-  assert.equal(reference.length, 1);
-  assert.equal(reference[0]!.file, "notes/.hidden.md");
-  assert.match(reference[0]!.message, /contacts\/nowhere/);
+  const progress: number[] = [];
+  const result = await check(root, { onFile: (count) => progress.push(count) });
+  assert.deepEqual(progress, [1, 2]);
   assert.equal(result.filesChecked, 2);
 });
 
-test("with no assets block in force, any file is fine", async () => {
-  const root = await vault({
-    "autofile.yml": "paths:\n  misc:\n    description: Misc.\n",
-    "misc/anything.bin": "\x00\x01",
-  });
-  const result = await check(root);
-  assert.deepEqual(result.findings, []);
-});
-
-// --- root ---
-
-// vault.md: "The root itself holds only the config and the declared
-// folders: anything else at the root — a loose file, an undeclared folder —
-// is a violation".
-test("a loose file and an undeclared folder at the root are root violations", async () => {
-  const root = await vault({
-    "autofile.yml": "paths:\n  notes:\n    description: Notes.\n",
-    "notes/x.md": "hello",
-    "loose.md": "hello",
-    "undeclared/y.md": "hello",
-  });
-  const result = await check(root);
-  const rootFindings = byRule(result, "root");
-  assert.equal(rootFindings.length, 2);
-  assert.deepEqual(
-    rootFindings.map((finding) => finding.file).sort(),
-    ["loose.md", "undeclared"],
-  );
-  for (const finding of rootFindings) assert.equal(finding.severity, "violation");
-  // Files inside an undeclared folder are still checked and counted.
-  assert.equal(result.filesChecked, 3);
-});
-
-// vault.md: "The config file itself is neither record nor asset ... `check`
-// neither names it in a finding (beyond `config`) nor counts it."
-test("autofile.yml is exempt from every rule and never counted", async () => {
-  const root = await vault({
-    // The strict global forbids assets and its filenames pattern would
-    // reject the "autofile" stem, were the config governed.
-    "autofile.yml": [
-      "global:",
-      "  filenames:",
-      "    pattern: '^x$'",
-      "  assets:",
-      "    allowed: false",
-      "paths:",
-      "  x:",
-      "    description: X.",
-      "",
-    ].join("\n"),
-    "x/x.md": "",
-  });
-  const result = await check(root);
-  assert.deepEqual(result.findings, []);
-  assert.equal(result.filesChecked, 1);
-});
-
-// --- filename ---
-
-test("a file's final segment is matched with its extension stripped", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "notes/Bad Name.md": "",
-    "notes/good-name.md": "",
-  });
-  const result = await check(root);
-  const filename = byRule(result, "filename");
-  assert.equal(filename.length, 1);
-  assert.equal(filename[0]!.severity, "violation");
-  assert.equal(filename[0]!.file, "notes/Bad Name.md");
-  assert.match(filename[0]!.message, /Bad Name/);
-});
-
-// The extension is from the last dot, so earlier dots stay in the matched
-// stem — and the strict pattern forbids them.
-test("only the last dot starts the extension", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "notes/report.final.md": "",
-  });
-  const result = await check(root);
-  const filename = byRule(result, "filename");
-  assert.equal(filename.length, 1);
-  assert.match(filename[0]!.message, /report\.final/);
-});
-
-test("folder segments are matched unstripped", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "notes/sub.dir/x.md": "",
-  });
-  const result = await check(root);
-  const filename = byRule(result, "filename");
-  assert.equal(filename.length, 1);
-  assert.equal(filename[0]!.file, "notes/sub.dir/x.md");
-  assert.match(filename[0]!.message, /sub\.dir/);
-});
-
-// vault.md: "A folder's rules apply to its children, not to the folder
-// itself" — a top-level folder's name answers to global's pattern, and
-// segments below it to the entry's.
-test("each segment answers to the pattern in force at its location", async () => {
-  const root = await vault({
-    "autofile.yml": [
-      "global:",
-      "  filenames:",
-      "    pattern: '^[a-z]+$'",
-      "paths:",
-      "  notes:",
-      "    description: Notes.",
-      "    filenames:",
-      "      pattern: '^[0-9]+$'",
-      "",
-    ].join("\n"),
-    "notes/123.md": "", // entry pattern: ok
-    "notes/abc.md": "", // entry pattern: fails
-  });
-  const result = await check(root);
-  const filename = byRule(result, "filename");
-  // "notes" itself passes global's pattern; only abc fails the entry's.
-  assert.equal(filename.length, 1);
-  assert.equal(filename[0]!.file, "notes/abc.md");
-});
-
-test("a segment with a control character is a filename violation", async () => {
-  const root = await vault({
-    "autofile.yml": "paths:\n  notes:\n    description: Notes.\n",
-    "notes/be\u0007p.md": "",
-  });
-  const result = await check(root);
-  const filename = byRule(result, "filename");
-  assert.equal(filename.length, 1);
-  assert.match(filename[0]!.message, /control character/);
-});
-
-test("a segment that is not Unicode NFC is a filename violation", async () => {
-  const root = await vault({
-    "autofile.yml": "paths:\n  notes:\n    description: Notes.\n",
-    // "café" in decomposed (NFD) form: e + combining acute accent.
-    "notes/cafe\u0301.md": "",
-  });
-  const result = await check(root);
-  const filename = byRule(result, "filename");
-  assert.equal(filename.length, 1);
-  assert.match(filename[0]!.message, /NFC/);
-});
-
-// 255 UTF-8 bytes is the common per-segment filesystem limit; a name at
-// exactly the limit is legal. (A longer one cannot be created on disk here,
-// so the over-limit branch is covered by the checker's own bound.)
-test("a 255-byte segment is legal", async () => {
-  const name = "a".repeat(252) + ".md";
-  const root = await vault({
-    "autofile.yml": "paths:\n  notes:\n    description: Notes.\n",
-    [`notes/${name}`]: "",
-  });
-  const result = await check(root);
-  assert.equal(byRule(result, "filename").length, 0);
-});
-
-// --- collision ---
-
-// vault.md: "two paths that differ only by case collide on a
-// case-insensitive filesystem, so a vault may not contain them both."
-test("two files differing only by case are a collision", async () => {
-  const root = await vault({
-    "autofile.yml": "paths:\n  notes:\n    description: Notes.\n",
-    "notes/alpha.md": "",
-    "notes/Alpha.md": "",
-  });
-  const result = await check(root);
-  const collision = byRule(result, "collision");
-  assert.equal(collision.length, 2);
-  assert.deepEqual(
-    collision.map((finding) => finding.file).sort(),
-    ["notes/Alpha.md", "notes/alpha.md"],
-  );
-  for (const finding of collision) {
-    assert.equal(finding.severity, "violation");
-    assert.match(finding.message, /case/);
+test("check scales to 5000 linked notes without scanning the vault per link", async () => {
+  const entries: Record<string, string> = {
+    "autofile.yml": "paths:\n  /notes:\n    description: Notes\n",
+  };
+  for (let index = 0; index < 5000; index++) {
+    entries[`notes/${index}.md`] = `[[${(index + 1) % 5000}]]`;
   }
-});
+  const root = await vault(entries);
 
-test("two folders differing only by case are a collision", async () => {
-  const root = await vault({
-    "autofile.yml": "paths:\n  notes:\n    description: Notes.\n",
-    "notes/Sub/x.md": "",
-    "notes/sub/y.md": "",
-  });
+  const started = performance.now();
   const result = await check(root);
-  const collision = byRule(result, "collision");
-  const files = collision.map((finding) => finding.file).sort();
-  assert.deepEqual(files, ["notes/Sub", "notes/sub"]);
-});
+  const elapsed = performance.now() - started;
 
-// --- empty ---
-
-// cli.md: "`empty` — a described path whose folder is missing or empty."
-test("a declared folder that is missing or empty is an empty warning", async () => {
-  const root = await vault({
-    "autofile.yml": [
-      "paths:",
-      "  present:",
-      "    description: Present.",
-      "  hollow:",
-      "    description: Hollow.",
-      "  absent:",
-      "    description: Absent.",
-      "",
-    ].join("\n"),
-    "present/x.md": "",
-    "hollow/": "",
-  });
-  const result = await check(root);
-  const empty = byRule(result, "empty");
-  assert.equal(empty.length, 2);
-  for (const finding of empty) assert.equal(finding.severity, "warning");
-  assert.deepEqual(empty.map((finding) => finding.file).sort(), ["absent", "hollow"]);
-  assert.match(empty.find((finding) => finding.file === "absent")!.message, /missing/);
-  assert.match(empty.find((finding) => finding.file === "hollow")!.message, /empty/);
-});
-
-// --- ignore ---
-
-// vault.md: "Ignored files are invisible to `check`" — not checked, not
-// counted, subtree included. Ignore precedes recordhood: contacts/.draft.md
-// is a dot-leading record with broken frontmatter, and being ignored, it
-// is never parsed.
-test("ignored files and subtrees are invisible: unchecked and uncounted", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/ok.md": "---\nname: A\ntype: person\n---\n",
-    "contacts/.trash/awful name.pdf": "x",
-    "contacts/.draft.md": "---\nbroken: [\n---\n",
-    ".obsidian/workspace.json": "{}",
-    "notes/n.md": "",
-    "assets/pic.jpg": "x",
-  });
-  const result = await check(root);
+  assert.equal(result.filesChecked, 5000);
   assert.deepEqual(result.findings, []);
-  assert.equal(result.filesChecked, 3);
-});
-
-// --- symlinks ---
-
-test("symlinks are not followed, checked, or counted", async () => {
-  const outside = await mkdtemp(join(tmpdir(), "autofile-outside-"));
-  roots.push(outside);
-  await writeFile(join(outside, "Bad Name.pdf"), "x");
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/ok.md": "---\nname: A\ntype: person\n---\n",
-    "notes/n.md": "",
-    "assets/pic.jpg": "x",
-  });
-  await symlink(outside, join(root, "contacts", "linked"));
-  await symlink(join(outside, "Bad Name.pdf"), join(root, "contacts", "linked.pdf"));
-  const result = await check(root);
-  assert.deepEqual(result.findings, []);
-  assert.equal(result.filesChecked, 3);
-});
-
-// --- determinism and ordering ---
-
-test("findings come back violations first, then by file, then by rule; runs are deep-equal", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "contacts/zz.md": "---\nname: 42\ntype: person\n---\n\nA body.\n", // body + schema
-    "contacts/aa.pdf": "x", // asset
-    "loose.txt": "x", // root (and asset at the root under global)
-    "notes/": "",
-  });
-  const first = await check(root);
-  const second = await check(root);
-  assert.deepEqual(first, second);
-
-  const severities = first.findings.map((finding) => finding.severity);
-  const firstWarning = severities.indexOf("warning");
-  assert.ok(firstWarning > 0, "expected both severities");
-  assert.ok(!severities.slice(firstWarning).includes("violation"), "violations precede warnings");
-
-  const violationKeys = violations(first).map((finding) => `${finding.file ?? ""} ${finding.rule}`);
-  assert.deepEqual(violationKeys, [...violationKeys].sort());
-
-  // Within one file, rules are ordered: body before schema for zz.md.
-  const zz = first.findings.filter((finding) => finding.file === "contacts/zz.md");
-  assert.deepEqual(zz.map((finding) => finding.rule), ["body", "schema"]);
-});
-
-// cli.md loading state: "the count rising as files are read" — check
-// reports progress through the optional onFile callback, once per checked
-// file with the running count.
-test("check reports progress through onFile, once per file", async () => {
-  const root = await vault({
-    "autofile.yml": strictConfig,
-    "notes/a.md": "",
-    "notes/b.md": "",
-    "notes/c.md": "",
-  });
-  const counts: number[] = [];
-  const result = await check(root, { onFile: (count) => counts.push(count) });
-  assert.deepEqual(counts, [1, 2, 3]);
-  assert.equal(result.filesChecked, 3);
+  // Indexed checks normally finish in a few seconds. Eight seconds leaves
+  // generous headroom on a loaded machine but fails the 17s quadratic probe.
+  assert.ok(elapsed < 8000, `check took ${Math.round(elapsed)}ms`);
 });

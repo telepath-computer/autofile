@@ -1,32 +1,20 @@
-global:
-  ignore:
-    pattern: '^\.'
-  filenames:
-    pattern: '^[a-z0-9][a-z0-9-]*$'
-  assets:
-    allowed: false
-
 paths:
-  contacts:
-    description: |
-      People. One record per person; update the existing record when
-      details change.
-    records:
-      schema:
-        required: [name]
-        properties:
-          name: { type: string }
-
-  notes:
-    description: |
-      Freeform notes, nested by project.
-
-  attachments:
-    description: |
-      Source material and attached files: scans, photos, downloads.
-    assets:
-      allowed: true
-
-  journal:
-    description: |
-      Dated entries, one file per day.
+  /archive:
+    description: Stored documents.
+    extensions: [pdf]
+  /contacts:
+    description: Structured contacts.
+    extensions: [md]
+    filenames:
+      pattern: '[a-z][a-z-]*'
+    schema:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string }
+    body:
+      allowed: false
+    internal_links:
+      format: wikilink
+  /missing:
+    description: A deliberately absent scope.
