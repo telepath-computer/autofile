@@ -1,30 +1,26 @@
 # Vault
 
-A vault is a folder with an `autofile.yml` at its root. The config declares
-*paths* — folders it governs — and what the notes there must satisfy. It
-need not describe the whole folder: a vault may be an existing Obsidian
-vault with three declared paths among thirty. A file under a declared path
-is *governed*; one under none is outside Autofile's concern.
+A vault is a folder of markdown notes with an `autofile.yml` at its
+root. The config declares folders and states what is true inside each —
+what belongs there, what shape its notes take, what files it may hold.
+Autofile serves two ends with those statements: agents can file
+reliably, because the config answers where a thing goes, what shape it
+must have, and what it is called; and applications can trust the data,
+because a declared folder's notes verifiably satisfy their schema. The
+config governs only what it declares. A folder no entry reaches is
+outside Autofile's concern — an existing vault adopts Autofile by
+declaring one folder, and tightens by declaring more.
 
 ## Notes
 
-A note is a markdown file in the vault. The extension is exactly `.md`;
-`.markdown` and `.canvas` are other files, which a vault stores rather than
-validates. What a note holds — one person, one day, a running log — is the
-path description's to say.
+A note is a markdown file. The extension is exactly `.md`. A note has
+two parts, both optional:
 
-A name's extension is what follows its last dot, unless the name begins
-with that dot: `.env` and `.md` alike have none. So a file named `.md` is
-not a note, and the same reading serves `extensions` and the name
-`filenames.pattern` matches.
-
-A note has two parts, both optional:
-
-- **Frontmatter** — a YAML block opened and closed by a `---` line at the
-  start of the file, carrying the note's fields. It must parse to a
-  mapping. Values parse as YAML's core schema, to JSON: `true` and `false`
-  are booleans where `yes` and `on` are strings, and an unquoted date stays
-  the string it was written as.
+- **Frontmatter** — a YAML block opened and closed by a `---` line at
+  the start of the file, carrying the note's fields. It must parse to a
+  mapping. Values parse as YAML's core schema, to JSON: `true` and
+  `false` are booleans where `yes` and `on` are strings, and an unquoted
+  date stays the string it was written as.
 - **Body** — everything below the frontmatter. Whitespace alone does not
   count as one.
 
@@ -33,218 +29,248 @@ A note has two parts, both optional:
 Every key the config may hold:
 
 ```yaml
+version: 1
+
 strict: <boolean>
 
-paths:
-  <path>:
+link_format: wikilink | markdown
+
+filename_pattern: <regexp>
+
+ignore: [<regexp>, …]
+
+folders:
+  - path: <folder>
     description: <text>
     schema: <JSON Schema>
-    body:
-      allowed: <boolean>
     extensions: [<extension>, …]
-    filenames:
-      pattern: <regexp>
-    internal_links:
-      resolve: <boolean>
-      format: wikilink | markdown-relative | markdown-absolute
-    ignore:
-      dotfiles: <boolean>
-      pattern: <regexp>
+    filename_pattern: <regexp>
+    body: markdown | raw | none
+    additional_subfolders: <boolean>
 ```
+
+Everything in force in a vault is visible in its config. The spec
+defines what each key means and what its default is; `init` writes the
+defaults into the config as comments ([CLI](cli.md)), so the setup is
+readable in the file even before anything is set, and adopting or
+changing a convention is editing a visible line.
+
+### `version`
+
+The config format version. Required, an integer; this document describes
+version 1. A config without it is read as pre-versioned and reported as
+one finding naming the migration, not as a cascade of unknown keys. A
+version this autofile does not understand is likewise one finding. The
+gate exists so a config is always read under the rules it was written
+for, or not at all.
 
 ### `strict`
 
-Asserts that the config completely describes the vault. Without it,
-Autofile answers only for the scopes it was given; with it, every file in
-the folder is governed, so one under no declared path contradicts the
-claim. Strict widens what a vault answers for; it does not change what is
-required of a governed file.
+Asserts that nothing in the vault is ungoverned: every file falls under
+a folder entry or an `ignore` pattern, and anything else is the
+`coverage` finding. Without it, files outside every entry are simply not
+Autofile's concern. Strict widens what the vault answers for; it never
+changes what an entry requires. `autofile.yml` itself is always exempt —
+a strict vault necessarily holds one at the root.
 
 **Default:** `false`.
 
-### `paths`
+### `link_format`
 
-The entries, keyed by folder.
+How every internal link in the vault is written, frontmatter and
+prose alike: `wikilink` — links are wikilinks,
+`[[contacts/priya-narayan|Priya]]`; or `markdown` — links are standard
+markdown links with targets relative to the note's own folder,
+`[Priya](../contacts/priya-narayan)`. Each format has one syntax; see
+Internal links for what each means.
 
-- A key starts with `/` and carries no trailing slash. It may name a folder
-  at any depth: `/`, `/contacts`, `/Daily Notes`,
-  `/personal/misc/video games`.
-- Spaces need no quoting; a key containing `: ` does.
-- `/` is the entry for the vault root, and so the outermost scope.
-- Entries may overlap: declaring both `/personal` and
-  `/personal/misc/video games` covers a subtree broadly while governing one
-  corner of it specifically.
-- Order carries no meaning. By convention configs are written in path
-  order, so they read as an outline of the vault.
+**Default:** `wikilink`.
 
-An entry may declare any of the settings below.
+### `filename_pattern`
 
-#### `description`
+A regular expression every governed note's filename (extension stripped)
+and every declared path segment must match in full. A declared segment
+that fails it is a `config` finding. A folder entry may override it for
+its own files. The vault-wide pattern binds notes and declarations;
+files that are not notes answer to no pattern unless an entry's own
+`filename_pattern` reaches them.
 
-What belongs in this scope rather than another, and how to file it — a
-filing instruction rather than documentation.
+**Default:** none; names are unconstrained.
 
-**Default:** none. An entry without one scopes rules rather than inviting
-filing: nothing is filed there, and a file already there answers to the
-nearest description above it.
+### `ignore`
 
-#### `schema`
+Patterns for files and folders that are not the vault's concern. Each is
+matched against one path segment at a time, a plain match rather than a
+full one. Ignoring a folder ignores its subtree. An ignored file is not
+vault content, so no rule reaches it, but it is still a file: a link to
+it resolves. Declaring a path an `ignore` pattern would hide is a
+`config` finding — a config cannot both govern and disown a place.
 
-JSON Schema (2020-12) that a note's frontmatter must satisfy. A note with
-no frontmatter is checked as an empty object.
+There are no always-ignored names: the conventional dotfile pattern
+(`['^\.']`, hiding `.obsidian/` and `.trash/`) ships as a commented
+line in `init`'s config, adopted by uncommenting it.
 
-Formats are asserted, not annotations. Autofile adds two to JSON Schema's
-own: `internal-link`, a value that is entirely a wikilink, since that is
-what a link in frontmatter is, and `datetime`, a date and time without a
-timezone offset —
-`2026-08-08T10:00`, seconds optional, as Obsidian writes it, where JSON
-Schema's `date-time` demands an offset Obsidian omits. Neither checks that
-a link resolves.
+**Default:** none.
 
-**Default:** none; frontmatter is unconstrained.
+### `folders`
 
-#### `body`
+The declared folders, as a list of entries. Each entry is a set of
+statements about one folder; each field constrains only what it names,
+and a field left out constrains nothing. Entries do not interact: no
+setting cascades from one entry to another, and where entries nest, the
+most specific entry governs its subtree wholesale (see Governance).
 
-`allowed: false` forbids a body here, for scopes holding pure structured
-data.
+- `path` — the folder, vault-relative and `/`-separated, with no
+  leading, trailing, or repeated separators and no `..` segments;
+  `.` declares the vault root itself. Required. No two entries may name
+  the same path, and no two declared paths may differ only by case or
+  Unicode normalization; either is a `config` finding.
+- `description` — what belongs here rather than elsewhere, and how to
+  file it: a filing instruction, not documentation. An entry without one
+  leaves a hole in the map — advisory, not invalid (see Validity).
+- `schema` — JSON Schema (2020-12) the folder's notes' frontmatter must
+  satisfy. A note with no frontmatter is checked as an empty object.
+  Formats are asserted, not annotations. Autofile adds two:
+  `internal-link`, a value that is entirely an internal link in the
+  vault's `link_format`, and `datetime`,
+  a date and time without a timezone offset — `2026-08-08T10:00`,
+  seconds optional, as Obsidian writes it. Neither checks that a link
+  resolves. **Default:** none; frontmatter is unconstrained.
+- `extensions` — the file extensions the folder accepts, written
+  lowercase and dot-less, matched case-insensitively (`photo.JPG`
+  matches `jpg`). A name's extension is what follows its last dot,
+  unless the name begins with that dot: `archive.tar.gz` is `gz`, and
+  `.env` has none. `['*']` — the wildcard, legal only as the sole
+  entry — explicitly accepts any file, extensionless included, and
+  means the same as omitting the key. A file with no extension is
+  otherwise accepted only where `extensions` is omitted.
+  **Default:** none; any file may sit here.
+- `filename_pattern` — a pattern for this folder's filenames, replacing
+  the vault-wide one; full match, extension stripped, applying to every
+  governed file in the entry's scope. **Default:** the vault's
+  `filename_pattern`, which binds notes only.
+- `body` — what the folder's notes carry below their frontmatter.
+  `markdown`, the default. `raw` — content this vault does not
+  interpret: its links are not checked and a serving layer does not
+  transform it, so what a raw body actually is (HTML, plain text, a
+  transcript) is the record's own business, declared in its fields
+  where a consumer needs to know. `none` forbids a body, for folders
+  holding pure structured data where prose is a sign the fields were
+  skipped. **Default:** `markdown`.
+- `additional_subfolders` — `false` forbids subfolders beyond those a
+  more specific entry governs: a subfolder with its own entry stands on
+  that entry; any other is a finding. `true`, the default, allows
+  subfolders and extends this entry's statements over them.
 
-**Default:** `allowed: true`.
+**Default:** no entries — a config declaring no folders governs nothing,
+which with `strict: false` is a valid vault that asks nothing of anyone.
 
-#### `extensions`
+## Governance
 
-The file extensions this scope may hold: `[md]` for notes only,
-`[pdf, png]` for a folder of attachments.
+Which entry answers for a file:
 
-**Default:** none; any file may sit here.
-
-#### `filenames`
-
-`pattern` is a regular expression that every path segment below this
-entry's folder must match in full, the final segment of a file with its
-extension stripped.
-
-**Default:** none; any name a filesystem can carry.
-
-#### `internal_links`
-
-`resolve: false` drops the expectation that links here resolve.
-
-`format` requires prose links to be written one way: `wikilink`,
-`markdown-relative`, or `markdown-absolute`. External URLs are not internal
-links and no `format` constrains them.
-
-**Default:** `resolve: true`, and no `format`.
-
-#### `ignore`
-
-`dotfiles` ignores names beginning with a dot, `.obsidian/` and `.trash/`
-among them. `pattern` ignores a name it matches — matched against one path
-segment at a time, and a plain match rather than a full one.
-
-Ignoring a folder ignores its subtree. An ignored file is not vault
-content, so no rule reaches it, but it is still a file: a link to it
-resolves.
-
-**Default:** `dotfiles: true`, and no `pattern`.
-
-## Inheritance
-
-- Each setting is inherited on its own: a file takes the value from the
-  nearest enclosing entry that specifies that setting, or the default where
-  no entry does. An entry declaring `internal_links: { format: … }`
-  therefore keeps an inherited `resolve: false`.
-- A setting's *value* is taken whole. A nearer `schema` replaces an
-  inherited one rather than merging with it.
-- Writing a setting overrides what an ancestor said; omitting it inherits.
-  An override is a value the setting takes: a boolean is written `true` or
-  `false`, and a setting that can be none — a `schema`, a pattern,
-  `extensions`, a link format — is written `null`, which is also its
-  default.
-- A folder's rules apply to its children, not to the folder itself.
-
-At their defaults the settings constrain nothing, with one exception:
-`internal_links.resolve` is on, so links in a declared path are expected to
-resolve.
+- The most specific declared path enclosing the file governs it, and
+  governs it wholesale: every judgment about the file — schema,
+  extensions, filenames, body, subfolders — comes from that one entry.
+  Nothing is inherited from enclosing entries, ever.
+- Within its scope, an entry's statements apply to what they are about:
+  `schema`, `body`, and note filenames to `.md` files; `extensions` to
+  every file; `additional_subfolders` to folders.
+- A file no entry reaches is out of scope: no finding, no permission —
+  not Autofile's concern. Under `strict: true` it is the `coverage`
+  finding instead.
+- `autofile.yml` is exempt: no entry or setting governs it.
 
 ## Internal links
 
-An internal link points from one note to a note or file in the same vault.
-It may be written as any of:
+An internal link points from a note to a note or file in the same
+vault. The vault's `link_format` governs how every internal link is
+written — frontmatter and prose alike — and each format has one syntax,
+so a link written in the other syntax is the `link_format` finding
+wherever it appears. A URL destination is external and no finding.
 
-- a wikilink `[[contacts/priya-narayan]]` or embed `![[assets/cat.jpg]]`;
-- a markdown link `[label](contacts/priya-narayan)` or image
-  `![alt](assets/cat.jpg)`. A URL target is not an internal link.
+**Under `wikilink`** (the default), an internal link is a wikilink. In
+frontmatter, a field value that is entirely a wikilink —
+`"[[contacts/priya-narayan]]"`, quoted, since unquoted it is a nested
+array — is a typed reference; in prose, wikilinks appear inline. A
+wikilink may carry an alias or a heading —
+`[[contacts/priya-narayan|Priya]]`, `[[contacts/priya-narayan#history]]`;
+the link is the part before the first `|` or `#`. An internal markdown
+link anywhere is the `link_format` finding.
 
-A link may carry a heading, and a wikilink may also carry an alias —
-`[[contacts/priya-narayan|Priya]]`, `[[contacts/priya-narayan#history]]`,
-`[Priya](contacts/priya-narayan#history)`. The link is the part before the
-first `|` or `#`. Markdown targets are URL-decoded before that.
+**Under `markdown`**, an internal link is a standard markdown link with
+its target relative to the note's own folder —
+`[Priya](../contacts/priya-narayan)`. In frontmatter, a field value that
+is entirely such a link is a typed reference, its display text playing
+the alias's role; in prose they appear inline. A wikilink anywhere is
+the `link_format` finding, as is a `/`-rooted destination — targets are
+relative, as a URL would resolve them.
 
-A target is matched against the vault as a path suffix: `contacts/priya`
-finds a file whose path ends in those segments wherever it sits, and a bare
-`Some Note` matches on its name alone.
+Resolution follows the syntax, and is asked one question only: does
+the link reach anything (the `resolve` advisory — see Validity). A
+wikilink target is matched against the vault as a path suffix: it
+resolves if some file's path ends with the target's segments — as
+written first, then with `.md` appended — so a bare name resolves
+wherever a note by that name sits, and `[[contacts/priya-narayan]]`
+wherever those segments end a path. Which of several matches a link
+means is not adjudicated: `check` answers whether a link reaches
+something, never which thing it reaches. A markdown target resolves as
+a URL resolves: against the note's containing folder, URL-decoded, the
+literal path first, then `<target>.md`. Full
+vault paths are the practice the skill teaches for references, since a
+short name's meaning can drift as the vault grows, but no resolvable
+spelling is a finding — a folder that wants address-discipline asserts
+it in its schema.
 
-- Where several files match, the nearest to the linking note wins: the
-  shortest relative path from its folder, ties broken lexicographically.
-- A target beginning `./` or `../` is note-relative instead, resolved
-  against the folder holding the note; one that climbs past the vault root
-  resolves to nothing.
-- A target beginning `/` is vault-absolute, resolved from the vault root
-  and matched there rather than by suffix.
-- Either way the literal path is tried first, then `<target>.md`.
-- A folder at the target path does not satisfy a link.
-- Comparison normalizes, so a name stored as NFD is reached by a link
-  written as NFC.
+For every link: a folder does not satisfy a link; comparison normalizes
+Unicode, so a name stored as NFD is reached by a link written as NFC; a
+target may name any file, with its extension. Fenced code blocks and
+inline code spans are not scanned: a link inside code is code. Only a
+whole field value is a reference — a link inside a longer string is
+prose that happens to live in a field, and an unquoted wikilink parses
+as nested arrays and is not special-cased; a schema typing the field
+`internal-link` is what catches that mistake. References are found at
+any depth in frontmatter values. Links are checked in governed notes
+only, and never in a body a folder declares `raw`.
 
-In YAML a wikilink must be quoted — unquoted, `[[contacts/priya-narayan]]`
-is a nested array. A frontmatter field whose value is a wikilink is a typed
-link an agent or app can follow; only a whole value is one, since a link
-inside a longer string is prose that happens to live in a field.
-
-- Links are checked in notes under a declared path, unless that path sets
-  `internal_links: { resolve: false }`.
-- Wikilinks are found at any depth in frontmatter values, and both forms in
-  the body.
-- Fenced code blocks and inline code spans are not scanned: a link inside
-  code is code.
-- Targets are matched against the whole vault, governed or not, so a link
-  into an undeclared corner still resolves.
+A link that resolves to nothing is advisory — a note may be linked
+before it is filed.
 
 ## Validity
 
 A vault is valid when its config is well-formed and its governed files
-satisfy what is asked of them.
+satisfy the entries that answer for them.
 
 The config is well-formed when:
 
-- It holds no unknown keys, every schema compiles as JSON Schema, and every
-  pattern compiles as a regular expression — a broken rule looks exactly
-  like one everything passes.
-- Schemas compile strictly, so an unknown schema keyword is rejected like
-  any other misspelled key.
-- No two path keys differ only by case or Unicode normalization, since they
-  would name one folder.
+- `version` is present and understood (see above — either failure is a
+  single finding).
+- It holds no unknown keys, every schema compiles as JSON Schema, and
+  every pattern compiles as a regular expression — a broken rule looks
+  exactly like one everything passes.
+- Schemas compile strictly, so an unknown schema keyword is rejected
+  like any other misspelled key.
+- Declared paths are unique (including case and Unicode normalization),
+  well-formed, not hidden by `ignore`, and match the pattern that binds
+  them; an `extensions` wildcard stands alone; `link_format` is one of
+  its two values.
 
-A config that is empty, or holds nothing but comments, is well-formed and
-declares nothing; only a folder with no `autofile.yml` at all is not a
-vault.
+A governed file satisfies its entry, and one thing no setting controls:
 
-A governed file satisfies every setting that reaches it, and three things
-no setting controls:
+- No two governed paths differ only by case or Unicode normalization —
+  the filesystems these vaults sync across hold such paths as one, and
+  the sync silently keeps a single winner. Names confined to lowercase
+  slugs cannot collide this way; the check exists because a vault's
+  pattern can allow names that do — `collision`.
 
-- Frontmatter parses, and parses to a mapping — `parse`.
-- Names are ones a filesystem can carry: no empty, `.`, or `..` segments,
-  no control characters — `name`.
-- No two paths differ only by case or Unicode normalization, which the
-  filesystems these vaults sync across hold as one path — `collision`.
+Three conditions are advisory and leave a vault valid either way:
 
-Two conditions are advisory and leave a vault valid either way:
+- A folder entry without a `description` — the vault works, but an
+  arriving reader cannot know how to file there — `description`.
+- A link that resolves to nothing, since a note may be linked before it
+  is filed — `resolve`.
+- A declared path with no folder yet — `missing`. A regular file
+  standing at a declared path is also `missing`, and the file answers to
+  whatever else governs it.
 
-- A link that resolves to nothing, since a note may be linked before it is
-  filed — `internal_links.resolve`.
-- A declared path with no folder yet — `missing`. A folder that exists
-  but holds nothing is not one: a mistyped key leaves no folder at all, so
-  an empty folder carries no signal beyond "nothing filed here yet".
-
-Patterns are JavaScript `RegExp` syntax. No rule governs `autofile.yml`
-itself.
+Patterns are JavaScript `RegExp` syntax.

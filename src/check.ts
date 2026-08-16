@@ -4,27 +4,35 @@ import { join, posix } from "node:path";
 import type { ErrorObject } from "ajv";
 import { CORE_SCHEMA, load, YAMLException } from "js-yaml";
 
-import { isIgnored, loadConfig, resolve, type Config, type EffectiveSettings } from "./config.js";
+import {
+  caseFold,
+  folderEntryFor,
+  isIgnored,
+  loadConfig,
+  type Config,
+  type FolderEntry,
+} from "./config.js";
 import {
   buildIndex,
   extractReferences,
-  resolveReference,
-  type Reference,
+  resolveMarkdownReference,
+  resolvesWikilink,
   type ReferenceIndex,
 } from "./references.js";
 
 export type Rule =
   | "config"
-  | "schema"
-  | "body.allowed"
-  | "extensions"
-  | "filenames.pattern"
-  | "internal_links.format"
-  | "strict"
+  | "coverage"
   | "parse"
-  | "name"
+  | "schema"
+  | "body"
+  | "filename_pattern"
+  | "extensions"
+  | "additional_subfolders"
+  | "description"
+  | "link_format"
+  | "resolve"
   | "collision"
-  | "internal_links.resolve"
   | "missing";
 
 export type Severity = "violation" | "warning";
@@ -32,22 +40,19 @@ export type Severity = "violation" | "warning";
 export interface Finding {
   rule: Rule;
   severity: Severity;
-  /**
-   * Vault-relative path — a file, or the folder a declared path names for an
-   * `missing` finding — or autofile.yml for a config finding.
-   */
+  /** Vault-relative file or declared folder path, or autofile.yml. */
   file: string;
   message: string;
 }
 
 export interface CheckResult {
   findings: Finding[];
-  /** The number of governed, non-ignored files. */
+  /** Governed files, plus coverage failures when strict. */
   filesChecked: number;
 }
 
 export interface CheckOptions {
-  /** Called once per governed file with the running governed-file count. */
+  /** Called once per counted file with the running checked-file count. */
   onFile?: (count: number) => void;
 }
 
@@ -59,7 +64,7 @@ export async function check(vaultRoot: string, opts: CheckOptions = {}): Promise
         rule: "config",
         severity: "violation",
         file: "autofile.yml",
-        message: loaded.errors.map((error) => error.message).join("; "),
+        message: loaded.errors.map(({ message }) => message).join("; "),
       }],
       filesChecked: 0,
     };
@@ -68,32 +73,43 @@ export async function check(vaultRoot: string, opts: CheckOptions = {}): Promise
   const allFiles: string[] = [];
   const allFolders: string[] = [];
   await walk(vaultRoot, "", allFiles, allFolders);
+
   const config = loaded.config;
-  const referenceFiles = allFiles.filter((file) => file !== "autofile.yml");
-  const referenceIndex = buildIndex(referenceFiles);
-  // An ignored path is invisible to every rule, so the walk is filtered once
-  // here rather than re-tested rule by rule.
-  const visibleFiles = referenceFiles.filter((file) => !isIgnored(config, file));
+  // Ignored and out-of-scope files remain valid targets, so the index is
+  // built from the complete file walk before governance filters it.
+  const referenceIndex = buildIndex(allFiles);
   const governedFiles: string[] = [];
   const findings: Finding[] = [];
+  let filesChecked = 0;
 
-  for (const file of visibleFiles) {
-    const settings = resolve(config, file);
-    if (!settings.governed) continue;
-    governedFiles.push(file);
-    opts.onFile?.(governedFiles.length);
-    if (config.strict && !settings.declared) {
-      findings.push({ rule: "strict", severity: "violation", file, message: "is under no declared path" });
+  checkDescriptions(config, findings);
+  checkMissing(config, allFolders, findings);
+  checkAdditionalSubfolders(config, allFolders, findings);
+
+  for (const file of allFiles) {
+    if (file === "autofile.yml" || isIgnored(config, file)) continue;
+    const entry = folderEntryFor(config, file);
+    if (entry === undefined) {
+      if (!config.strict) continue;
+      filesChecked++;
+      opts.onFile?.(filesChecked);
+      findings.push({
+        rule: "coverage",
+        severity: "violation",
+        file,
+        message: "no folder entry accounts for this file",
+      });
+      continue;
     }
-    checkNames(file, findings);
-    checkFilenamePattern(config, file, findings);
-    checkExtension(file, settings, findings);
-    if (isNote(file)) await checkNote(vaultRoot, file, settings, referenceIndex, findings);
+
+    filesChecked++;
+    opts.onFile?.(filesChecked);
+    governedFiles.push(file);
+    await checkFolderFile(vaultRoot, file, entry, config, referenceIndex, findings);
   }
 
   checkCollisions(governedFiles, findings);
-  checkMissing(config, allFolders, findings);
-  return { findings: sortFindings(findings), filesChecked: governedFiles.length };
+  return { findings: sortFindings(findings), filesChecked };
 }
 
 async function walk(root: string, parent: string, files: string[], folders: string[]): Promise<void> {
@@ -102,12 +118,11 @@ async function walk(root: string, parent: string, files: string[], folders: stri
   try {
     entries = await readdir(directory, { withFileTypes: true });
   } catch (error) {
-    throw new Error(`cannot read directory "${directory}": ${describe(error)}`);
+    throw new Error(`cannot read directory ${JSON.stringify(directory)}: ${describe(error)}`);
   }
   entries.sort((left, right) => compare(left.name, right.name));
   for (const entry of entries) {
-    // Symlinks are not vault content and traversing directory links could
-    // escape the vault or introduce cycles.
+    // Links are neither vault content nor safe traversal roots.
     if (entry.isSymbolicLink()) continue;
     const path = parent === "" ? entry.name : `${parent}/${entry.name}`;
     if (entry.isDirectory()) {
@@ -117,63 +132,31 @@ async function walk(root: string, parent: string, files: string[], folders: stri
   }
 }
 
-/**
- * The `name` rule: segments a filesystem can carry. Spelled as spec/vault.md
- * states it, though only the control-character clause is reachable from the
- * walk — readdir yields no empty, `.`, or `..` entry.
- */
-function checkNames(file: string, findings: Finding[]): void {
-  for (const segment of file.split("/")) {
-    if (/^[.]{1,2}$/u.test(segment) || segment === "" || /[\u0000-\u001f\u007f]/u.test(segment)) {
-      findings.push({
-        rule: "name",
-        severity: "violation",
-        file,
-        message: `path segment ${JSON.stringify(segment)} is not a name every filesystem can carry`,
-      });
-    }
-  }
-}
-
-/** The `filenames.pattern` rule, under the entry reaching each segment. */
-function checkFilenamePattern(config: Config, file: string, findings: Finding[]): void {
-  const segments = file.split("/");
-  for (let index = 0; index < segments.length; index++) {
-    const segment = segments[index]!;
-    const pattern = resolve(config, segments.slice(0, index + 1).join("/")).filenames.pattern;
-    if (pattern === undefined) continue;
-    const subject = index === segments.length - 1 ? stripExtension(segment) : segment;
-    if (!pattern.regex.test(subject)) {
-      findings.push({
-        rule: "filenames.pattern",
-        severity: "violation",
-        file,
-        message: `${JSON.stringify(subject)} does not match ${JSON.stringify(pattern.source)}`,
-      });
-    }
-  }
-}
-
-function checkExtension(file: string, settings: EffectiveSettings, findings: Finding[]): void {
-  if (settings.extensions === undefined) return;
-  const extension = nameExtension(posix.basename(file));
-  if (extension === undefined || !settings.extensions.includes(extension)) {
-    findings.push({
-      rule: "extensions",
-      severity: "violation",
-      file,
-      message: `${extension === undefined ? "no extension" : `.${extension}`} is not among the extensions this path holds`,
-    });
-  }
-}
-
-async function checkNote(
+async function checkFolderFile(
   root: string,
   file: string,
-  settings: EffectiveSettings,
+  entry: FolderEntry,
+  config: Config,
   referenceIndex: ReferenceIndex,
   findings: Finding[],
 ): Promise<void> {
+  const note = isNote(file);
+  const pattern = entry.filenamePattern ?? (note ? config.filenamePattern : undefined);
+  if (pattern !== undefined) {
+    const filename = stripExtension(posix.basename(file));
+    if (!matches(pattern.regex, filename)) {
+      findings.push({
+        rule: "filename_pattern",
+        severity: "violation",
+        file,
+        message: `${JSON.stringify(filename)} does not match ${JSON.stringify(pattern.source)}`,
+      });
+    }
+  }
+
+  checkExtensions(file, entry, findings);
+  if (!note) return;
+
   let content: string;
   try {
     content = await readFile(join(root, file), "utf8");
@@ -181,7 +164,8 @@ async function checkNote(
     findings.push({ rule: "parse", severity: "violation", file, message: `cannot be read: ${describe(error)}` });
     return;
   }
-  const { frontmatterSource, body } = splitNote(content);
+
+  const { frontmatterSource, body } = splitRecord(content);
   let frontmatter: unknown = {};
   let parsed = true;
   if (frontmatterSource !== undefined) {
@@ -193,49 +177,58 @@ async function checkNote(
       }
     } catch (error) {
       parsed = false;
-      findings.push({ rule: "parse", severity: "violation", file, message: `frontmatter is not valid YAML: ${describe(error)}` });
-    }
-  }
-  if (parsed && settings.schema !== undefined && !settings.schema.validate(frontmatter)) {
-    for (const error of settings.schema.validate.errors ?? []) {
-      findings.push({ rule: "schema", severity: "violation", file, message: translateSchemaError(error) });
-    }
-  }
-  if (!settings.body.allowed && body.trim() !== "") {
-    findings.push({ rule: "body.allowed", severity: "violation", file, message: "body is not allowed" });
-  }
-  checkLinks(file, parsed ? frontmatter : undefined, body, settings, referenceIndex, findings);
-}
-
-function checkLinks(
-  file: string,
-  frontmatter: unknown,
-  body: string,
-  settings: EffectiveSettings,
-  referenceIndex: ReferenceIndex,
-  findings: Finding[],
-): void {
-  const typedReferences = extractReferences(frontmatter, "");
-  const proseReferences = extractReferences(undefined, body);
-  // internal_links.format governs how a link is written in prose only, so it
-  // applies to the body's references; both kinds must resolve.
-  const format = settings.internal_links.format;
-  if (format !== undefined) {
-    for (const reference of proseReferences) {
-      if (hasFormat(reference, format)) continue;
       findings.push({
-        rule: "internal_links.format",
+        rule: "parse",
         severity: "violation",
         file,
-        message: `${reference.asWritten} is not ${format}`,
+        message: `frontmatter is not valid YAML: ${describe(error)}`,
       });
     }
   }
-  if (settings.internal_links.resolve) {
-    for (const reference of [...typedReferences, ...proseReferences]) {
-      if (resolveReference(reference.target, file, referenceIndex) !== undefined) continue;
+
+  if (parsed && entry.schema !== undefined && !entry.schema.validate(frontmatter)) {
+    for (const error of entry.schema.validate.errors ?? []) {
+      findings.push({ rule: "schema", severity: "violation", file, message: translateSchemaError(error) });
+    }
+  }
+  if (entry.body === "none" && body.trim() !== "") {
+    findings.push({ rule: "body", severity: "violation", file, message: "body is not allowed" });
+  }
+  checkReferences(
+    file,
+    parsed ? frontmatter : undefined,
+    entry.body === "raw" ? "" : body,
+    config,
+    referenceIndex,
+    findings,
+  );
+}
+
+function checkReferences(
+  file: string,
+  frontmatter: unknown,
+  body: string,
+  config: Config,
+  index: ReferenceIndex,
+  findings: Finding[],
+): void {
+  for (const reference of extractReferences(frontmatter, body)) {
+    let formatMessage: string | undefined;
+    if (reference.syntax !== config.linkFormat) {
+      formatMessage = `${reference.asWritten} must use ${config.linkFormat} format`;
+    } else if (reference.syntax === "markdown" && reference.rooted === true) {
+      formatMessage = `${reference.asWritten} must use a relative markdown target`;
+    }
+    if (formatMessage !== undefined) {
+      findings.push({ rule: "link_format", severity: "violation", file, message: formatMessage });
+    }
+
+    const resolved = reference.syntax === "wikilink"
+      ? resolvesWikilink(reference.target, index)
+      : resolveMarkdownReference(reference.target, file, index, reference.rooted === true);
+    if (!resolved) {
       findings.push({
-        rule: "internal_links.resolve",
+        rule: "resolve",
         severity: "warning",
         file,
         message: `${reference.asWritten} does not exist`,
@@ -244,25 +237,68 @@ function checkLinks(
   }
 }
 
-function hasFormat(reference: Reference, format: NonNullable<EffectiveSettings["internal_links"]["format"]>): boolean {
-  if (/^!?\[\[/u.test(reference.asWritten)) return format === "wikilink";
-  if (format === "wikilink") return false;
-  return format === (reference.target.startsWith("/") ? "markdown-absolute" : "markdown-relative");
+function checkExtensions(file: string, entry: FolderEntry, findings: Finding[]): void {
+  if (entry.extensions === undefined) return;
+  const extension = nameExtension(posix.basename(file));
+  if (extension !== undefined && entry.extensions.includes(caseFold(extension))) return;
+  findings.push({
+    rule: "extensions",
+    severity: "violation",
+    file,
+    message: `${extension ?? "no extension"} is not among the extensions this folder accepts`,
+  });
 }
 
-// Every governed file survived isIgnored, and ignoring is decided per
-// segment against the rules reaching it, so no ancestor of one can be
-// ignored either — the folders collected here need no further filtering.
+function checkDescriptions(config: Config, findings: Finding[]): void {
+  for (const entry of config.folders) {
+    if (entry.description !== undefined) continue;
+    findings.push({
+      rule: "description",
+      severity: "warning",
+      file: entry.path,
+      message: "folder entry has no description",
+    });
+  }
+}
+
+function checkMissing(config: Config, folders: readonly string[], findings: Finding[]): void {
+  const normalizedFolders = new Set(folders.map((folder) => folder.normalize("NFC")));
+  normalizedFolders.add(".");
+  for (const entry of config.folders) {
+    if (normalizedFolders.has(entry.path.normalize("NFC"))) continue;
+    findings.push({ rule: "missing", severity: "warning", file: entry.path, message: "declared path is missing" });
+  }
+}
+
+function checkAdditionalSubfolders(config: Config, folders: readonly string[], findings: Finding[]): void {
+  for (const folder of folders) {
+    if (isIgnored(config, folder)) continue;
+    const entry = folderEntryFor(config, `${folder}/.autofile-folder`);
+    if (entry === undefined || entry.additionalSubfolders || entry.path.normalize("NFC") === folder.normalize("NFC")) {
+      continue;
+    }
+    findings.push({
+      rule: "additional_subfolders",
+      severity: "violation",
+      file: folder,
+      message: `subfolder is not allowed by folders ${entry.path}`,
+    });
+  }
+}
+
 function checkCollisions(governedFiles: readonly string[], findings: Finding[]): void {
   const paths = new Set<string>();
   for (const file of governedFiles) {
     paths.add(file);
     const segments = file.split("/");
-    for (let length = 1; length < segments.length; length++) paths.add(segments.slice(0, length).join("/"));
+    for (let length = 1; length < segments.length; length++) {
+      paths.add(segments.slice(0, length).join("/"));
+    }
   }
+
   const groups = new Map<string, string[]>();
   for (const path of paths) {
-    const key = path.normalize("NFC").toLocaleLowerCase("en-US");
+    const key = canonical(path);
     const group = groups.get(key) ?? [];
     group.push(path);
     groups.set(key, group);
@@ -277,39 +313,32 @@ function checkCollisions(governedFiles: readonly string[], findings: Finding[]):
   }
 }
 
-function checkMissing(config: Config, folders: readonly string[], findings: Finding[]): void {
-  const normalizedFolders = folders.map((path) => path.normalize("NFC"));
-  for (const configuredPath of config.paths.keys()) {
-    const folder = configuredPath.slice(1);
-    const display = configuredPath === "/" ? "/" : folder;
-    const normalizedFolder = folder.normalize("NFC");
-    const exists = configuredPath === "/" || normalizedFolders.includes(normalizedFolder);
-    if (!exists) {
-      findings.push({
-        rule: "missing",
-        severity: "warning",
-        file: display,
-        message: "declared path is missing",
-      });
-    }
-  }
-}
-
-function splitNote(content: string): { frontmatterSource?: string; body: string } {
+function splitRecord(content: string): { frontmatterSource?: string; body: string } {
   const withoutBom = content.replace(/^\uFEFF/u, "");
   const lines = withoutBom.split(/\r?\n/u);
   if (lines[0] !== "---") return { body: withoutBom };
   const close = lines.indexOf("---", 1);
   if (close < 0) return { body: withoutBom };
-  return { frontmatterSource: lines.slice(1, close).join("\n"), body: lines.slice(close + 1).join("\n") };
+  return {
+    frontmatterSource: lines.slice(1, close).join("\n"),
+    body: lines.slice(close + 1).join("\n"),
+  };
 }
 
 function translateSchemaError(error: ErrorObject): string {
-  const path = error.instancePath.split("/").filter(Boolean).map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~")).join(".");
+  const path = error.instancePath
+    .split("/")
+    .filter(Boolean)
+    .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))
+    .join(".");
   const params = error.params as Record<string, unknown>;
-  if (error.keyword === "required") return `${path === "" ? "" : `${path}.`}${String(params["missingProperty"])} is required`;
+  if (error.keyword === "required") {
+    return `${path === "" ? "" : `${path}.`}${String(params["missingProperty"])} is required`;
+  }
   if (error.keyword === "type") return `${path || "frontmatter"} must be ${article(String(params["type"]))}`;
-  if (error.keyword === "additionalProperties") return `${path === "" ? "" : `${path}.`}${String(params["additionalProperty"])} is not an allowed field`;
+  if (error.keyword === "additionalProperties") {
+    return `${path === "" ? "" : `${path}.`}${String(params["additionalProperty"])} is not an allowed field`;
+  }
   return `${path || "frontmatter"} ${error.message ?? "is invalid"}`;
 }
 
@@ -319,8 +348,9 @@ function article(type: string): string {
   return `a ${type}`;
 }
 
-function isNote(file: string): boolean {
-  return nameExtension(posix.basename(file)) === "md";
+function nameExtension(name: string): string | undefined {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1) : undefined;
 }
 
 function stripExtension(name: string): string {
@@ -328,9 +358,17 @@ function stripExtension(name: string): string {
   return extension === undefined ? name : name.slice(0, -(extension.length + 1));
 }
 
-function nameExtension(name: string): string | undefined {
-  const dot = name.lastIndexOf(".");
-  return dot > 0 ? name.slice(dot + 1) : undefined;
+function isNote(file: string): boolean {
+  return nameExtension(posix.basename(file)) === "md";
+}
+
+function matches(pattern: RegExp, value: string): boolean {
+  pattern.lastIndex = 0;
+  return pattern.test(value);
+}
+
+function canonical(path: string): string {
+  return caseFold(path);
 }
 
 function isMapping(value: unknown): value is Record<string, unknown> {

@@ -1,10 +1,11 @@
 import { readFile } from "node:fs/promises";
+import { posix } from "node:path";
 
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 import addFormatsExport from "ajv-formats";
 import { CORE_SCHEMA, load, YAMLException } from "js-yaml";
 
-import { isWholeWikilink } from "./references.js";
+import { isWholeMarkdownLink, isWholeWikilink } from "./references.js";
 
 const addFormats = addFormatsExport as unknown as typeof addFormatsExport.default;
 
@@ -21,47 +22,34 @@ export interface CompiledSchema {
   validate: ValidateFunction;
 }
 
-export type InternalLinkFormat = "wikilink" | "markdown-relative" | "markdown-absolute";
+export type LinkFormat = "wikilink" | "markdown";
+export type BodyMode = "markdown" | "raw" | "none";
 
-/**
- * An entry preserves explicit nulls: undefined means “inherit”, while null
- * means “clear the inherited setting and use its unconstrained default”.
- */
-export interface PathEntry {
+export interface FolderEntry {
+  path: string;
   description?: string;
-  schema?: CompiledSchema | null;
-  body?: { allowed?: boolean };
-  extensions?: string[] | null;
-  filenames?: { pattern?: CompiledPattern | null };
-  internal_links?: {
-    resolve?: boolean;
-    format?: InternalLinkFormat | null;
-  };
-  ignore?: {
-    dotfiles?: boolean;
-    pattern?: CompiledPattern | null;
-  };
+  schema?: CompiledSchema;
+  /** Undefined accepts every extension, including no extension. */
+  extensions?: string[];
+  filenamePattern?: CompiledPattern;
+  body: BodyMode;
+  additionalSubfolders: boolean;
 }
 
 export interface Config {
+  version: 1;
   strict: boolean;
-  paths: Map<string, PathEntry>;
+  linkFormat: LinkFormat;
+  filenamePattern?: CompiledPattern;
+  ignore: CompiledPattern[];
+  folders: FolderEntry[];
 }
 
-export interface EffectiveSettings {
-  /** True when an entry encloses the path, or strict governs the whole vault. */
-  governed: boolean;
-  /** True when a declared path entry encloses the path. */
-  declared: boolean;
-  /** The nearest enclosing entry's filing instruction, if one exists. */
-  description: string | undefined;
-  schema: CompiledSchema | undefined;
-  body: { allowed: boolean };
-  extensions: string[] | undefined;
-  filenames: { pattern: CompiledPattern | undefined };
-  internal_links: { resolve: boolean; format: InternalLinkFormat | undefined };
-  ignore: { dotfiles: boolean; pattern: CompiledPattern | undefined };
+interface GovernanceIndex {
+  foldersByPath: Map<string, FolderEntry>;
 }
+
+const governanceIndexes = new WeakMap<Config, GovernanceIndex>();
 
 export type ConfigResult =
   | { ok: true; config: Config }
@@ -76,7 +64,7 @@ export async function loadConfig(filePath: string): Promise<ConfigResult> {
   }
 }
 
-/** Parses source and compiles every schema and pattern before returning it. */
+/** Parses version 1 and compiles every schema and regexp before returning it. */
 export function parseConfig(source: string): ConfigResult {
   let document: unknown;
   try {
@@ -85,128 +73,231 @@ export function parseConfig(source: string): ConfigResult {
     return { ok: false, errors: [{ message: `does not parse: ${describe(error)}` }] };
   }
 
-  if (document === null || document === undefined) return success(false, new Map());
-  if (!isMapping(document)) {
-    return { ok: false, errors: [{ message: "must be a mapping of strict and paths" }] };
+  // The format gate wins over root-shape and all version-specific errors.
+  if (!isMapping(document) || !("version" in document)) return migrationError();
+  if (!Number.isInteger(document.version)) {
+    return { ok: false, errors: [{ message: "version must be the integer 1" }] };
+  }
+  if (document.version !== 1) {
+    return { ok: false, errors: [{ message: `version ${String(document.version)} is not understood` }] };
   }
 
   const errors: ConfigError[] = [];
-  rejectUnknownKeys(document, ["strict", "paths"], "", errors);
+  rejectUnknownKeys(
+    document,
+    ["version", "strict", "link_format", "filename_pattern", "ignore", "folders"],
+    "",
+    errors,
+  );
 
-  let strict = false;
-  if ("strict" in document) {
-    if (typeof document.strict === "boolean") strict = document.strict;
-    else errors.push({ message: "strict must be a boolean" });
-  }
+  const strict = parseBoolean(document, "strict", false, "strict", errors);
+  const linkFormat = parseLinkFormat(document.link_format, errors);
+  const filenamePattern = "filename_pattern" in document
+    ? compilePattern(document.filename_pattern, "filename_pattern", true, errors)
+    : undefined;
+  const ignore = "ignore" in document ? parseIgnore(document.ignore, errors) : [];
+  const ajv = createAjv(linkFormat);
+  const folders = "folders" in document ? parseFolders(document.folders, ajv, errors) : [];
 
-  const ajv = createAjv();
-  const paths = new Map<string, PathEntry>();
-  if ("paths" in document) {
-    const rawPaths = requireMapping(document.paths, "paths", errors);
-    if (rawPaths !== undefined) {
-      const canonicalPaths = new Map<string, string>();
-      for (const [path, value] of Object.entries(rawPaths)) {
-        validatePath(path, errors);
-        const canonical = path.normalize("NFC").toLocaleLowerCase("en-US");
-        const clash = canonicalPaths.get(canonical);
-        if (clash === undefined) canonicalPaths.set(canonical, path);
-        else {
-          errors.push({
-            message: `${clash} and ${path} differ only by case or Unicode normalization`,
-          });
-        }
+  validateFolderPaths(folders, errors);
+  validateDeclaredSegments(folders, filenamePattern, errors);
+  validateDeclaredPathsAreVisible(folders, ignore, errors);
 
-        const rawEntry = requireMapping(value, path, errors);
-        if (rawEntry === undefined) continue;
-        paths.set(path, parseEntry(rawEntry, path, ajv, errors));
-      }
-    }
-  }
-
-  return errors.length === 0 ? success(strict, paths) : { ok: false, errors };
+  if (errors.length > 0) return { ok: false, errors };
+  const config: Config = {
+    version: 1,
+    strict,
+    linkFormat,
+    filenamePattern,
+    ignore,
+    folders,
+  };
+  governanceIndexes.set(config, buildGovernanceIndex(config));
+  return { ok: true, config };
 }
 
-/**
- * Returns the complete effective settings for a vault-relative file or
- * folder path. Each leaf setting is selected independently from the nearest
- * enclosing path entry; explicit null resets that leaf to its default.
- * `governed` lets callers distinguish declared/strict content from content
- * outside Autofile's concern.
- */
-export function resolve(config: Config, vaultRelativePath: string): EffectiveSettings {
-  const entries = enclosingEntries(config, normalizeRelativePath(vaultRelativePath));
+/** Ignore patterns are tested as plain matches against each path segment. */
+export function isIgnored(config: Config, vaultRelativePath: string): boolean {
+  return vaultRelativePath
+    .split("/")
+    .filter(Boolean)
+    .some((segment) => config.ignore.some((pattern) => matches(pattern.regex, segment)));
+}
+
+/** Returns the most specific folder entry enclosing a file. */
+export function folderEntryFor(config: Config, vaultRelativeFile: string): FolderEntry | undefined {
+  const foldersByPath = governanceIndexFor(config).foldersByPath;
+  let folder = posix.dirname(vaultRelativeFile.normalize("NFC"));
+  while (true) {
+    const entry = foldersByPath.get(folder);
+    if (entry !== undefined) return entry;
+    if (folder === ".") return undefined;
+    const separator = folder.lastIndexOf("/");
+    folder = separator < 0 ? "." : folder.slice(0, separator);
+  }
+}
+
+export function declaredPaths(config: Config): string[] {
+  return config.folders.map(({ path }) => path);
+}
+
+/** NFC-normalized Unicode case fold used for filesystem comparisons. */
+export function caseFold(value: string): string {
+  return value
+    .normalize("NFC")
+    .toLocaleUpperCase("en-US")
+    .toLocaleLowerCase("en-US")
+    .normalize("NFC");
+}
+
+function governanceIndexFor(config: Config): GovernanceIndex {
+  const existing = governanceIndexes.get(config);
+  if (existing !== undefined) return existing;
+  const built = buildGovernanceIndex(config);
+  governanceIndexes.set(config, built);
+  return built;
+}
+
+function buildGovernanceIndex(config: Config): GovernanceIndex {
   return {
-    governed: config.strict || entries.length > 0,
-    declared: entries.length > 0,
-    description: inherited(entries, (entry) => entry.description, undefined),
-    schema: inherited(entries, (entry) => entry.schema, undefined),
-    body: { allowed: inherited(entries, (entry) => entry.body?.allowed, true) },
-    extensions: inherited(entries, (entry) => entry.extensions, undefined),
-    filenames: { pattern: inherited(entries, (entry) => entry.filenames?.pattern, undefined) },
-    internal_links: {
-      resolve: inherited(entries, (entry) => entry.internal_links?.resolve, true),
-      format: inherited(entries, (entry) => entry.internal_links?.format, undefined),
-    },
-    ignore: {
-      dotfiles: inherited(entries, (entry) => entry.ignore?.dotfiles, true),
-      pattern: inherited(entries, (entry) => entry.ignore?.pattern, undefined),
-    },
+    foldersByPath: new Map(config.folders.map((entry) => [entry.path.normalize("NFC"), entry])),
   };
 }
 
-/** Tests each segment under the rules that reach that segment. */
-export function isIgnored(config: Config, vaultRelativePath: string): boolean {
-  const segments = normalizeRelativePath(vaultRelativePath).split("/").filter(Boolean);
-  for (let depth = 0; depth < segments.length; depth++) {
-    const settings = resolve(config, segments.slice(0, depth + 1).join("/"));
-    if (!settings.governed) continue;
-    const segment = segments[depth]!;
-    if (settings.ignore.dotfiles && segment.startsWith(".")) return true;
-    if (settings.ignore.pattern?.regex.test(segment)) return true;
-  }
-  return false;
+function migrationError(): ConfigResult {
+  return {
+    ok: false,
+    errors: [{ message: "version is required; migrate this pre-versioned config to version 1" }],
+  };
 }
 
-function success(strict: boolean, paths: Map<string, PathEntry>): ConfigResult {
-  return { ok: true, config: { strict, paths } };
+function parseBoolean(
+  mapping: Record<string, unknown>,
+  key: string,
+  fallback: boolean,
+  location: string,
+  errors: ConfigError[],
+): boolean {
+  if (!(key in mapping)) return fallback;
+  if (typeof mapping[key] === "boolean") return mapping[key];
+  errors.push({ message: `${location} takes true or false` });
+  return fallback;
 }
 
-function createAjv(): Ajv2020 {
+function parseLinkFormat(value: unknown, errors: ConfigError[]): LinkFormat {
+  if (value === undefined) return "wikilink";
+  if (value === "wikilink" || value === "markdown") return value;
+  errors.push({ message: "link_format must be wikilink or markdown" });
+  return "wikilink";
+}
+
+function createAjv(linkFormat: LinkFormat): Ajv2020 {
   const ajv = new Ajv2020({ allErrors: true, logger: false, strict: false, strictSchema: true });
   addFormats(ajv);
-  ajv.addFormat("internal-link", { type: "string", validate: isWholeWikilink });
+  ajv.addFormat("internal-link", {
+    type: "string",
+    validate: linkFormat === "wikilink" ? isWholeWikilink : isWholeMarkdownLink,
+  });
   ajv.addFormat("datetime", { type: "string", validate: isLocalDatetime });
   return ajv;
 }
 
-function parseEntry(
-  raw: Record<string, unknown>,
-  location: string,
-  ajv: Ajv2020,
-  errors: ConfigError[],
-): PathEntry {
-  rejectUnknownKeys(
-    raw,
-    ["description", "schema", "body", "extensions", "filenames", "internal_links", "ignore"],
-    location,
-    errors,
-  );
-  const description = raw.description;
-  if (description !== undefined && typeof description !== "string") {
-    errors.push({ message: `${location}.description must be text` });
+function parseIgnore(value: unknown, errors: ConfigError[]): CompiledPattern[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    errors.push({ message: "ignore must be a list of regular expression strings" });
+    return [];
+  }
+  return value.flatMap((pattern, index) => {
+    const compiled = compilePattern(pattern, `ignore[${index}]`, false, errors);
+    return compiled === undefined ? [] : [compiled];
+  });
+}
+
+function parseFolders(value: unknown, ajv: Ajv2020, errors: ConfigError[]): FolderEntry[] {
+  if (!Array.isArray(value)) {
+    errors.push({ message: "folders must be a list of entries" });
+    return [];
   }
 
-  const entry: PathEntry = {};
-  if (typeof description === "string") entry.description = description;
-  if ("schema" in raw) entry.schema = compileSchema(raw.schema, `${location}.schema`, ajv, errors);
-  if ("body" in raw) entry.body = parseBody(raw.body, `${location}.body`, errors);
-  if ("extensions" in raw) entry.extensions = parseExtensions(raw.extensions, `${location}.extensions`, errors);
-  if ("filenames" in raw) entry.filenames = parseFilenames(raw.filenames, `${location}.filenames`, errors);
-  if ("internal_links" in raw) {
-    entry.internal_links = parseInternalLinks(raw.internal_links, `${location}.internal_links`, errors);
+  const entries: FolderEntry[] = [];
+  for (let index = 0; index < value.length; index++) {
+    const raw = value[index];
+    if (!isMapping(raw)) {
+      errors.push({ message: `folders[${index}] must be a mapping` });
+      continue;
+    }
+
+    const rawPath = raw.path;
+    const fallback = `folders[${index}]`;
+    const location = typeof rawPath === "string" ? `folders ${rawPath}` : fallback;
+    rejectUnknownKeys(
+      raw,
+      ["path", "description", "schema", "extensions", "filename_pattern", "body", "additional_subfolders"],
+      location,
+      errors,
+    );
+    if (!("path" in raw)) {
+      errors.push({ message: `${fallback}.path is required` });
+      continue;
+    }
+    if (typeof rawPath !== "string") {
+      errors.push({ message: `${fallback}.path must be text` });
+      continue;
+    }
+
+    validateDeclaredPath(rawPath, location, errors);
+    const entry: FolderEntry = {
+      path: rawPath,
+      body: parseBody(raw.body, "body" in raw, `${location}.body`, errors),
+      additionalSubfolders: parseBoolean(
+        raw,
+        "additional_subfolders",
+        true,
+        `${location}.additional_subfolders`,
+        errors,
+      ),
+    };
+
+    if ("description" in raw) {
+      if (typeof raw.description === "string") entry.description = raw.description;
+      else errors.push({ message: `${location}.description must be text` });
+    }
+    if ("schema" in raw) entry.schema = compileSchema(raw.schema, `${location}.schema`, ajv, errors);
+    if ("extensions" in raw) entry.extensions = parseExtensions(raw.extensions, location, errors);
+    if ("filename_pattern" in raw) {
+      entry.filenamePattern = compilePattern(raw.filename_pattern, `${location}.filename_pattern`, true, errors);
+    }
+    entries.push(entry);
   }
-  if ("ignore" in raw) entry.ignore = parseIgnore(raw.ignore, `${location}.ignore`, errors);
-  return entry;
+  return entries;
+}
+
+function parseBody(value: unknown, present: boolean, location: string, errors: ConfigError[]): BodyMode {
+  if (!present) return "markdown";
+  if (value === "markdown" || value === "raw" || value === "none") return value;
+  errors.push({ message: `${location} must be markdown, raw, or none` });
+  return "markdown";
+}
+
+function parseExtensions(value: unknown, location: string, errors: ConfigError[]): string[] | undefined {
+  if (
+    !Array.isArray(value)
+    || value.some((extension) =>
+      typeof extension !== "string"
+      || extension.length === 0
+      || (extension !== "*" && (
+        extension.includes(".")
+        || extension !== extension.toLocaleLowerCase("en-US")
+      )))
+  ) {
+    errors.push({ message: `${location}.extensions must be a list of lowercase, dot-less extensions` });
+    return undefined;
+  }
+  if (value.includes("*") && value.length !== 1) {
+    errors.push({ message: `${location}.extensions wildcard must be its only entry` });
+    return undefined;
+  }
+  return value[0] === "*" ? undefined : (value as string[]).map(caseFold);
 }
 
 function compileSchema(
@@ -214,10 +305,9 @@ function compileSchema(
   location: string,
   ajv: Ajv2020,
   errors: ConfigError[],
-): CompiledSchema | null | undefined {
-  if (value === null) return null;
+): CompiledSchema | undefined {
   if (!isMapping(value) && typeof value !== "boolean") {
-    errors.push({ message: `${location} must be a JSON Schema mapping, boolean schema, or null` });
+    errors.push({ message: `${location} must be a JSON Schema mapping or boolean schema` });
     return undefined;
   }
   try {
@@ -233,6 +323,93 @@ function compileSchema(
   }
 }
 
+function compilePattern(
+  value: unknown,
+  location: string,
+  fullMatch: boolean,
+  errors: ConfigError[],
+): CompiledPattern | undefined {
+  if (typeof value !== "string") {
+    errors.push({ message: `${location} must be a regular expression string` });
+    return undefined;
+  }
+  try {
+    return {
+      source: value,
+      regex: new RegExp(fullMatch ? `^(?:${value})$(?![\\s\\S])` : value),
+    };
+  } catch (error) {
+    errors.push({ message: `${location} does not compile as a regular expression: ${describe(error)}` });
+    return undefined;
+  }
+}
+
+function validateDeclaredPath(path: string, location: string, errors: ConfigError[]): void {
+  const segments = path.split("/");
+  if (
+    path.length === 0
+    || path.startsWith("/")
+    || path.endsWith("/")
+    || (path !== "." && segments.some((segment) => segment === "" || segment === "." || segment === ".."))
+  ) {
+    errors.push({ message: `${location} must be a valid vault-relative path` });
+  }
+}
+
+function validateFolderPaths(entries: readonly FolderEntry[], errors: ConfigError[]): void {
+  const seen = new Map<string, FolderEntry>();
+  for (const entry of entries) {
+    const key = canonical(entry.path);
+    const prior = seen.get(key);
+    if (prior === undefined) {
+      seen.set(key, entry);
+      continue;
+    }
+    if (prior.path === entry.path) {
+      errors.push({ message: `folders ${entry.path} is declared more than once` });
+    } else {
+      errors.push({
+        message: `folders ${prior.path} and folders ${entry.path} differ only by case or Unicode normalization`,
+      });
+    }
+  }
+}
+
+function validateDeclaredSegments(
+  entries: readonly FolderEntry[],
+  filenamePattern: CompiledPattern | undefined,
+  errors: ConfigError[],
+): void {
+  if (filenamePattern === undefined) return;
+  for (const entry of entries) {
+    if (entry.path === ".") continue;
+    for (const segment of entry.path.split("/")) {
+      if (matches(filenamePattern.regex, segment)) continue;
+      errors.push({
+        message: `${segment} in folders ${entry.path} does not match filename_pattern ${JSON.stringify(filenamePattern.source)}`,
+      });
+    }
+  }
+}
+
+function validateDeclaredPathsAreVisible(
+  entries: readonly FolderEntry[],
+  ignore: readonly CompiledPattern[],
+  errors: ConfigError[],
+): void {
+  for (const entry of entries) {
+    if (entry.path === ".") continue;
+    for (const segment of entry.path.split("/")) {
+      const pattern = ignore.find((candidate) => matches(candidate.regex, segment));
+      if (pattern === undefined) continue;
+      errors.push({
+        message: `folders ${entry.path} is hidden by ignore pattern ${JSON.stringify(pattern.source)}`,
+      });
+      break;
+    }
+  }
+}
+
 function isLocalDatetime(value: string): boolean {
   const match = /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/u.exec(value);
   if (match === null) return false;
@@ -243,148 +420,13 @@ function isLocalDatetime(value: string): boolean {
   return day >= 1 && day <= new Date(Date.UTC(year, month, 0)).getUTCDate();
 }
 
-function parseBody(value: unknown, location: string, errors: ConfigError[]): PathEntry["body"] {
-  const raw = requireMapping(value, location, errors);
-  if (raw === undefined) return {};
-  rejectUnknownKeys(raw, ["allowed"], location, errors);
-  return { allowed: booleanSetting(raw, "allowed", location, errors) };
+function matches(pattern: RegExp, value: string): boolean {
+  pattern.lastIndex = 0;
+  return pattern.test(value);
 }
 
-function parseExtensions(value: unknown, location: string, errors: ConfigError[]): string[] | null | undefined {
-  if (value === null) return null;
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    errors.push({ message: `${location} must be a list of extensions, or null` });
-    return undefined;
-  }
-  return [...value] as string[];
-}
-
-function parseFilenames(value: unknown, location: string, errors: ConfigError[]): PathEntry["filenames"] {
-  const raw = requireMapping(value, location, errors);
-  if (raw === undefined) return {};
-  rejectUnknownKeys(raw, ["pattern"], location, errors);
-  return { pattern: compilePattern(raw, location, true, errors) };
-}
-
-function parseInternalLinks(
-  value: unknown,
-  location: string,
-  errors: ConfigError[],
-): PathEntry["internal_links"] {
-  const raw = requireMapping(value, location, errors);
-  if (raw === undefined) return {};
-  rejectUnknownKeys(raw, ["resolve", "format"], location, errors);
-  let format: InternalLinkFormat | null | undefined;
-  if ("format" in raw) {
-    if (
-      raw.format === null ||
-      (typeof raw.format === "string" && ["wikilink", "markdown-relative", "markdown-absolute"].includes(raw.format))
-    ) {
-      format = raw.format as InternalLinkFormat | null;
-    } else errors.push({ message: `${location}.format must be wikilink, markdown-relative, markdown-absolute, or null` });
-  }
-  return { resolve: booleanSetting(raw, "resolve", location, errors), format };
-}
-
-function parseIgnore(value: unknown, location: string, errors: ConfigError[]): PathEntry["ignore"] {
-  const raw = requireMapping(value, location, errors);
-  if (raw === undefined) return {};
-  rejectUnknownKeys(raw, ["dotfiles", "pattern"], location, errors);
-  return {
-    dotfiles: booleanSetting(raw, "dotfiles", location, errors),
-    pattern: compilePattern(raw, location, false, errors),
-  };
-}
-
-function booleanSetting(
-  raw: Record<string, unknown>,
-  key: string,
-  location: string,
-  errors: ConfigError[],
-): boolean | undefined {
-  if (!(key in raw)) return undefined;
-  const value = raw[key];
-  if (typeof value === "boolean") return value;
-  errors.push({ message: `${location}.${key} takes true or false` });
-  return undefined;
-}
-
-/**
- * Compiles an entry's `pattern`. `filenames.pattern` must match a segment in
- * full and `ignore.pattern` matches anywhere in one (spec/vault.md), so the
- * anchors are added here while `source` keeps what the user wrote for the
- * finding message.
- */
-function compilePattern(
-  raw: Record<string, unknown>,
-  location: string,
-  fullMatch: boolean,
-  errors: ConfigError[],
-): CompiledPattern | null | undefined {
-  if (!("pattern" in raw)) return undefined;
-  const value = raw["pattern"];
-  if (value === null) return null;
-  if (typeof value !== "string") {
-    errors.push({ message: `${location}.pattern must be a string or null` });
-    return undefined;
-  }
-  try {
-    return { source: value, regex: new RegExp(fullMatch ? `^(?:${value})$` : value) };
-  } catch (error) {
-    errors.push({ message: `${location}.pattern does not compile as a regular expression: ${describe(error)}` });
-    return undefined;
-  }
-}
-
-function validatePath(path: string, errors: ConfigError[]): void {
-  if (!path.startsWith("/")) errors.push({ message: `${path} must start with "/"` });
-  if (path !== "/" && path.endsWith("/")) errors.push({ message: `${path} must carry no trailing slash` });
-  const segments = path.slice(1).split("/");
-  if (path !== "/" && segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
-    errors.push({ message: `${path} contains an empty, ".", or ".." segment` });
-  }
-  if (/[\u0000-\u001f\u007f]/u.test(path)) errors.push({ message: `${path} may not contain control characters` });
-}
-
-function enclosingEntries(config: Config, relativePath: string): PathEntry[] {
-  const matches: Array<[number, PathEntry]> = [];
-  const comparablePath = relativePath.normalize("NFC");
-  for (const [configuredPath, entry] of config.paths) {
-    const root = configuredPath === "/";
-    const folder = configuredPath.slice(1).normalize("NFC");
-    const encloses = root ? comparablePath.length > 0 : comparablePath.startsWith(`${folder}/`);
-    // NFC never changes a path's separator count, so the depth is the
-    // normalized folder's — no need to re-split the raw key.
-    if (encloses) matches.push([root ? 0 : folder.split("/").length, entry]);
-  }
-  matches.sort(([left], [right]) => right - left);
-  return matches.map(([, entry]) => entry);
-}
-
-function inherited<T>(
-  entries: PathEntry[],
-  select: (entry: PathEntry) => T | null | undefined,
-  defaultValue: T,
-): T {
-  for (const entry of entries) {
-    const value = select(entry);
-    if (value !== undefined) return value === null ? defaultValue : value;
-  }
-  return defaultValue;
-}
-
-function normalizeRelativePath(path: string): string {
-  return path.replace(/^\/+|\/+$/gu, "");
-}
-
-function requireMapping(
-  value: unknown,
-  location: string,
-  errors: ConfigError[],
-): Record<string, unknown> | undefined {
-  if (isMapping(value)) return value;
-  errors.push({ message: `${location} must be a mapping` });
-  return undefined;
+function canonical(path: string): string {
+  return caseFold(path);
 }
 
 function isMapping(value: unknown): value is Record<string, unknown> {
@@ -398,9 +440,8 @@ function rejectUnknownKeys(
   errors: ConfigError[],
 ): void {
   for (const key of Object.keys(mapping)) {
-    if (!allowed.includes(key)) {
-      errors.push({ message: `${location === "" ? "" : `${location} has an `}unknown key "${key}"` });
-    }
+    if (allowed.includes(key)) continue;
+    errors.push({ message: `${location === "" ? "" : `${location} has an `}unknown key ${JSON.stringify(key)}` });
   }
 }
 

@@ -1,20 +1,24 @@
-paths:
-  /archive:
+version: 1
+
+strict: true
+filename_pattern: '[a-z][a-z-]*'
+
+folders:
+  - path: archive
     description: Stored documents.
     extensions: [pdf]
-  /contacts:
+  - path: archive/images
+    description: Stored images.
+    extensions: [png]
+  - path: contacts
     description: Structured contacts.
     extensions: [md]
-    filenames:
-      pattern: '[a-z][a-z-]*'
+    filename_pattern: '[a-z]+'
     schema:
       type: object
       required: [title]
       properties:
         title: { type: string }
-    body:
-      allowed: false
-    internal_links:
-      format: wikilink
-  /missing:
-    description: A deliberately absent scope.
+    body: none
+  - path: missing
+    description: A deliberately absent folder.

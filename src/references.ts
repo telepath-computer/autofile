@@ -1,281 +1,474 @@
 import { posix } from "node:path";
 
-// Pure internal-link API for the check engine:
-// - extractReferences scans parsed frontmatter and body into the spelling
-//   shown to users plus the target used for resolution.
-// - resolveReference selects a vault-relative file path from the check
-//   engine's file index, given the linking note's vault-relative path.
-// The caller builds the index and includes files only, never folders.
+export type ReferenceLocation = "frontmatter" | "prose";
+export type ReferenceSyntax = "wikilink" | "markdown";
 
 export interface Reference {
-  /** The reference's source text, exactly as written in the note. */
+  location: ReferenceLocation;
+  syntax: ReferenceSyntax;
+  /** Source text exactly as written in the note. */
   asWritten: string;
-  /** The part that resolves: the target before any `|` or `#`. */
+  /** Address after alias/fragment handling and URL decoding as applicable. */
   target: string;
+  /** Markdown destination was written with a vault-root slash. */
+  rooted?: true;
 }
 
-interface IndexedFile {
-  path: string;
-  normalizedPath: string;
+interface SuffixNode {
+  children: Map<string, SuffixNode>;
+  terminal: boolean;
 }
 
 export interface ReferenceIndex {
-  byBasename: Map<string, IndexedFile[]>;
-  byFullPath: Map<string, IndexedFile[]>;
+  byFullPath: Set<string>;
+  suffixRoot: SuffixNode;
 }
 
-/** Builds the opaque lookup structure used to resolve vault references. */
+/** Builds the full-path set and reversed whole-segment suffix trie shared by every link. */
 export function buildIndex(files: readonly string[]): ReferenceIndex {
-  const byBasename = new Map<string, IndexedFile[]>();
-  const byFullPath = new Map<string, IndexedFile[]>();
+  const byFullPath = new Set<string>();
+  const suffixRoot: SuffixNode = { children: new Map(), terminal: false };
   for (const path of files) {
-    const normalizedPath = comparable(toPosixSeparators(path));
-    const file = { path, normalizedPath };
-    addToIndex(byBasename, posix.basename(normalizedPath), file);
-    addToIndex(byFullPath, normalizedPath, file);
+    const comparablePath = comparable(path);
+    byFullPath.add(comparablePath);
+
+    let node = suffixRoot;
+    for (const segment of comparablePath.split("/").reverse()) {
+      let child = node.children.get(segment);
+      if (child === undefined) {
+        child = { children: new Map(), terminal: false };
+        node.children.set(segment, child);
+      }
+      child.terminal = true;
+      node = child;
+    }
   }
-  return { byBasename, byFullPath };
+  return { byFullPath, suffixRoot };
 }
 
-function addToIndex(index: Map<string, IndexedFile[]>, key: string, file: IndexedFile): void {
-  const matches = index.get(key);
-  if (matches === undefined) index.set(key, [file]);
-  else matches.push(file);
-}
-
-// A wikilink `[[target]]` or embed `![[target]]`: brackets holding at
-// least one character, none of them a bracket or newline — a reference is
-// a single-line construct, so an unclosed `[[` never fuses with a stray
-// `]]` on a later line.
 const wikilinkInner = String.raw`[^\][\r\n]+`;
 const wikilink = new RegExp(String.raw`!?\[\[(${wikilinkInner})\]\]`, "g");
 const wholeWikilink = new RegExp(String.raw`^!?\[\[(${wikilinkInner})\]\]$`);
 
-/** Whether a string consists entirely of one valid wikilink or embed. */
+/** Whether a string is entirely one wikilink (or embedded wikilink). */
 export function isWholeWikilink(value: string): boolean {
   return wholeWikilink.test(value);
 }
-// A markdown link `[label](target)` or image `![alt](target)`: no brackets
-// or newlines in the label. Destinations may be angle-bracketed and may
-// carry a double-quoted, single-quoted, or parenthesized title. Deliberate
-// simplifications: nested brackets, nested parentheses in destinations or
-// titles, and labels wrapped across lines are out of scope.
-const markdownLink = /!?\[([^\][\n]*)\]\((<[^>\n]*>|(?:[^()\n]|\([^()\n]*\))*)\)/g;
+
+/** Whether a string is entirely one relative internal Markdown link or image. */
+export function isWholeMarkdownLink(value: string): boolean {
+  const reference = wholeMarkdownReference(value);
+  return reference !== undefined && reference.rooted !== true;
+}
 
 /**
- * Extracts a note's references: whole-value wikilinks at any depth in
- * the frontmatter — a wikilink inside larger prose in a frontmatter string
- * is body-level prose, not a typed link, and is not extracted — and both
- * wikilink and markdown forms anywhere in the body outside code: fenced
- * code blocks and inline code spans are not scanned (spec/vault.md).
- * Frontmatter that does not parse or is not a mapping is skipped; the body
- * is always scanned.
+ * Extracts whole-value frontmatter references and prose links outside code.
+ * Parsed arrays are traversed normally, which means an unquoted `[[x]]`
+ * (YAML nested arrays) is data rather than a special case.
  */
 export function extractReferences(frontmatter: unknown, body: string): Reference[] {
   const references: Reference[] = [];
-  // Only a mapping is frontmatter proper — anything else is the note's
-  // parse problem, not a place references live.
-  if (typeof frontmatter === "object" && frontmatter !== null && !Array.isArray(frontmatter)) {
-    collectFrontmatter(frontmatter, new Set(), references);
-  }
+  if (isMapping(frontmatter)) collectFrontmatter(frontmatter, new Set(), references);
+
   const scanned = blankCode(body);
   const bodyReferences: Array<Reference & { index: number }> = [];
   for (const match of scanned.matchAll(wikilink)) {
-    const target = targetOf(match[1]!);
-    if (target !== "") bodyReferences.push({ asWritten: match[0], target, index: match.index });
+    const target = wikilinkTarget(match[1]!);
+    bodyReferences.push({
+      location: "prose",
+      syntax: "wikilink",
+      asWritten: match[0],
+      target,
+      index: match.index,
+    });
   }
-  for (const match of scanned.matchAll(markdownLink)) {
-    const encoded = markdownDestination(match[2]!);
-    const decoded = decodeTarget(encoded);
-    const heading = decoded.indexOf("#");
-    const target = heading === -1 ? decoded : decoded.slice(0, heading);
-    if (isInternalTarget(target)) {
-      bodyReferences.push({ asWritten: match[0], target, index: match.index });
+  for (const match of scanMarkdownLinks(scanned)) {
+    const parsed = markdownTarget(match.target);
+    if (parsed !== undefined) {
+      bodyReferences.push({
+        location: "prose",
+        syntax: "markdown",
+        asWritten: match.asWritten,
+        target: parsed.target,
+        ...(parsed.rooted ? { rooted: true as const } : {}),
+        index: match.index,
+      });
     }
   }
   bodyReferences.sort((left, right) => left.index - right.index);
-  references.push(...bodyReferences.map(({ asWritten, target }) => ({ asWritten, target })));
+  references.push(...bodyReferences.map(({ location, syntax, asWritten, target, rooted }) => ({
+    location,
+    syntax,
+    asWritten,
+    target,
+    ...(rooted ? { rooted } : {}),
+  })));
   return references;
 }
 
-// A fence opener (spec/vault.md: "fenced code blocks ... are not
-// scanned"): up to 3 leading spaces, a run of 3+ backticks or tildes, and
-// an optional info string. Per CommonMark, a backtick fence's info string
-// may not contain a backtick — such a line is prose holding code spans,
-// not an opener that would swallow the rest of the body.
-const fenceOpen = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-// A closer: the same character, a run at least as long, nothing after but
-// whitespace. Length is checked against the opener where this is applied.
-const fenceClose = /^ {0,3}(`{3,}|~{3,})\s*$/;
-
-/**
- * Blanks fenced code blocks and inline code spans out of a body, replacing
- * them with spaces of equal length so the surviving text keeps its exact
- * offsets. An unclosed fence runs to the end of the body, as in
- * CommonMark. Deliberate simplifications: inline spans pair within a
- * single line only (a reference is single-line anyway), backslash escapes
- * are ignored, fences inside blockquotes or lists are not recognized, and
- * indented (4-space) code blocks stay scanned — indentation in vault prose
- * is too ambiguous to treat as code.
- */
-function blankCode(body: string): string {
-  const lines = body.split("\n");
-  let fence: { char: string; length: number } | undefined;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (fence !== undefined) {
-      const close = fenceClose.exec(line);
-      if (close !== null && close[1]![0] === fence.char && close[1]!.length >= fence.length) {
-        fence = undefined;
+/** Whether a wikilink reaches some file by a whole-segment path suffix. */
+export function resolvesWikilink(target: string, index: ReferenceIndex): boolean {
+  if (target === "") return false;
+  for (const probe of [target, `${target}.md`]) {
+    let node = index.suffixRoot;
+    let found = true;
+    for (const segment of comparable(probe).split("/").reverse()) {
+      const child = node.children.get(segment);
+      if (child === undefined) {
+        found = false;
+        break;
       }
-      lines[i] = " ".repeat(line.length);
-      continue;
+      node = child;
     }
-    const open = fenceOpen.exec(line);
-    if (open !== null && !(open[1]![0] === "`" && open[2]!.includes("`"))) {
-      fence = { char: open[1]![0]!, length: open[1]!.length };
-      lines[i] = " ".repeat(line.length);
-      continue;
-    }
-    lines[i] = blankSpans(line);
+    if (found && node.terminal) return true;
   }
-  return lines.join("\n");
+  return false;
 }
 
-/**
- * Blanks inline code spans in one line of prose. Per CommonMark basics, a
- * span opens with a backtick run and closes with the next run of exactly
- * equal length; a run with no equal partner is literal text.
- */
-function blankSpans(line: string): string {
-  const runs = [...line.matchAll(/`+/g)];
-  let result = line;
-  let i = 0;
-  while (i < runs.length) {
-    const open = runs[i]!;
-    let j = i + 1;
-    while (j < runs.length && runs[j]![0].length !== open[0].length) j++;
-    if (j === runs.length) {
-      i++;
-      continue;
-    }
-    const end = runs[j]!.index + runs[j]![0].length;
-    result = result.slice(0, open.index) + " ".repeat(end - open.index) + result.slice(end);
-    i = j + 1;
+/** Whether a Markdown target reaches a file URL-style from its note folder. */
+export function resolveMarkdownReference(
+  target: string,
+  linkingNotePath: string,
+  index: ReferenceIndex,
+  rooted = target.startsWith("/"),
+): boolean {
+  const folder = posix.dirname(linkingNotePath);
+  for (const probe of [target, `${target}.md`]) {
+    const path = resolveUrlPath(probe, folder, rooted);
+    if (path !== undefined && index.byFullPath.has(comparable(path))) return true;
   }
-  return result;
+  return false;
 }
 
-/**
- * Walks frontmatter values at any depth, collecting strings that are a
- * wikilink whole. Keys are names, not values, and are not scanned. The
- * seen set breaks cycles, which YAML anchors can build.
- */
 function collectFrontmatter(value: unknown, seen: Set<object>, references: Reference[]): void {
   if (typeof value === "string") {
-    const match = wholeWikilink.exec(value);
-    if (match === null) return;
-    const target = targetOf(match[1]!);
-    if (target !== "") references.push({ asWritten: value, target });
+    const wikilinkMatch = wholeWikilink.exec(value);
+    if (wikilinkMatch !== null) {
+      references.push({
+        location: "frontmatter",
+        syntax: "wikilink",
+        asWritten: value,
+        target: wikilinkTarget(wikilinkMatch[1]!),
+      });
+      return;
+    }
+    const markdownReference = wholeMarkdownReference(value);
+    if (markdownReference !== undefined) references.push(markdownReference);
     return;
   }
   if (typeof value !== "object" || value === null || seen.has(value)) return;
   seen.add(value);
-  const values = Array.isArray(value) ? value : Object.values(value);
-  for (const nested of values) collectFrontmatter(nested, seen, references);
+  for (const nested of Array.isArray(value) ? value : Object.values(value)) {
+    collectFrontmatter(nested, seen, references);
+  }
 }
 
-/** The target of a wikilink's inner text: the part before the first `|` or `#`. */
-function targetOf(inner: string): string {
-  const cut = inner.search(/[|#]/);
+function wholeMarkdownReference(value: string): Reference | undefined {
+  const matches = scanMarkdownLinks(value);
+  if (matches.length !== 1 || matches[0]!.index !== 0 || matches[0]!.asWritten.length !== value.length) {
+    return undefined;
+  }
+  const parsed = markdownTarget(matches[0]!.target);
+  if (parsed === undefined) return undefined;
+  return {
+    location: "frontmatter",
+    syntax: "markdown",
+    asWritten: value,
+    target: parsed.target,
+    ...(parsed.rooted ? { rooted: true } : {}),
+  };
+}
+
+/** Alias and heading both end the address; the first one written wins. */
+function wikilinkTarget(inner: string): string {
+  const cut = inner.search(/[|#]/u);
   return cut === -1 ? inner : inner.slice(0, cut);
 }
 
-/** Whether a decoded markdown destination is internal rather than a URL. */
-function isInternalTarget(target: string): boolean {
-  if (target === "" || target.startsWith("#")) return false;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(target)) return false;
-  if (target.startsWith("//")) return false;
-  return true;
+interface ParsedMarkdownLink {
+  asWritten: string;
+  target: string;
+  index: number;
 }
 
-/** Removes a markdown title and angle brackets, yielding the encoded destination. */
-function markdownDestination(contents: string): string {
-  let destination = contents.trim();
-  const title = /\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\))\s*$/u.exec(destination);
-  if (title !== null) destination = destination.slice(0, title.index).trimEnd();
-  if (destination.startsWith("<") && destination.endsWith(">")) return destination.slice(1, -1);
-  return destination;
+function scanMarkdownLinks(source: string): ParsedMarkdownLink[] {
+  const links: ParsedMarkdownLink[] = [];
+  let index = 0;
+  while (index < source.length) {
+    const image = source[index] === "!" && source[index + 1] === "[";
+    if (source[index] !== "[" && !image) {
+      index++;
+      continue;
+    }
+    const parsed = parseMarkdownLinkAt(source, index, image);
+    if (parsed === undefined) {
+      index++;
+      continue;
+    }
+    links.push(parsed);
+    index += parsed.asWritten.length;
+  }
+  return links;
+}
+
+function parseMarkdownLinkAt(
+  source: string,
+  start: number,
+  image: boolean,
+): ParsedMarkdownLink | undefined {
+  const labelStart = start + (image ? 1 : 0);
+  let cursor = labelStart + 1;
+  let brackets = 1;
+  while (cursor < source.length && brackets > 0) {
+    if (source[cursor] === "\\") {
+      cursor += 2;
+      continue;
+    }
+    if (source[cursor] === "[") brackets++;
+    else if (source[cursor] === "]") brackets--;
+    cursor++;
+  }
+  if (brackets !== 0 || source[cursor] !== "(") return undefined;
+
+  const destination = parseDestination(source, cursor);
+  if (destination === undefined) return undefined;
+  return {
+    asWritten: source.slice(start, destination.end),
+    target: destination.target,
+    index: start,
+  };
+}
+
+function parseDestination(source: string, open: number): { target: string; end: number } | undefined {
+  let cursor = skipWhitespace(source, open + 1);
+  if (source[cursor] === ")") return { target: "", end: cursor + 1 };
+
+  if (source[cursor] === "<") {
+    const start = ++cursor;
+    while (cursor < source.length) {
+      if (source[cursor] === "\\") {
+        cursor += 2;
+        continue;
+      }
+      if (source[cursor] === "\n" || source[cursor] === "<") return undefined;
+      if (source[cursor] === ">") {
+        const target = source.slice(start, cursor);
+        const end = parseTitleAndClose(source, cursor + 1);
+        return end === undefined ? undefined : { target, end };
+      }
+      cursor++;
+    }
+    return undefined;
+  }
+
+  const start = cursor;
+  let parentheses = 0;
+  while (cursor < source.length) {
+    const char = source[cursor]!;
+    if (char === "\\") {
+      cursor += 2;
+      continue;
+    }
+    if (char === "(") {
+      parentheses++;
+      cursor++;
+      continue;
+    }
+    if (char === ")") {
+      if (parentheses === 0) {
+        return { target: source.slice(start, cursor), end: cursor + 1 };
+      }
+      parentheses--;
+      cursor++;
+      continue;
+    }
+    if (/\s/u.test(char) && parentheses === 0) {
+      const target = source.slice(start, cursor);
+      const end = parseTitleAndClose(source, cursor);
+      return end === undefined ? undefined : { target, end };
+    }
+    cursor++;
+  }
+  return undefined;
+}
+
+function parseTitleAndClose(source: string, start: number): number | undefined {
+  let cursor = skipWhitespace(source, start);
+  if (source[cursor] === ")") return cursor + 1;
+  const opener = source[cursor];
+  if (opener !== '"' && opener !== "'" && opener !== "(") return undefined;
+  const closer = opener === "(" ? ")" : opener;
+  cursor++;
+  let nested = opener === "(" ? 1 : 0;
+  while (cursor < source.length) {
+    if (source[cursor] === "\\") {
+      cursor += 2;
+      continue;
+    }
+    if (opener === "(" && source[cursor] === "(") nested++;
+    if (source[cursor] === closer) {
+      if (opener !== "(" || --nested === 0) {
+        cursor = skipWhitespace(source, cursor + 1);
+        return source[cursor] === ")" ? cursor + 1 : undefined;
+      }
+    }
+    cursor++;
+  }
+  return undefined;
+}
+
+function skipWhitespace(source: string, start: number): number {
+  let cursor = start;
+  while (cursor < source.length && /\s/u.test(source[cursor]!)) cursor++;
+  return cursor;
+}
+
+function unescapeMarkdown(target: string): string {
+  return target.replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/gu, "$1");
+}
+
+function markdownTarget(target: string): { target: string; rooted: boolean } | undefined {
+  const rawPath = cutUrlSuffix(target);
+  if (!isInternalMarkdownTarget(rawPath)) return undefined;
+  return {
+    target: decodeTarget(unescapeMarkdown(rawPath)),
+    rooted: rawPath.startsWith("/"),
+  };
+}
+
+// Split syntactic URL suffixes before decoding so `%23` and `%3F` can still
+// name literal filesystem characters.
+function cutUrlSuffix(target: string): string {
+  for (let index = 0; index < target.length; index++) {
+    if (target[index] === "\\") {
+      index++;
+      continue;
+    }
+    if (target[index] === "#" || target[index] === "?") return target.slice(0, index);
+  }
+  return target;
 }
 
 function decodeTarget(target: string): string {
   try {
     return decodeURIComponent(target);
   } catch {
+    // It remains an internal-looking link but cannot accidentally resolve
+    // unless a file literally carries the malformed percent spelling.
     return target;
   }
 }
 
-/**
- * Resolves an extracted target against an index of vault-relative file
- * paths. Plain targets suffix-match; `./` and `../` targets are relative to
- * the linking note's folder; `/` targets are vault-absolute. The literal
- * target is tried before its `.md` fallback. Among suffix matches, the file
- * with the fewest segments in its relative path from the note wins, with a
- * lexicographic path tie-break. Comparisons use NFC Unicode normalization;
- * the selected path is returned exactly as supplied by the index.
- */
-export function resolveReference(
-  target: string,
-  linkingNotePath: string,
-  index: ReferenceIndex,
-): string | undefined {
-  const noteFolder = posix.dirname(toPosixSeparators(linkingNotePath));
-  const relative = target.startsWith("./") || target.startsWith("../");
-  const absolute = target.startsWith("/");
-  const written = toPosixSeparators(target);
+function isInternalMarkdownTarget(target: string): boolean {
+  if (target === "" || target.startsWith("#")) return false;
+  if (/^[a-z][a-z0-9+.-]*:/iu.test(target)) return false;
+  if (target.startsWith("//")) return false;
+  return true;
+}
 
-  const base = relative
-    ? posix.normalize(posix.join(noteFolder, written))
-    : posix.normalize(absolute ? written.slice(1) : written);
-  // A target that climbs past the vault root, or is rooted outside it, names
-  // no vault file. "." is rejected only on the plain branch: an absolute "/"
-  // normalizes to "." too, and there it still probes the root ".md" file.
-  if (base === ".." || base.startsWith("../") || posix.isAbsolute(base)) return undefined;
-  if (base === "." && !relative && !absolute) return undefined;
+function resolveUrlPath(target: string, folder: string, rooted: boolean): string | undefined {
+  const resolved = posix.normalize(rooted
+    ? target.slice(1)
+    : posix.join(folder, target));
+  if (resolved === ".." || resolved.startsWith("../") || posix.isAbsolute(resolved)) return undefined;
+  return resolved;
+}
 
-  for (const probe of [base, `${base}.md`]) {
-    const normalizedProbe = comparable(probe);
-    const matches = relative || absolute
-      ? index.byFullPath.get(normalizedProbe) ?? []
-      : (index.byBasename.get(posix.basename(normalizedProbe)) ?? []).filter((file) =>
-        file.normalizedPath === normalizedProbe || file.normalizedPath.endsWith(`/${normalizedProbe}`));
-    if (matches.length > 0) return nearest(matches, noteFolder).path;
+const fenceOpen = /^(`{3,}|~{3,})(.*)$/;
+const fenceClose = /^(`{3,}|~{3,})\s*$/;
+
+function blankCode(body: string): string {
+  return blankCodeSpans(blankFencedCode(body));
+}
+
+function blankFencedCode(body: string): string {
+  const lines = body.split("\n");
+  let fence: { char: string; length: number } | undefined;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    const content = afterContainers(line);
+    if (fence !== undefined) {
+      const close = fenceClose.exec(content);
+      if (close !== null && close[1]![0] === fence.char && close[1]!.length >= fence.length) {
+        fence = undefined;
+      }
+      lines[index] = " ".repeat(line.length);
+      continue;
+    }
+    const open = fenceOpen.exec(content);
+    if (open !== null && !(open[1]![0] === "`" && open[2]!.includes("`"))) {
+      fence = { char: open[1]![0]!, length: open[1]!.length };
+      lines[index] = " ".repeat(line.length);
+    }
+  }
+  return lines.join("\n");
+}
+
+function afterContainers(line: string): string {
+  let cursor = skipUpToThreeSpaces(line, 0);
+  while (cursor < line.length) {
+    if (line[cursor] === ">") {
+      cursor++;
+      if (line[cursor] === " " || line[cursor] === "\t") cursor++;
+      cursor = skipUpToThreeSpaces(line, cursor);
+      continue;
+    }
+    const list = /^(?:[-+*]|\d{1,9}[.)])[ \t]+/u.exec(line.slice(cursor));
+    if (list === null) break;
+    cursor += list[0].length;
+    cursor = skipUpToThreeSpaces(line, cursor);
+  }
+  return line.slice(cursor);
+}
+
+function skipUpToThreeSpaces(line: string, start: number): number {
+  let cursor = start;
+  while (cursor < start + 3 && line[cursor] === " ") cursor++;
+  return cursor;
+}
+
+function blankCodeSpans(source: string): string {
+  let result = source;
+  let cursor = 0;
+  while (cursor < source.length) {
+    const open = source.indexOf("`", cursor);
+    if (open < 0) break;
+    const length = backtickRun(source, open);
+    const close = matchingBacktickRun(source, open + length, length);
+    if (close === undefined) {
+      cursor = open + length;
+      continue;
+    }
+    const end = close + length;
+    const blank = source.slice(open, end).replace(/[^\r\n]/g, " ");
+    result = result.slice(0, open) + blank + result.slice(end);
+    cursor = end;
+  }
+  return result;
+}
+
+function matchingBacktickRun(source: string, start: number, length: number): number | undefined {
+  let cursor = start;
+  while (cursor < source.length) {
+    const run = source.indexOf("`", cursor);
+    if (run < 0) return undefined;
+    const candidateLength = backtickRun(source, run);
+    if (candidateLength === length) return run;
+    cursor = run + candidateLength;
   }
   return undefined;
 }
 
-// Link targets are authored by hand, so a Windows-style separator can reach
-// us in one; vault paths from the walk are always `/`-joined already.
-function toPosixSeparators(path: string): string {
-  return path.replaceAll("\\", "/");
+function backtickRun(source: string, start: number): number {
+  let cursor = start;
+  while (source[cursor] === "`") cursor++;
+  return cursor - start;
 }
 
 function comparable(path: string): string {
   return path.normalize("NFC");
 }
 
-function nearest(files: readonly IndexedFile[], noteFolder: string): IndexedFile {
-  const normalizedNoteFolder = comparable(noteFolder);
-  return [...files].sort((left, right) => {
-    const leftDistance = distance(normalizedNoteFolder, left.normalizedPath);
-    const rightDistance = distance(normalizedNoteFolder, right.normalizedPath);
-    if (leftDistance !== rightDistance) return leftDistance - rightDistance;
-    return left.normalizedPath < right.normalizedPath ? -1 : left.normalizedPath > right.normalizedPath ? 1 : 0;
-  })[0]!;
-}
-
-function distance(normalizedNoteFolder: string, normalizedFile: string): number {
-  const relative = posix.relative(normalizedNoteFolder, normalizedFile);
-  return relative === "" ? 0 : relative.split("/").length;
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

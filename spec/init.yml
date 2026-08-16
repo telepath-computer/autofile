@@ -1,5 +1,4 @@
-// Normative bytes: spec/init.yml. test/cli.test.ts guards byte equality.
-export const starterConfig = `# Autofile — this vault's declared folders and conventions.
+# Autofile — this vault's declared folders and conventions.
 #
 # Autofile governs only what is declared below; everything else in the
 # vault is not its concern. A note is a .md file: YAML frontmatter
@@ -19,7 +18,7 @@ version: 1
                              # standard link relative to its note
 # filename_pattern: '^[a-z0-9][a-z0-9-]*$'
 # ignore:
-#   - '^\\.'                  # dotfiles: .obsidian, .trash
+#   - '^\.'                  # dotfiles: .obsidian, .trash
 
 # Declared folders. Each entry states what is true inside one folder;
 # a field left out constrains nothing. Example, showing every field:
@@ -37,4 +36,3 @@ version: 1
 #     filename_pattern: '^[a-z0-9-]+$'
 #     body: markdown         # or raw (uninterpreted) or none
 #     additional_subfolders: false
-`;
