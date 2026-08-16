@@ -13,17 +13,22 @@ once. It says what to do; why the system is shaped this way belongs here.
 - When to reach for a vault: whenever information turns up that should
   outlive the current task or might be needed for retrieval later. Filing
   is proactive, not only on request.
-- That a config may govern only part of a vault. Paths it does not declare
-  are not the agent's to file into, and a declared path with no description
-  scopes rules rather than inviting filing.
-- Creating a vault with `autofile init`, and that its paths are then
-  decided with the user by editing `autofile.yml` together.
-- How internal links are written: the path to the note without the `.md`
-  extension, quoted in YAML. A bare name resolves but may match more than
-  one note, so an agent writes enough path to be unambiguous. Linking a
-  note that does not exist yet is allowed.
-- That findings in notes the agent did not touch are the user's to triage,
-  not the agent's to silently rewrite.
+- That the config is the map of what is governed, read before acting:
+  each folder entry's description is a filing instruction. Notes and
+  files go into declared folders per those descriptions; territory no
+  entry covers is not the agent's to file into — when nothing fits,
+  ask, and declare a folder with the user rather than inventing one.
+- Creating a vault with `autofile init`, and that its folders are then
+  declared with the user by editing `autofile.yml` together.
+- Conforming to the config: the conventions in force — `link_format`,
+  `filename_pattern`, an entry's `extensions`, `schema`, and the rest —
+  are read from `autofile.yml` and followed as written, not recalled
+  from memory. One practice on top of conformance: write references
+  with full vault paths, since a short name's meaning can drift as the
+  vault grows; and referencing a note that does not exist yet is
+  allowed — it marks something to file later.
+- That findings in notes the agent did not touch are the user's to
+  triage, not the agent's to silently rewrite.
 - No speculation and no invented content.
 
 ## Sequences
@@ -38,16 +43,20 @@ Filing:
    preserved.
 2. Search for existing notes on the same subject and related ones; read
    them before writing.
-3. Choose paths: the most specific description that fits, the broadest only
-   when nothing narrower does. When nothing fits, ask.
-4. Write: a new note, an update to existing notes, or both — one input may
-   touch several. Link related notes; file other files at their described
-   paths.
-5. Run `autofile check` and fix what it reports.
+3. Choose the destination: the folder entry whose description fits
+   most specifically, the broadest only when nothing narrower does.
+   When nothing fits, ask.
+4. Write: a new note, an update to existing notes, or both — one
+   input may touch several. Reference related notes; file other files
+   where their folder's description says.
+5. Run `autofile check` and fix what it reports, warnings included —
+   but never by inventing content: an unresolved reference is fixed by
+   filing the real note or correcting the path, and a finding whose
+   fix needs information the agent lacks is raised to the user.
 
 Retrieval:
 
-1. Choose the strategy by the question: the path for a kind of thing, the
-   filename for something named or dated, a field for a known value, links
-   for what connects, and search for the rest.
-2. Read the notes found and follow their links onward.
+1. Choose the strategy by the question: the folder for a kind of
+   thing, the filename for something named or dated, a field for a
+   known value, references for what connects, and search for the rest.
+2. Read the notes found and follow their references onward.

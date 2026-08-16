@@ -16,7 +16,7 @@ package version.
 
 ## Output
 
-Both commands report to stdout; errors that stop a command before it runs
+Commands report to stdout; errors that stop a command before it runs
 go to stderr. Color and bold apply only when stdout is a terminal, and the
 loading state — a braille spinner and message, shown once a command has run
 for 200 ms, updating in place — is erased before the report prints. Piped
@@ -41,9 +41,20 @@ Writes an `autofile.yml` at `[path]` and nothing else, refusing if one
 already exists. It creates no folders, `[path]` included: declaring a path
 describes a folder rather than requesting one.
 
-The config it writes declares nothing and documents the format in comments
-— a path entry with a description, and each setting an entry may carry. A
-vault initialized this way checks clean, empty or not.
+The config it writes is [`init.yml`](init.yml), verbatim — the file in
+this spec folder is the normative output, and a byte of difference is a
+bug. It declares nothing: `version: 1` is its only active line, and
+everything else — the top-level settings at their defaults, one
+fully-worked `folders` entry, a statement of the conventions in force —
+is comments, so the defaults are visible without being asserted and
+adopting one is uncommenting a line. Folders are then declared with the
+user by editing `autofile.yml` together — `init` makes no claims about
+a vault it has not seen.
+
+Initialized anywhere — an empty folder or a full Obsidian vault — the
+config checks clean with no findings at all: nothing is governed until
+declared. Setting `strict: true` turns every ungoverned file into the
+`coverage` worklist.
 
 ```
 ⠋ Initializing…
@@ -71,21 +82,22 @@ the spec needs nothing added here.
 
 One finding stands outside the vault spec: `config`, a violation when the
 config cannot be read, does not parse, or is not valid, and the only
-finding reported when it fires.
+finding reported when it fires. A config without `version`, or with one
+this autofile does not understand, is a single `config` finding naming
+the migration or the version — never a cascade of unknown-key findings.
 
-Only governed files are checked, so a config declaring nothing reports
-nothing — except `strict`, which reports files no path declared.
-`collision` names each of the two paths, and one file may yield several
-findings of the same rule.
+Only governed files are checked: a config declaring no folders reports
+nothing. Under `strict: true`, a file no entry or `ignore` accounts for
+is the `coverage` violation. `collision` names each of the two paths, and one file may
+yield several findings of the same rule.
 
 Exit code is zero when there are no violations; warnings do not change it.
 
-`check` scales linearly with the vault, because the vaults it is for hold
-tens of thousands of notes. Link targets therefore resolve against an index
-built once per run — a suffix match ends at a basename, so a map from
-basename to the paths carrying it answers one in a lookup. Scanning the
-file list per link is quadratic and rules the tool out of its own headline
-case.
+`check` scales linearly with the vault, because the vaults it is for
+hold tens of thousands of notes. Link targets resolve against an index
+built once per run — wikilink targets against a suffix index, markdown
+targets as paths — so each link is a lookup. Scanning the file list per
+link is quadratic and rules the tool out of its own headline case.
 
 ```
 ⠋ Checking… 42 files
@@ -97,19 +109,19 @@ warnings, then ordered by path, rule, and message. The file column is
 aligned.
 
 ```
-✗ contacts/Author Notes.txt          extensions: .txt is not among the extensions this path holds
+✗ contacts/author-notes.txt          extensions: txt is not among the extensions this folder accepts
 ✗ contacts/jules-verne.md            schema: title must be a string
-! events/2026-08-07-studio-visit.md  internal_links.resolve: [[contacts/mira-holt]] does not exist
+! events/2026-08-07-studio-visit.md  resolve: [[contacts/mira-holt]] does not exist
 
 2 violations · 1 warning · 68 files
 ```
 
 A `config` finding names `autofile.yml`, and its message names the place
-inside it — a path key, which already begins with `/`, and any setting
-dotted onto it:
+inside it — a top-level key, or a folder entry named by its path, and
+any setting dotted onto it:
 
 ```
-✗ autofile.yml  config: /contacts has an unknown key "shema"
+✗ autofile.yml  config: folders contacts has an unknown key "shema"
 
 1 violation · 0 files
 ```
@@ -120,5 +132,6 @@ A clean run prints only the summary, marked `✓`:
 ✓ 68 files
 ```
 
-The count is the governed files. Files walked only to resolve link targets
-are not counted.
+The count is the governed files — everything an entry accounts for,
+plus `coverage` failures under `strict`. Ignored and out-of-scope files
+are walked only as link targets and are not counted.
