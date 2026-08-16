@@ -81,7 +81,7 @@ async function main(argv: string[]): Promise<number> {
   return 1;
 }
 
-/** `autofile init`: write only the comments-only config; never overwrite. */
+/** `autofile init`: write only the seeded version 1 config; never overwrite. */
 async function init(vaultRoot: string): Promise<number> {
   if (await fileExists(join(vaultRoot, "autofile.yml"))) {
     process.stderr.write("autofile.yml already exists; init never overwrites.\n");

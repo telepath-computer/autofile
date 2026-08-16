@@ -1,11 +1,15 @@
-✗ archive/image.png          extensions: .png is not among the extensions this path holds
-✗ contacts/Author Notes.txt  extensions: .txt is not among the extensions this path holds
-✗ contacts/Author Notes.txt  filenames.pattern: "Author Notes" does not match "[a-z][a-z-]*"
-✗ contacts/bad.md            body.allowed: body is not allowed
-✗ contacts/bad.md            internal_links.format: [missing](nowhere) is not wikilink
+✗ archive/image.png          extensions: png is not among the extensions this folder accepts
+✗ archive/images/wrong.pdf   extensions: pdf is not among the extensions this folder accepts
+✗ contacts/Author Notes.txt  extensions: txt is not among the extensions this folder accepts
+✗ contacts/Author Notes.txt  filename_pattern: "Author Notes" does not match "[a-z]+"
+✗ contacts/Bad Name.md       filename_pattern: "Bad Name" does not match "[a-z]+"
+✗ contacts/bad.md            body: body is not allowed
+✗ contacts/bad.md            link_format: [missing](missing) must use wikilink format
 ✗ contacts/bad.md            schema: title must be a string
 ✗ contacts/broken.md         parse: frontmatter is not valid YAML: unexpected end of the stream within a flow collection
-! contacts/bad.md            internal_links.resolve: [missing](nowhere) does not exist
+✗ loose.txt                  coverage: no folder entry accounts for this file
+! contacts/bad.md            resolve: [[contacts/missing]] does not exist
+! contacts/bad.md            resolve: [missing](missing) does not exist
 ! missing                    missing: declared path is missing
 
-7 violations · 2 warnings · 5 files
+10 violations · 3 warnings · 10 files

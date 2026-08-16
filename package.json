@@ -17,7 +17,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
     "prepack": "npm run build",
     "prelint": "npm run build",
     "lint": "tsc -p tsconfig.json",

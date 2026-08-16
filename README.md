@@ -58,8 +58,10 @@ Declare the folders you want governed. Each says what belongs there, and
 may add rules the notes must satisfy:
 
 ```yaml
-paths:
-  /contacts:
+version: 1
+
+folders:
+  - path: contacts
     description: |
       People and organizations. One note per person or organization.
     schema:
@@ -67,20 +69,18 @@ paths:
       properties:
         title: { type: string }
         kind: { enum: [person, organization] }
-    body:
-      allowed: false
+    body: none
 
-  /Daily Notes:
+  - path: daily-notes
     description: |
       One note per day.
-    filenames:
-      pattern: '^\d{4}-\d{2}-\d{2}$'
+    filename_pattern: '^\d{4}-\d{2}-\d{2}$'
 ```
 
 Descriptions are filing instructions, not documentation — they are what an
-agent reads to decide where something goes. Rules are optional, and every
-setting is inherited by nested paths until one replaces it — rules are
-never merged, and `null` clears an inherited one.
+agent reads to decide where something goes. Rules are optional. A folder entry
+governs its subtree; a more specific entry replaces it wholesale, with no
+settings inherited or merged.
 
 Add `strict: true` when the config completely describes the vault, and any
 file outside a declared path becomes a violation.

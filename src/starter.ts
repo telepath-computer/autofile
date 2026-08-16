@@ -1,22 +1,40 @@
-// The comments-only starter declares no governed paths. It is deliberately a
-// useful reference rather than an opinionated vault layout.
-export const starterConfig = `# Autofile governs only the paths you declare. strict: true also governs files
-# outside every declared path.
-# strict: false
-# paths:
-#   /contacts:
-#     description: What belongs here and how to file it.
-#     schema:
-#       type: object
-#     body:
-#       allowed: true
-#     extensions: [md]
-#     filenames:
-#       pattern: '^[a-z0-9-]+$'
-#     internal_links:
-#       resolve: true
-#       format: wikilink
-#     ignore:
-#       dotfiles: true
-#       pattern: '^_'
+// Normative bytes: spec/init.yml. test/cli.test.ts guards byte equality.
+export const starterConfig = `# Autofile — this vault's declared folders and conventions.
+#
+# Autofile governs only what is declared below; everything else in the
+# vault is not its concern. A note is a .md file: YAML frontmatter
+# (values parsed to JSON) above an optional markdown body. A field
+# value that is entirely an internal link — "[[contacts/priya-narayan]]"
+# under the wikilink format — is a typed reference; write full vault
+# paths, so a reference stays an address as the vault grows.
+
+version: 1
+
+# The defaults, shown here commented; adopt or change one by
+# uncommenting the line.
+
+# strict: false              # true: every file must fall under a
+                             # folder entry or an ignore pattern
+# link_format: wikilink      # or markdown: every internal link a
+                             # standard link relative to its note
+# filename_pattern: '^[a-z0-9][a-z0-9-]*$'
+# ignore:
+#   - '^\\.'                  # dotfiles: .obsidian, .trash
+
+# Declared folders. Each entry states what is true inside one folder;
+# a field left out constrains nothing. Example, showing every field:
+
+# folders:
+#   - path: tasks            # or "." for the vault root itself
+#     description: >
+#       One task per file — a single concrete next action.
+#     schema:                # JSON Schema for the notes' frontmatter
+#       required: [title, status]
+#       properties:
+#         title: { type: string }
+#         status: { enum: [open, done] }
+#     extensions: [md]       # files this folder accepts; ['*'] = any
+#     filename_pattern: '^[a-z0-9-]+$'
+#     body: markdown         # or raw (uninterpreted) or none
+#     additional_subfolders: false
 `;

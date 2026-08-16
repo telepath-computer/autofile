@@ -13,17 +13,19 @@ export function renderCheckReport(result: CheckResult, opts: { color: boolean })
   const files = count(result.filesChecked, "file");
   if (result.findings.length === 0) return `${c.green("✓")} ${c.dim(files)}\n`;
 
-  // The file column is padded to the longest file in the report.
-  // Combining marks occupy no column. Wide glyphs (CJK, emoji) can still
-  // drift visually — accepted for determinism over a wcwidth dependency.
-  const width = result.findings.reduce((widest, f) => Math.max(widest, fileWidth(f.file)), 0);
-  const lines = result.findings.map((finding) => {
+  const rows = result.findings.map((finding) => ({
+    finding,
+    file: escapeControls(finding.file),
+    message: escapeControls(finding.message),
+  }));
+  // The escaped file column is padded by terminal cells, not UTF-16/code-point count.
+  const width = rows.reduce((widest, row) => Math.max(widest, displayWidth(row.file)), 0);
+  const lines = rows.map(({ finding, file, message }) => {
     const paint = finding.severity === "violation" ? c.red : c.yellow;
     const marker = paint(finding.severity === "violation" ? "✗" : "!");
     const prefix = paint(`${finding.rule}:`);
-    const gap = " ".repeat(width - fileWidth(finding.file) + 2);
-    const message = finding.message.replace(/\s+/gu, " ").trim();
-    return `${marker} ${c.bold(finding.file)}${gap}${prefix} ${message}`;
+    const gap = " ".repeat(width - displayWidth(file) + 2);
+    return `${marker} ${c.bold(file)}${gap}${prefix} ${message}`;
   });
 
   const violations = result.findings.filter((f) => f.severity === "violation").length;
@@ -37,8 +39,52 @@ export function renderCheckReport(result: CheckResult, opts: { color: boolean })
   return `${lines.join("\n")}\n\n${summary}\n`;
 }
 
-function fileWidth(file: string): number {
-  return file.replace(/\p{M}/gu, "").length;
+function escapeControls(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/gu, (character) => {
+    if (character === "\n") return "\\n";
+    if (character === "\r") return "\\r";
+    if (character === "\t") return "\\t";
+    return `\\u${character.codePointAt(0)!.toString(16).padStart(4, "0")}`;
+  });
+}
+
+function displayWidth(text: string): number {
+  let width = 0;
+  for (const character of text) {
+    const codePoint = character.codePointAt(0)!;
+    if (
+      codePoint === 0
+      || codePoint <= 0x1f
+      || (codePoint >= 0x7f && codePoint <= 0x9f)
+      || /[\p{M}\p{Cf}]/u.test(character)
+    ) continue;
+    width += isWide(codePoint) ? 2 : 1;
+  }
+  return width;
+}
+
+// East Asian Wide/Fullwidth ranges, following the compact range approach
+// used by wcwidth implementations. Ambiguous characters remain one cell.
+function isWide(codePoint: number): boolean {
+  return codePoint >= 0x1100 && (
+    codePoint <= 0x115f
+    || codePoint === 0x2329
+    || codePoint === 0x232a
+    || (codePoint >= 0x2e80 && codePoint <= 0x303e)
+    || (codePoint >= 0x3040 && codePoint <= 0xa4cf)
+    || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
+    || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+    || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
+    || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+    || (codePoint >= 0xff00 && codePoint <= 0xff60)
+    || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+    || (codePoint >= 0x16fe0 && codePoint <= 0x16fe4)
+    || (codePoint >= 0x17000 && codePoint <= 0x18d8f)
+    || (codePoint >= 0x1aff0 && codePoint <= 0x1afff)
+    || (codePoint >= 0x1b000 && codePoint <= 0x1b2ff)
+    || (codePoint >= 0x1f200 && codePoint <= 0x1f251)
+    || (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  );
 }
 
 export function count(n: number, noun: string): string {
