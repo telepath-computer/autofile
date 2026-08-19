@@ -10,22 +10,27 @@ once. It says what to do; why the system is shaped this way belongs here.
 
 ## What it must cover
 
-- When to reach for a vault: whenever information turns up that should
-  outlive the current task or might be needed for retrieval later. Filing
-  is proactive, not only on request.
-- That the config is the map of what is governed, read before acting:
+- When to file: whenever information turns up that should outlive the
+  current task or might be needed for retrieval later. Filing is
+  proactive, not only on request.
+- That the config states what is governed, and is read before acting:
   each folder entry's description is a filing instruction. Notes and
-  files go into declared folders per those descriptions; territory no
-  entry covers is not the agent's to file into — when nothing fits,
-  ask, and declare a folder with the user rather than inventing one.
+  files go into declared folders per those descriptions; a path no entry
+  covers is not the agent's to file into — when nothing fits, ask, and
+  declare a folder with the user rather than inventing one.
 - Creating a vault with `autofile init`, and that its folders are then
   declared with the user by editing `autofile.yml` together.
+- That `autofile serve` puts the vault behind an HTTP API — for building
+  an application over it, not for filing, which stays ordinary file
+  writes. vault-server defines the protocol and ships a separate skill
+  for it.
 - Conforming to the config: the conventions in force — `link_format`,
   `filename_pattern`, an entry's `extensions`, `schema`, and the rest —
   are read from `autofile.yml` and followed as written, not recalled
   from memory. One practice on top of conformance: write references
-  with full vault paths, since a short name's meaning can drift as the
-  vault grows; and referencing a note that does not exist yet is
+  with full vault paths, since a bare name matches any note with that
+  name, so filing a second one changes which note the link reaches
+  without changing the link; and referencing a note that does not exist yet is
   allowed — it marks something to file later.
 - That findings in notes the agent did not touch are the user's to
   triage, not the agent's to silently rewrite.
@@ -49,10 +54,8 @@ Filing:
 4. Write: a new note, an update to existing notes, or both — one
    input may touch several. Reference related notes; file other files
    where their folder's description says.
-5. Run `autofile check` and fix what it reports, warnings included —
-   but never by inventing content: an unresolved reference is fixed by
-   filing the real note or correcting the path, and a finding whose
-   fix needs information the agent lacks is raised to the user.
+5. Run `autofile check` and resolve what it reports, asking the user
+   where a fix needs information the agent does not have.
 
 Retrieval:
 

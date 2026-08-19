@@ -8,8 +8,8 @@ reliably, because the config answers where a thing goes, what shape it
 must have, and what it is called; and applications can trust the data,
 because a declared folder's notes verifiably satisfy their schema. The
 config governs only what it declares. A folder no entry reaches is
-outside Autofile's concern — an existing vault adopts Autofile by
-declaring one folder, and tightens by declaring more.
+not governed — an existing vault adopts Autofile by declaring one
+folder, and tightens by declaring more.
 
 ## Notes
 
@@ -58,19 +58,20 @@ changing a convention is editing a visible line.
 ### `version`
 
 The config format version. Required, an integer; this document describes
-version 1. A config without it is read as pre-versioned and reported as
-one finding naming the migration, not as a cascade of unknown keys. A
+version 1. A config without it was written before the format was
+versioned, and is reported as one finding naming the migration, not as a
+cascade of unknown keys. A
 version this autofile does not understand is likewise one finding. The
-gate exists so a config is always read under the rules it was written
-for, or not at all.
+check exists so a config is read under the rules it was written for, or
+not read at all.
 
 ### `strict`
 
 Asserts that nothing in the vault is ungoverned: every file falls under
 a folder entry or an `ignore` pattern, and anything else is the
 `coverage` finding. Without it, files outside every entry are simply not
-Autofile's concern. Strict widens what the vault answers for; it never
-changes what an entry requires. `autofile.yml` itself is always exempt —
+governed at all. Strict adds to what the vault must account for; it
+never changes what an entry requires. `autofile.yml` itself is always exempt —
 a strict vault necessarily holds one at the root.
 
 **Default:** `false`.
@@ -127,9 +128,10 @@ most specific entry governs its subtree wholesale (see Governance).
   Unicode normalization; either is a `config` finding.
 - `description` — what belongs here rather than elsewhere, and how to
   file it: a filing instruction, not documentation. An entry without one
-  leaves a hole in the map — advisory, not invalid (see Validity).
-- `schema` — JSON Schema (2020-12) the folder's notes' frontmatter must
-  satisfy. A note with no frontmatter is checked as an empty object.
+  leaves a reader unable to file there, which is advisory rather than
+  invalid (see Validity).
+- `schema` — JSON Schema (2020-12) that the frontmatter of notes in the
+  folder must satisfy. A note with no frontmatter is checked as an empty object.
   Formats are asserted, not annotations. Autofile adds two:
   `internal-link`, a value that is entirely an internal link in the
   vault's `link_format`, and `datetime`,
@@ -162,8 +164,8 @@ most specific entry governs its subtree wholesale (see Governance).
   that entry; any other is a finding. `true`, the default, allows
   subfolders and extends this entry's statements over them.
 
-**Default:** no entries — a config declaring no folders governs nothing,
-which with `strict: false` is a valid vault that asks nothing of anyone.
+**Default:** no entries. A config declaring no folders governs nothing,
+which with `strict: false` is a valid vault with no requirements at all.
 
 ## Governance
 
@@ -176,9 +178,9 @@ Which entry answers for a file:
 - Within its scope, an entry's statements apply to what they are about:
   `schema`, `body`, and note filenames to `.md` files; `extensions` to
   every file; `additional_subfolders` to folders.
-- A file no entry reaches is out of scope: no finding, no permission —
-  not Autofile's concern. Under `strict: true` it is the `coverage`
-  finding instead.
+- A file no entry reaches is out of scope: neither governed nor
+  forbidden, since nothing has been declared about where it sits. Under
+  `strict: true` it is the `coverage` finding instead.
 - `autofile.yml` is exempt: no entry or setting governs it.
 
 ## Internal links
@@ -216,11 +218,8 @@ wherever those segments end a path. Which of several matches a link
 means is not adjudicated: `check` answers whether a link reaches
 something, never which thing it reaches. A markdown target resolves as
 a URL resolves: against the note's containing folder, URL-decoded, the
-literal path first, then `<target>.md`. Full
-vault paths are the practice the skill teaches for references, since a
-short name's meaning can drift as the vault grows, but no resolvable
-spelling is a finding — a folder that wants address-discipline asserts
-it in its schema.
+literal path first, then `<target>.md`. Any spelling that resolves is
+legal; a folder that wants full paths requires them in its schema.
 
 For every link: a folder does not satisfy a link; comparison normalizes
 Unicode, so a name stored as NFD is reached by a link written as NFC; a
@@ -246,8 +245,9 @@ The config is well-formed when:
 - `version` is present and understood (see above — either failure is a
   single finding).
 - It holds no unknown keys, every schema compiles as JSON Schema, and
-  every pattern compiles as a regular expression — a broken rule looks
-  exactly like one everything passes.
+  every pattern compiles as a regular expression. A rule that fails to
+  compile would otherwise be indistinguishable from one that everything
+  satisfies.
 - Schemas compile strictly, so an unknown schema keyword is rejected
   like any other misspelled key.
 - Declared paths are unique (including case and Unicode normalization),

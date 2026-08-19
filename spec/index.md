@@ -12,13 +12,14 @@ the `autofile` CLI, and the skill that instructs agents.
 
 - [Vault](vault.md) — vault semantics: the config, notes, folder
   entries, internal links.
-- [CLI](cli.md) — the `autofile` binary: `init` and `check`.
+- [CLI](cli.md) — the `autofile` binary: `init`, `check`, and `serve`.
 - [Skill](skill.md) — what the agent-facing instructions must cover.
 
 ## Distribution
 
 The package is published as `@telepath-computer/autofile` and provides the
-`autofile` binary. The skill installs with `npx skills add
+`autofile` binary. It requires Node 24, matching vault-server. The skill
+installs with `npx skills add
 telepath-computer/autofile`.
 
 ## Non-goals
