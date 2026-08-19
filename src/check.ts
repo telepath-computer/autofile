@@ -1,49 +1,33 @@
 import { readdir, readFile } from "node:fs/promises";
-import { join, posix } from "node:path";
+import { join } from "node:path";
 
-import type { ErrorObject } from "ajv";
 import { CORE_SCHEMA, load, YAMLException } from "js-yaml";
 
 import {
-  caseFold,
   folderEntryFor,
   isIgnored,
   loadConfig,
   type Config,
   type FolderEntry,
 } from "./config.js";
+import { sortFindings, type Finding } from "./findings.js";
 import {
   buildIndex,
-  extractReferences,
   resolveMarkdownReference,
   resolvesWikilink,
   type ReferenceIndex,
 } from "./references.js";
+import {
+  additionalSubfolderFinding,
+  collisionFindings,
+  coverageFinding,
+  isNote,
+  recordFindings,
+  recordReferences,
+  type ParsedRecord,
+} from "./rules.js";
 
-export type Rule =
-  | "config"
-  | "coverage"
-  | "parse"
-  | "schema"
-  | "body"
-  | "filename_pattern"
-  | "extensions"
-  | "additional_subfolders"
-  | "description"
-  | "link_format"
-  | "resolve"
-  | "collision"
-  | "missing";
-
-export type Severity = "violation" | "warning";
-
-export interface Finding {
-  rule: Rule;
-  severity: Severity;
-  /** Vault-relative file or declared folder path, or autofile.yml. */
-  file: string;
-  message: string;
-}
+export type { Finding, Rule, Severity } from "./findings.js";
 
 export interface CheckResult {
   findings: Finding[];
@@ -93,12 +77,7 @@ export async function check(vaultRoot: string, opts: CheckOptions = {}): Promise
       if (!config.strict) continue;
       filesChecked++;
       opts.onFile?.(filesChecked);
-      findings.push({
-        rule: "coverage",
-        severity: "violation",
-        file,
-        message: "no folder entry accounts for this file",
-      });
+      findings.push(coverageFinding(file));
       continue;
     }
 
@@ -140,27 +119,16 @@ async function checkFolderFile(
   referenceIndex: ReferenceIndex,
   findings: Finding[],
 ): Promise<void> {
-  const note = isNote(file);
-  const pattern = entry.filenamePattern ?? (note ? config.filenamePattern : undefined);
-  if (pattern !== undefined) {
-    const filename = stripExtension(posix.basename(file));
-    if (!matches(pattern.regex, filename)) {
-      findings.push({
-        rule: "filename_pattern",
-        severity: "violation",
-        file,
-        message: `${JSON.stringify(filename)} does not match ${JSON.stringify(pattern.source)}`,
-      });
-    }
+  if (!isNote(file)) {
+    findings.push(...recordFindings(config, entry, file, {}));
+    return;
   }
-
-  checkExtensions(file, entry, findings);
-  if (!note) return;
 
   let content: string;
   try {
     content = await readFile(join(root, file), "utf8");
   } catch (error) {
+    findings.push(...recordFindings(config, entry, file, {}));
     findings.push({ rule: "parse", severity: "violation", file, message: `cannot be read: ${describe(error)}` });
     return;
   }
@@ -186,43 +154,19 @@ async function checkFolderFile(
     }
   }
 
-  if (parsed && entry.schema !== undefined && !entry.schema.validate(frontmatter)) {
-    for (const error of entry.schema.validate.errors ?? []) {
-      findings.push({ rule: "schema", severity: "violation", file, message: translateSchemaError(error) });
-    }
-  }
-  if (entry.body === "none" && body.trim() !== "") {
-    findings.push({ rule: "body", severity: "violation", file, message: "body is not allowed" });
-  }
-  checkReferences(
-    file,
-    parsed ? frontmatter : undefined,
-    entry.body === "raw" ? "" : body,
-    config,
-    referenceIndex,
-    findings,
-  );
+  const record: ParsedRecord = { fields: parsed ? frontmatter : undefined, body };
+  findings.push(...recordFindings(config, entry, file, record));
+  checkResolutions(file, entry, record, referenceIndex, findings);
 }
 
-function checkReferences(
+function checkResolutions(
   file: string,
-  frontmatter: unknown,
-  body: string,
-  config: Config,
+  entry: FolderEntry,
+  record: ParsedRecord,
   index: ReferenceIndex,
   findings: Finding[],
 ): void {
-  for (const reference of extractReferences(frontmatter, body)) {
-    let formatMessage: string | undefined;
-    if (reference.syntax !== config.linkFormat) {
-      formatMessage = `${reference.asWritten} must use ${config.linkFormat} format`;
-    } else if (reference.syntax === "markdown" && reference.rooted === true) {
-      formatMessage = `${reference.asWritten} must use a relative markdown target`;
-    }
-    if (formatMessage !== undefined) {
-      findings.push({ rule: "link_format", severity: "violation", file, message: formatMessage });
-    }
-
+  for (const reference of recordReferences(entry, record)) {
     const resolved = reference.syntax === "wikilink"
       ? resolvesWikilink(reference.target, index)
       : resolveMarkdownReference(reference.target, file, index, reference.rooted === true);
@@ -235,18 +179,6 @@ function checkReferences(
       });
     }
   }
-}
-
-function checkExtensions(file: string, entry: FolderEntry, findings: Finding[]): void {
-  if (entry.extensions === undefined) return;
-  const extension = nameExtension(posix.basename(file));
-  if (extension !== undefined && entry.extensions.includes(caseFold(extension))) return;
-  findings.push({
-    rule: "extensions",
-    severity: "violation",
-    file,
-    message: `${extension ?? "no extension"} is not among the extensions this folder accepts`,
-  });
 }
 
 function checkDescriptions(config: Config, findings: Finding[]): void {
@@ -274,43 +206,14 @@ function checkAdditionalSubfolders(config: Config, folders: readonly string[], f
   for (const folder of folders) {
     if (isIgnored(config, folder)) continue;
     const entry = folderEntryFor(config, `${folder}/.autofile-folder`);
-    if (entry === undefined || entry.additionalSubfolders || entry.path.normalize("NFC") === folder.normalize("NFC")) {
-      continue;
-    }
-    findings.push({
-      rule: "additional_subfolders",
-      severity: "violation",
-      file: folder,
-      message: `subfolder is not allowed by folders ${entry.path}`,
-    });
+    if (entry === undefined) continue;
+    const finding = additionalSubfolderFinding(entry, folder);
+    if (finding !== undefined) findings.push(finding);
   }
 }
 
 function checkCollisions(governedFiles: readonly string[], findings: Finding[]): void {
-  const paths = new Set<string>();
-  for (const file of governedFiles) {
-    paths.add(file);
-    const segments = file.split("/");
-    for (let length = 1; length < segments.length; length++) {
-      paths.add(segments.slice(0, length).join("/"));
-    }
-  }
-
-  const groups = new Map<string, string[]>();
-  for (const path of paths) {
-    const key = canonical(path);
-    const group = groups.get(key) ?? [];
-    group.push(path);
-    groups.set(key, group);
-  }
-  for (const group of groups.values()) {
-    if (group.length < 2) continue;
-    group.sort(compare);
-    for (const path of group) {
-      const others = group.filter((candidate) => candidate !== path).map((candidate) => JSON.stringify(candidate));
-      findings.push({ rule: "collision", severity: "violation", file: path, message: `collides with ${others.join(", ")}` });
-    }
-  }
+  findings.push(...collisionFindings(governedFiles));
 }
 
 function splitRecord(content: string): { frontmatterSource?: string; body: string } {
@@ -325,64 +228,8 @@ function splitRecord(content: string): { frontmatterSource?: string; body: strin
   };
 }
 
-function translateSchemaError(error: ErrorObject): string {
-  const path = error.instancePath
-    .split("/")
-    .filter(Boolean)
-    .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))
-    .join(".");
-  const params = error.params as Record<string, unknown>;
-  if (error.keyword === "required") {
-    return `${path === "" ? "" : `${path}.`}${String(params["missingProperty"])} is required`;
-  }
-  if (error.keyword === "type") return `${path || "frontmatter"} must be ${article(String(params["type"]))}`;
-  if (error.keyword === "additionalProperties") {
-    return `${path === "" ? "" : `${path}.`}${String(params["additionalProperty"])} is not an allowed field`;
-  }
-  return `${path || "frontmatter"} ${error.message ?? "is invalid"}`;
-}
-
-function article(type: string): string {
-  if (type === "integer" || type === "object" || type === "array") return `an ${type}`;
-  if (type === "null") return "null";
-  return `a ${type}`;
-}
-
-function nameExtension(name: string): string | undefined {
-  const dot = name.lastIndexOf(".");
-  return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1) : undefined;
-}
-
-function stripExtension(name: string): string {
-  const extension = nameExtension(name);
-  return extension === undefined ? name : name.slice(0, -(extension.length + 1));
-}
-
-function isNote(file: string): boolean {
-  return nameExtension(posix.basename(file)) === "md";
-}
-
-function matches(pattern: RegExp, value: string): boolean {
-  pattern.lastIndex = 0;
-  return pattern.test(value);
-}
-
-function canonical(path: string): string {
-  return caseFold(path);
-}
-
 function isMapping(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-const severityRank: Record<Severity, number> = { violation: 0, warning: 1 };
-
-function sortFindings(findings: Finding[]): Finding[] {
-  return findings.sort((left, right) =>
-    severityRank[left.severity] - severityRank[right.severity]
-    || compare(left.file, right.file)
-    || compare(left.rule, right.rule)
-    || compare(left.message, right.message));
 }
 
 function compare(left: string, right: string): number {
