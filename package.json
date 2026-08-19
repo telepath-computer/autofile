@@ -1,6 +1,6 @@
 {
   "name": "@telepath-computer/autofile",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Predictable filing for agents.",
   "license": "MIT",
   "repository": {
@@ -29,9 +29,10 @@
     "test": "node --test test/*.test.ts"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "dependencies": {
+    "@telepath-computer/vault-server": "^0.4.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
     "js-yaml": "^4.1.0",

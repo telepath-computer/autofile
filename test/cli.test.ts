@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createServer, type Server as NetServer } from "node:net";
+import { mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -57,7 +58,7 @@ async function temp(): Promise<string> {
   return root;
 }
 
-const usage = "Usage: autofile <command> [path]\n\nPredictable filing for agents — initialize and check Autofile vaults.\n\n  init         create an empty Autofile configuration\n  check        validate the vault and report findings\n  path         vault folder (default: current directory)\n  --help       show this help\n  --version    print the version\n";
+const usage = "Usage: autofile <command> [path]\n\nPredictable filing for agents — initialize, check, and serve Autofile vaults.\n\n  init         create an empty Autofile configuration\n  check        validate the vault and report findings\n  serve        serve the vault over HTTP\n  path         vault folder (default: current directory)\n  --host HOST  host to bind (serve only)\n  --port PORT  port to bind (serve only)\n  --help       show this help\n  --version    print the version\n";
 const initReport = "Initialized an Autofile vault.\n\n  autofile.yml\n";
 
 test("init writes spec/init.yml byte-for-byte and a fresh vault checks clean", async () => {
@@ -91,7 +92,7 @@ test("init refuses to overwrite and leaves the existing config byte-identical", 
   const before = await readFile(join(root, "autofile.yml"));
   assert.deepEqual(await run(["init"], root), {
     stdout: "",
-    stderr: "autofile.yml already exists; init never overwrites.\n",
+    stderr: "✗ autofile.yml already exists; init never overwrites.\n",
     code: 1,
   });
   assert.deepEqual(await readFile(join(root, "autofile.yml")), before);
@@ -159,13 +160,13 @@ test("missing config stops on stderr, and init does not create its path", async 
   const root = await temp();
   assert.deepEqual(await run(["check"], root), {
     stdout: "",
-    stderr: "autofile.yml not found; this folder is not an Autofile vault.\n",
+    stderr: "✗ autofile.yml not found; this folder is not an Autofile vault.\n",
     code: 1,
   });
   const result = await run(["init", "absent/vault"], root);
   assert.equal(result.stdout, "");
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /^ENOENT: .+\n$/u);
+  assert.match(result.stderr, /^✗ ENOENT: .+\n$/u);
   await assert.rejects(stat(join(root, "absent")));
 });
 
@@ -182,4 +183,150 @@ test("large reports survive an early-closing stdout consumer", async () => {
     child.on("close", (code) => done({ code: code ?? -1, stderr }));
   });
   assert.deepEqual(result, { code: 1, stderr: "" });
+});
+
+test("serve stops before binding when the config is missing or invalid", async () => {
+  const root = await temp();
+  assert.deepEqual(await run(["serve"], root), {
+    stdout: "",
+    stderr: "✗ autofile.yml not found; this folder is not an Autofile vault.\n",
+    code: 1,
+  });
+  await writeFile(join(root, "autofile.yml"), "version: 1\nfolders:\n  - path: notes\n    shema: {}\n");
+  assert.deepEqual(await run(["serve"], root), {
+    stdout: "",
+    stderr: "✗ autofile.yml: folders notes has an unknown key \"shema\"\n",
+    code: 1,
+  });
+});
+
+interface RunningServe {
+  child: ChildProcess;
+  stdoutPath: string;
+  stderrPath: string;
+  startup: string;
+  stop(): Promise<void>;
+}
+
+async function startServe(args: string[], cwd?: string): Promise<RunningServe> {
+  const capture = await mkdtemp(join(tmpdir(), "autofile-serve-capture-"));
+  roots.push(capture);
+  const stdoutPath = join(capture, "stdout");
+  const stderrPath = join(capture, "stderr");
+  const stdoutFile = await open(stdoutPath, "w");
+  const stderrFile = await open(stderrPath, "w");
+  const child = spawn(process.execPath, [cli, ...args], {
+    cwd,
+    env,
+    stdio: ["ignore", stdoutFile.fd, stderrFile.fd],
+  });
+  await Promise.all([stdoutFile.close(), stderrFile.close()]);
+  const closed = new Promise<void>((resolveClose, reject) => {
+    child.once("error", reject);
+    child.once("close", () => resolveClose());
+  });
+  const startup = await waitForOutput(stdoutPath, /^url:    http:\/\/[^\n]+$/mu, closed, stderrPath);
+  return {
+    child,
+    stdoutPath,
+    stderrPath,
+    startup,
+    async stop() {
+      child.kill("SIGINT");
+      await closed;
+    },
+  };
+}
+
+async function waitForOutput(
+  path: string,
+  pattern: RegExp,
+  closed: Promise<void>,
+  stderrPath?: string,
+): Promise<string> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const output = await readFile(path, "utf8");
+    if (pattern.test(output)) return output;
+    const ended = await Promise.race([closed.then(() => true), new Promise<false>((resolveWait) => {
+      setTimeout(() => resolveWait(false), 20);
+    })]);
+    if (ended) {
+      const stderr = stderrPath === undefined ? "" : await readFile(stderrPath, "utf8");
+      assert.fail(`serve exited before expected output: ${stderr}`);
+    }
+  }
+  assert.fail(`timed out waiting for ${String(pattern)}`);
+}
+
+async function reservePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolveListen, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  const address = server.address();
+  assert.ok(address !== null && typeof address === "object");
+  const port = address.port;
+  await new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
+  return port;
+}
+
+async function occupyDefaultPort(): Promise<NetServer | undefined> {
+  const server = createServer();
+  return new Promise((resolveListen, reject) => {
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "EADDRINUSE") resolveListen(undefined);
+      else reject(error);
+    });
+    server.listen(4747, "127.0.0.1", () => resolveListen(server));
+  });
+}
+
+test("serve omits an absent port, forwards an explicit one, and prints resolved startup details", async (t) => {
+  const root = await temp();
+  await mkdir(join(root, "notes"));
+  await writeFile(join(root, "autofile.yml"), "version: 1\nfolders:\n  - path: notes\n    description: Notes.\n");
+  await writeFile(join(root, "notes", "one.md"), "One.\n");
+  const pkg = JSON.parse(await readFile(resolve("package.json"), "utf8")) as { version: string };
+  const blocker = await occupyDefaultPort();
+  if (blocker !== undefined) t.after(() => new Promise<void>((done) => blocker.close(() => done())));
+
+  const automatic = await startServe(["serve", root, "--host", "127.0.0.1"]);
+  const automaticPort = Number(/url:    http:\/\/127\.0\.0\.1:(\d+)/u.exec(automatic.startup)?.[1]);
+  assert.notEqual(automaticPort, 4747);
+  assert.equal(automatic.startup, [
+    `autofile ${pkg.version}`,
+    `vault:  ${await realpath(root)} (1 note)`,
+    `url:    http://127.0.0.1:${automaticPort}`,
+    "",
+  ].join("\n"));
+  await automatic.stop();
+
+  const explicitPort = await reservePort();
+  const explicit = await startServe(["serve", root, "--port", String(explicitPort)]);
+  assert.match(explicit.startup, new RegExp(`^url:    http://127\\.0\\.0\\.1:${explicitPort}$`, "mu"));
+  await explicit.stop();
+});
+
+test("serve reports an invalid reload and keeps the previous config serving", async () => {
+  const root = await temp();
+  await mkdir(join(root, "notes"));
+  await writeFile(join(root, "autofile.yml"), "version: 1\nfolders:\n  - path: notes\n    description: Notes.\n");
+  await writeFile(join(root, "notes", "one.md"), "One.\n");
+  const running = await startServe(["serve", root]);
+  const url = /^url:    (http:\/\/[^\n]+)$/mu.exec(running.startup)?.[1];
+  assert.ok(url);
+
+  const temporary = join(root, ".autofile.yml.replacement");
+  await writeFile(temporary, "version: 1\nfolders:\n  - path: notes\n    description: Notes.\n    shema: {}\n");
+  await rename(temporary, join(root, "autofile.yml"));
+  const stderr = await waitForOutput(
+    running.stderrPath,
+    /autofile\.yml was not reloaded/u,
+    new Promise<void>((resolveClose) => running.child.once("close", () => resolveClose())),
+  );
+  assert.equal(stderr, "✗ autofile.yml was not reloaded: folders notes has an unknown key \"shema\"\n");
+  assert.equal((await fetch(`${url}/notes/one`, { headers: { connection: "close" } })).status, 200);
+  await running.stop();
 });

@@ -97,6 +97,30 @@ export function renderInitReport(created: string, opts: { color: boolean }): str
   return `Initialized an Autofile vault.\n\n  ${c.green(created)}\n`;
 }
 
+/** Renders a command-stopping error as exactly one stderr line. */
+export function renderError(message: string, opts: { color: boolean }): string {
+  const c = pc.createColors(opts.color);
+  return `${c.red("✗")} ${escapeControls(message)}\n`;
+}
+
+export interface ServeReport {
+  version: string;
+  root: string;
+  notes: number;
+  url: string;
+}
+
+/** Renders the three aligned lines printed once a vault is listening. */
+export function renderServeReport(report: ServeReport, opts: { color: boolean }): string {
+  const c = pc.createColors(opts.color);
+  return [
+    `${c.bold("autofile")} ${report.version}`,
+    `${c.dim("vault:")}  ${report.root} ${c.dim(`(${count(report.notes, "note")})`)}`,
+    `${c.dim("url:")}    ${c.cyan(report.url)}`,
+    "",
+  ].join("\n");
+}
+
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const CLEAR_LINE = "\r\x1b[2K";
 const styled = pc.createColors(true);

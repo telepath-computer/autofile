@@ -29,6 +29,10 @@ file tools.
   folder or a prose path; keep those as plain text.
 - Create a vault with `autofile init`, then declare its folders with the user by
   editing `autofile.yml` together.
+- Use `autofile serve` to put the vault behind vault-server's HTTP API when
+  building an application over it. Do not use the API for filing: keep filing
+  with ordinary file writes, and follow vault-server's separate skill for its
+  protocol.
 - Fix findings in notes you wrote or changed. Findings in notes you did not
   touch are the user's to triage — report them, do not silently rewrite them.
 - Do not speculate or invent content.

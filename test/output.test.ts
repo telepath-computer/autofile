@@ -3,7 +3,14 @@ import { test } from "node:test";
 import pc from "picocolors";
 
 import { type CheckResult } from "../dist/check.js";
-import { count, renderCheckReport, renderInitReport, Spinner } from "../dist/output.js";
+import {
+  count,
+  renderCheckReport,
+  renderError,
+  renderInitReport,
+  renderServeReport,
+  Spinner,
+} from "../dist/output.js";
 
 const strip = (text: string) => text.replace(/\x1b\[\d+m/gu, "");
 const mixed: CheckResult = {
@@ -118,6 +125,38 @@ test("clean, warning-only, and init reports match the specification", () => {
 test("file count is singular for spinner and report", () => {
   assert.equal(count(1, "file"), "1 file");
   assert.equal(renderCheckReport({ findings: [], filesChecked: 1 }, { color: false }), "✓ 1 file\n");
+});
+
+test("errors are one line with a red marker and escaped controls", () => {
+  assert.equal(renderError("could not start\nreason", { color: false }), "✗ could not start\\nreason\n");
+  const c = pc.createColors(true);
+  const styledError = renderError("could not start", { color: true });
+  assert.ok(styledError.startsWith(`${c.red("✗")} `));
+  assert.equal(strip(styledError), renderError("could not start", { color: false }));
+});
+
+test("serve startup lines are aligned and use the specified palette", () => {
+  const plainServe = "autofile 0.2.0\nvault:  /home/user/notes (1598 notes)\nurl:    http://127.0.0.1:4747\n";
+  assert.equal(renderServeReport({
+    version: "0.2.0",
+    root: "/home/user/notes",
+    notes: 1598,
+    url: "http://127.0.0.1:4747",
+  }, { color: false }), plainServe);
+
+  const c = pc.createColors(true);
+  const rendered = renderServeReport({
+    version: "0.2.0",
+    root: "/home/user/notes",
+    notes: 1598,
+    url: "http://127.0.0.1:4747",
+  }, { color: true });
+  assert.ok(rendered.includes(c.bold("autofile")));
+  assert.ok(rendered.includes(c.dim("vault:")));
+  assert.ok(rendered.includes(c.dim("url:")));
+  assert.ok(rendered.includes(c.dim("(1598 notes)")));
+  assert.ok(rendered.includes(c.cyan("http://127.0.0.1:4747")));
+  assert.equal(strip(rendered), plainServe);
 });
 
 interface Fake { isTTY?: boolean; writes: string[]; write(chunk: string): boolean }
