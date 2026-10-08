@@ -68,10 +68,10 @@ Blobs are kept in the `_blobs` folder. Each is named by the SHA-256 hash of its 
 
 To store a file, a client writes it into a blob field with [`create_record`](#create_record) or [`update_record`](#update_record), in one of two forms:
 
-- The absolute path of a local file, for an agent on the same machine as Autofile.
+- The absolute path of a local file, for an agent on the same machine as Autofile. Paths are accepted only over stdio; over HTTP they are refused, because the path would be read on the machine running Autofile, not the machine of the client.
 - A [`data:` URI](https://www.rfc-editor.org/rfc/rfc2397) holding the contents in base64, such as `data:application/pdf;base64,JVBERi0x…`, for an artifact, a remote client or any other program that has the contents rather than a path. The blob takes the usual extension for the media type in the URI.
 
-Autofile reads a file given by path with the permissions of the user running it, so any client connected to Autofile can store, and then read, any file that user can read.
+Autofile reads a file given by path with the permissions of the user running it, so any client connected to Autofile over stdio can store, and then read, any file that user can read.
 
 Autofile checks the record with the path or `data:` URI still in the field. Only once the write is accepted does it store the file in `_blobs` and put the blob URI in the field, so a refused write stores nothing. A blob URI written into a blob field is kept as it is, so records can share a blob. A write is refused if a blob field holds anything other than the URI of a blob that exists, the absolute path of a file that exists, or a `data:` URI with base64 contents.
 
@@ -197,13 +197,14 @@ Searches the records of one type.
 | `q` | string | Words that must all appear in the string values of a record, at any depth, ignoring case. |
 | `where` | object | Fields matched by value, in the [MongoDB query syntax](https://www.mongodb.com/docs/manual/tutorial/query-documents/) and with its matching rules: for an array field, a record matches if any item equals the value, and `null` matches a field that is missing. MongoDB operators such as `$lt` and `$in` are not supported yet, and a `where` that uses one is refused. They can be added later without changing this form. |
 | `limit` | integer | The most results a page returns, counting records and those listed in `errors`: 50 by default, from 1 to 200. |
+| `fields` | array of strings | Top-level fields to return in `value`, such as `["title", "summary"]`, so a list does not carry every field of every record. All fields when absent. `q` and `where` still apply to the whole record. |
 | `cursor` | string | The `cursor` from the previous page. |
 
 ```json
 { "type": "tasks", "q": "dentist", "where": { "status": "active" }, "limit": 50 }
 ```
 
-Results are ordered by URI. A page reads record files in that order until it has `limit` results or no files remain; `cursor` is present when files remain, and the next page starts after the last file the current page read. Each record is returned as the contents of its file with its URI added in `uri`. The names `uri` and `value` follow AT Protocol. A record that does not match its type is left out of `records`, and listed in `errors` with its URI and a message when it matches `q` and `where`. A file that cannot be read as JSON is always listed in `errors`, since it cannot be searched. Code that relies on the schema therefore receives only matching records, and no record the search would find is dropped without notice.
+Results are ordered by URI. A page reads record files in that order until it has `limit` results, its result reaches 64 KB of JSON, or no files remain, and it always holds at least one result; the size cap keeps a page of long records, such as topics, to a reasonable share of the context of an agent, which can pass `fields` for a compact list. `cursor` is present when files remain, and the next page starts after the last file the current page read. Each record is returned as the contents of its file with its URI added in `uri`. The names `uri` and `value` follow AT Protocol. A record that does not match its type is left out of `records`, and listed in `errors` with its URI and a message when it matches `q` and `where`. A file that cannot be read as JSON is always listed in `errors`, since it cannot be searched. Code that relies on the schema therefore receives only matching records, and no record the search would find is dropped without notice.
 
 ```json
 {
@@ -376,21 +377,37 @@ The data folder holds a folder for each type, `_types` and `_blobs`. `autofile` 
 | Command | Effect |
 | --- | --- |
 | `autofile` | Runs the MCP server over stdio. MCP clients start Autofile with this command. |
-| `autofile set storage <folder>` | Uses `<folder>` as the data folder. |
-| `autofile get storage` | Prints the path of the data folder. |
-| `autofile unset storage` | Uses `~/.autofile/data` again. |
+| `autofile serve [--host <host>] [--port <port>]` | Runs the MCP server over HTTP until stopped, as described in [Serving over HTTP](#serving-over-http). The options override the `http.host` and `http.port` settings for that run. |
+| `autofile set <setting> <value>` | Sets a setting. |
+| `autofile get <setting>` | Prints the value of a setting, or its default when it is not set. |
+| `autofile unset <setting>` | Removes a setting, so its default applies again. |
 
-`storage` is the only setting. `autofile set storage` stores the absolute path of the folder in `config.json`:
+The settings:
+
+| Setting | Value | Default |
+| --- | --- | --- |
+| `storage` | The data folder. `set` stores its absolute path. | `~/.autofile/data` |
+| `http.host` | The address `autofile serve` listens on. | `127.0.0.1` |
+| `http.port` | The port `autofile serve` listens on. | `7319` |
+| `http.origins` | Browser origins `autofile serve` accepts besides those on localhost, given to `set` as one or more arguments, such as `autofile set http.origins http://rubot`. | none |
+
+`config.json` holds the settings that are set:
 
 ```json
-{ "storage": "/Users/rupert/Dropbox/Autofile" }
+{ "storage": "/Users/rupert/Dropbox/Autofile", "http": { "port": 2366, "origins": ["http://rubot"] } }
 ```
 
-It moves no files, so it can name a folder that already holds records. A running `autofile` process keeps the data folder it started with, so the change applies to each client once it restarts Autofile.
+Setting `storage` moves no files, so it can name a folder that already holds records. A running `autofile` process keeps the settings it started with, so a change applies to each client once it restarts Autofile, and to `autofile serve` once it is restarted.
+
+### Serving over HTTP
+
+`autofile serve` runs the same MCP server over the Streamable HTTP transport of MCP 2026-07-28, at the endpoint `/mcp`: with the defaults, `http://127.0.0.1:7319/mcp`. It serves the same tools and resources as stdio, with one difference: a blob field can be given a `data:` URI but not a path, as described in [Blobs](#blobs).
+
+Autofile does not authenticate HTTP clients, so anything that can reach its address can read and write the store. It listens on `127.0.0.1` by default, as MCP advises for a local server. As MCP requires, it checks the `Origin` header of every request, so that a website open in a browser cannot reach a local Autofile by pointing its own domain at the local machine (DNS rebinding). A request with an `Origin` header is refused with HTTP 403 unless the origin is on localhost (`http://localhost`, `http://127.0.0.1` or `http://[::1]`, with any port) or listed in `http.origins`. Requests without an `Origin` header, which clients other than browsers send, are not affected.
 
 ### Processes
 
-Each MCP client starts its own `autofile` process, and all of them share the data folder. Each process reads the files it needs on every request and keeps no records in memory, so it always sees writes made by the others.
+Each MCP client over stdio starts its own `autofile` process, and a running `autofile serve` is one more process; all of them share the data folder. Each process reads the files it needs on every request and keeps no records in memory, so it always sees writes made by the others.
 
 A process holds the write lock for the whole of each write, including the link removals and blob deletions that follow from it, so writes from different processes never overlap. A write waits while another process holds the lock. If a process stops while holding the lock, the next process that needs it takes it over within 10 seconds. Each file is written to a temporary file whose name starts with `.`, and then renamed into place, so a read never sees part of a file.
 

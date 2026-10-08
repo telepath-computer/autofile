@@ -39,4 +39,4 @@ The code is divided so that Autofile can later run as a daemon or as a remote se
 
 - Protocol tests use MCP 2026-07-28.
 - Store tests include several processes writing to one store at once.
-- The built `autofile` command is tested over stdio.
+- The built `autofile` command is tested over stdio, and `autofile serve` over HTTP.
