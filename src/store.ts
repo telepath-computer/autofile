@@ -1,23 +1,26 @@
 /**
- * Reads and writes Autofile's on-disk types and records. Each operation reads
- * current files, returns plain JSON, and maps correctable store problems to the
- * same error objects the MCP layer will later place in structured content.
+ * Reads and writes Autofile's on-disk types and records, and exposes recognized
+ * records, declarations, and blobs as plain resource data. Each operation reads
+ * current files and keeps protocol-specific behavior outside the store.
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import {
   lstat,
   mkdir,
-  readFile,
+  open,
   readdir,
   rename,
   rmdir,
   unlink,
   writeFile,
+  type FileHandle,
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { lookup as lookupMimeType } from "mime-types";
 import lockfile from "proper-lockfile";
 
 import { getStorage, getWriteLockPath } from "./config.js";
@@ -29,7 +32,11 @@ export type { JsonObject, JsonPrimitive, JsonValue } from "./json.js";
 const typeNamePattern = /^[a-z][a-z0-9-]*$/u;
 const keyPattern = /^[a-z0-9][a-z0-9-]*$/u;
 const recordUriPattern = /^autofile:\/\/\/([a-z][a-z0-9-]*)\/([a-z0-9][a-z0-9-]*)$/u;
+const typeUriPattern = /^autofile:\/\/\/_types\/([a-z][a-z0-9-]*)$/u;
+const blobNamePattern = /^[a-f0-9]{64}(?:\.[a-z0-9]+)?$/u;
+const blobUriPattern = /^autofile:\/\/\/_blobs\/([a-f0-9]{64}(?:\.[a-z0-9]+)?)$/u;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
+const MAX_BLOB_BYTES = 7_340_032;
 const tidAlphabet = "234567abcdefghijklmnopqrstuvwxyz";
 const invalidTypeMessage = "type: must use lowercase letters, digits, and hyphens and start with a letter";
 const invalidKeyMessage = "key: must use lowercase letters, digits, and hyphens and start with a letter or digit";
@@ -61,6 +68,8 @@ export interface Store {
   createType(input: CreateTypeInput): Promise<UriResult | Refusal>;
   updateType(input: UpdateTypeInput): Promise<UpdateTypeResult | Refusal>;
   deleteType(input: DeleteTypeInput): Promise<UriResult | Refusal>;
+  listResources(): Promise<StoreResource[]>;
+  readResource(uri: string): Promise<StoreResourceContents | undefined>;
 }
 
 export interface GetRecordInput { uri: string }
@@ -101,6 +110,21 @@ export interface TypeResult extends UriResult {
 }
 export interface UpdateTypeResult extends UriResult { errors: StoreError[] }
 
+/** Plain metadata for one resource recognized in the data folder. */
+export interface StoreResource extends UriResult {
+  name: string;
+  mimeType: string;
+  title?: string;
+  description?: string;
+  size?: number;
+  lastModified?: string;
+}
+
+/** Exact contents of a recognized text or binary resource. */
+export type StoreResourceContents =
+  | { uri: string; mimeType: string; text: string }
+  | { uri: string; mimeType: string; blob: string };
+
 interface TypeDeclaration {
   description: string;
   schema: JsonObject;
@@ -115,6 +139,11 @@ interface StoredRecord {
 
 type ReadResult<T> =
   | { status: "found"; value: T }
+  | { status: "missing" }
+  | { status: "invalid"; message: string };
+
+type TextReadResult<T> =
+  | { status: "found"; value: T; text: string }
   | { status: "missing" }
   | { status: "invalid"; message: string };
 
@@ -264,15 +293,9 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
       const type = entry.name.slice(0, -".json".length);
       if (!typeNamePattern.test(type)) continue;
-      const declaration = await readDeclaration(typeFolder, type);
-      if (declaration.status !== "found") continue;
-      try {
-        await prepareSchema(declaration.value.schema);
-      } catch (error) {
-        if (error instanceof SchemaRefusal) continue;
-        throw error;
-      }
-      types.push({ uri: typeUri(type), type, description: declaration.value.description });
+      const declaration = await readValidDeclaration(typeFolder, type);
+      if (declaration === undefined) continue;
+      types.push({ uri: typeUri(type), type, description: declaration.description });
     }
     types.sort((left, right) => left.type.localeCompare(right.type));
     return { types };
@@ -378,6 +401,85 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
     });
   }
 
+  async function listResources(): Promise<StoreResource[]> {
+    const resources: StoreResource[] = [];
+    const declarationEntries = await readDirectory(typeFolder);
+    for (const entry of declarationEntries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const type = entry.name.slice(0, -".json".length);
+      if (!typeNamePattern.test(type)) continue;
+      const declaration = await readValidDeclaration(typeFolder, type);
+      if (declaration === undefined) continue;
+
+      resources.push({
+        uri: typeUri(type),
+        name: `_types/${type}`,
+        mimeType: "application/json",
+        description: declaration.description,
+      });
+
+      const recordEntries = await recognizedRecordEntries(join(dataFolder, type));
+      for (const recordEntry of recordEntries) {
+        const key = recordEntry.name.slice(0, -".json".length);
+        const stored = await readStoredRecord(join(dataFolder, type, recordEntry.name));
+        if (stored.status !== "found") continue;
+        const title = declaration.titleField === undefined
+          ? undefined
+          : stored.value.value[declaration.titleField];
+        resources.push({
+          uri: recordUri(type, key),
+          name: `${type}/${key}`,
+          ...(typeof title === "string" ? { title } : {}),
+          mimeType: "application/json",
+          lastModified: stored.value.updated,
+        });
+      }
+    }
+
+    const blobFolder = join(dataFolder, "_blobs");
+    for (const entry of await readDirectory(blobFolder)) {
+      if (!entry.isFile() || !blobNamePattern.test(entry.name)) continue;
+      const size = await regularFileSize(join(blobFolder, entry.name), MAX_BLOB_BYTES);
+      if (size === undefined) continue;
+      resources.push({
+        uri: blobUri(entry.name),
+        name: `_blobs/${entry.name}`,
+        mimeType: mimeTypeForBlob(entry.name),
+        size,
+      });
+    }
+
+    resources.sort((left, right) => left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0);
+    return resources;
+  }
+
+  async function readResource(uri: string): Promise<StoreResourceContents | undefined> {
+    const typeMatch = typeUriPattern.exec(uri);
+    const type = typeMatch?.[1];
+    if (type !== undefined) {
+      const declaration = await readValidDeclarationText(typeFolder, type);
+      if (declaration === undefined) return undefined;
+      return { uri, mimeType: "application/json", text: declaration.text };
+    }
+
+    const blobMatch = blobUriPattern.exec(uri);
+    const blobName = blobMatch?.[1];
+    if (blobName !== undefined) {
+      const blobFolder = join(dataFolder, "_blobs");
+      if (!await isDirectory(blobFolder)) return undefined;
+      const bytes = await readRegularFile(join(blobFolder, blobName), MAX_BLOB_BYTES);
+      if (bytes === undefined) return undefined;
+      return { uri, mimeType: mimeTypeForBlob(blobName), blob: bytes.toString("base64") };
+    }
+
+    const record = parseRecordUri(uri);
+    if (record === undefined) return undefined;
+    if (await readValidDeclaration(typeFolder, record.type) === undefined) return undefined;
+    const stored = await readStoredRecordText(recordPath(dataFolder, record.type, record.key));
+    if (stored.status !== "found") return undefined;
+    return { uri, mimeType: "application/json", text: stored.text };
+  }
+
   return {
     getRecord,
     createRecord,
@@ -388,6 +490,8 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
     createType,
     updateType,
     deleteType,
+    listResources,
+    readResource,
   };
 }
 
@@ -412,6 +516,28 @@ async function preparedDeclarationSchema(
   return prepareDeclarationSchema(declaration.schema, uri);
 }
 
+async function readValidDeclaration(
+  typeFolder: string,
+  type: string,
+): Promise<TypeDeclaration | undefined> {
+  return (await readValidDeclarationText(typeFolder, type))?.value;
+}
+
+async function readValidDeclarationText(
+  typeFolder: string,
+  type: string,
+): Promise<{ value: TypeDeclaration; text: string } | undefined> {
+  const result = await readDeclarationText(typeFolder, type);
+  if (result.status !== "found") return undefined;
+  try {
+    await prepareSchema(result.value.schema);
+  } catch (error) {
+    if (error instanceof SchemaRefusal) return undefined;
+    throw error;
+  }
+  return { value: result.value, text: result.text };
+}
+
 async function invalidRecords(
   dataFolder: string,
   type: string,
@@ -434,34 +560,53 @@ async function invalidRecords(
 }
 
 async function readDeclaration(folder: string, type: string): Promise<ReadResult<TypeDeclaration>> {
-  const result = await readJson(join(folder, `${type}.json`), "type declaration");
+  const result = await readDeclarationText(folder, type);
+  if (result.status !== "found") return result;
+  return { status: "found", value: result.value };
+}
+
+async function readDeclarationText(
+  folder: string,
+  type: string,
+): Promise<TextReadResult<TypeDeclaration>> {
+  if (!await isDirectory(folder)) return { status: "missing" };
+  const result = await readJsonText(join(folder, `${type}.json`), "type declaration");
   if (result.status !== "found") return result;
   if (!isTypeDeclaration(result.value)) {
     return { status: "invalid", message: "type declaration is not valid" };
   }
-  return { status: "found", value: result.value };
+  return { status: "found", value: result.value, text: result.text };
 }
 
 async function readStoredRecord(path: string): Promise<ReadResult<StoredRecord>> {
-  const result = await readJson(path, "record file");
+  const result = await readStoredRecordText(path);
+  if (result.status !== "found") return result;
+  return { status: "found", value: result.value };
+}
+
+async function readStoredRecordText(
+  path: string,
+): Promise<TextReadResult<StoredRecord>> {
+  if (!await isDirectory(dirname(path))) return { status: "missing" };
+  const result = await readJsonText(path, "record file");
   if (result.status !== "found") return result;
   if (!isStoredRecord(result.value)) {
     return { status: "invalid", message: "record file does not contain a valid record" };
   }
-  return { status: "found", value: result.value };
+  return { status: "found", value: result.value, text: result.text };
 }
 
-async function readJson(path: string, label: string): Promise<ReadResult<unknown>> {
-  if (!await isRegularFile(path)) return { status: "missing" };
+async function readJsonText(path: string, label: string): Promise<TextReadResult<unknown>> {
+  const bytes = await readRegularFile(path);
+  if (bytes === undefined) return { status: "missing" };
   let text: string;
   try {
-    text = await readFile(path, "utf8");
-  } catch (error) {
-    if (hasCode(error, "ENOENT")) return { status: "missing" };
-    throw error;
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return { status: "invalid", message: `${label} is not valid UTF-8` };
   }
   try {
-    return { status: "found", value: JSON.parse(text) as unknown };
+    return { status: "found", value: JSON.parse(text) as unknown, text };
   } catch {
     return { status: "invalid", message: `${label} cannot be read as JSON` };
   }
@@ -533,6 +678,14 @@ function typeUri(type: string): string {
   return `autofile:///_types/${type}`;
 }
 
+function blobUri(name: string): string {
+  return `autofile:///_blobs/${name}`;
+}
+
+function mimeTypeForBlob(name: string): string {
+  return lookupMimeType(name) || "application/octet-stream";
+}
+
 function recordPath(dataFolder: string, type: string, key: string): string {
   return join(dataFolder, type, `${key}.json`);
 }
@@ -565,9 +718,19 @@ async function recognizedRecordEntries(folder: string) {
 
 async function readDirectory(path: string) {
   try {
+    if (!(await lstat(path)).isDirectory()) return [];
     return await readdir(path, { withFileTypes: true });
   } catch (error) {
-    if (hasCode(error, "ENOENT")) return [];
+    if (hasCode(error, "ENOENT") || hasCode(error, "ENOTDIR")) return [];
+    throw error;
+  }
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isDirectory();
+  } catch (error) {
+    if (hasCode(error, "ENOENT") || hasCode(error, "ENOTDIR")) return false;
     throw error;
   }
 }
@@ -578,6 +741,71 @@ async function isRegularFile(path: string): Promise<boolean> {
   } catch (error) {
     if (hasCode(error, "ENOENT")) return false;
     throw error;
+  }
+}
+
+interface OpenedRegularFile {
+  handle: FileHandle;
+  size: number;
+}
+
+async function openRegularFile(path: string): Promise<OpenedRegularFile | undefined> {
+  let handle: FileHandle;
+  try {
+    handle = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+  } catch (error) {
+    if (
+      hasCode(error, "ENOENT")
+      || hasCode(error, "ENOTDIR")
+      || hasCode(error, "ELOOP")
+      || hasCode(error, "ENXIO")
+      || hasCode(error, "ENODEV")
+    ) {
+      return undefined;
+    }
+    throw error;
+  }
+  try {
+    const details = await handle.stat();
+    if (!details.isFile()) {
+      await handle.close();
+      return undefined;
+    }
+    return { handle, size: details.size };
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
+async function regularFileSize(
+  path: string,
+  maximumBytes: number,
+): Promise<number | undefined> {
+  const file = await openRegularFile(path);
+  if (file === undefined) return undefined;
+  try {
+    return file.size <= maximumBytes ? file.size : undefined;
+  } finally {
+    await file.handle.close();
+  }
+}
+
+async function readRegularFile(
+  path: string,
+  maximumBytes = Number.POSITIVE_INFINITY,
+): Promise<Buffer | undefined> {
+  const file = await openRegularFile(path);
+  if (file === undefined) return undefined;
+  try {
+    if (file.size > maximumBytes) return undefined;
+    const bytes = await file.handle.readFile();
+    return bytes.byteLength <= maximumBytes ? bytes : undefined;
+  } finally {
+    await file.handle.close();
   }
 }
 

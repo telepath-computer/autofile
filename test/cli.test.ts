@@ -10,6 +10,7 @@ import { after, test } from "node:test";
 const cli = resolve("dist/cli.js");
 const roots: string[] = [];
 const usage = `Usage:
+  autofile
   autofile set storage <folder>
   autofile get storage
   autofile unset storage
@@ -214,7 +215,6 @@ test("unset storage removes the setting and restores the default", async () => {
 });
 
 const invalidCommands: Array<[string, string[]]> = [
-  ["no arguments", []],
   ["an unknown command", ["unknown"]],
   ["set without a setting", ["set"]],
   ["set without a folder", ["set", "storage"]],

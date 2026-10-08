@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 
-/** Dispatches Autofile configuration commands and formats their terminal output. */
+/** Serves Autofile over stdio or dispatches its configuration commands. */
+
+import { StdioServerTransport, serveStdio } from "@modelcontextprotocol/server/stdio";
 
 import { getStorage, setStorage, unsetStorage } from "./config.js";
+import { buildServer } from "./server.js";
+import { openStore } from "./store.js";
 
 const usage = `Usage:
+  autofile
   autofile set storage <folder>
   autofile get storage
   autofile unset storage
@@ -12,7 +17,15 @@ const usage = `Usage:
 const args = process.argv.slice(2);
 
 try {
-  if (
+  if (args.length === 0) {
+    const store = await openStore();
+    serveStdio(() => buildServer(store), {
+      legacy: "reject",
+      transport: new StdioServerTransport(process.stdin, process.stdout, {
+        maxBufferSize: 64 * 1024 * 1024,
+      }),
+    });
+  } else if (
     args.length === 3
     && args[0] === "set"
     && args[1] === "storage"

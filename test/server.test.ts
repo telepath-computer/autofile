@@ -1,0 +1,609 @@
+/** Exercises Autofile's MCP surface through a modern in-process client. */
+
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, afterEach, test } from "node:test";
+
+import {
+  Client,
+  ProtocolError,
+  StreamableHTTPClientTransport,
+  type CallToolResult,
+} from "@modelcontextprotocol/client";
+import { createMcpHandler } from "@modelcontextprotocol/server";
+
+import { buildServer } from "../dist/server.js";
+import { openStore, type Store } from "../dist/store.js";
+
+const roots: string[] = [];
+const connections: TestConnection[] = [];
+const serverDescription = "Typed records that agents file and retrieve, kept as JSON files in a folder the user owns.";
+const instructions = "Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree.";
+const taskSchema = {
+  type: "object",
+  required: ["title", "status"],
+  properties: {
+    title: { type: "string" },
+    status: { type: "string", enum: ["active", "complete"] },
+  },
+  additionalProperties: false,
+};
+
+interface TestStore {
+  dataFolder: string;
+  store: Store;
+}
+
+interface TestConnection {
+  client: Client;
+  close(): Promise<void>;
+}
+
+async function makeStore(): Promise<TestStore> {
+  const root = await mkdtemp(join(tmpdir(), "autofile-server-"));
+  roots.push(root);
+  const dataFolder = join(root, "data");
+  const store = await openStore({
+    dataFolder,
+    writeLockPath: join(root, "autofile-home", "write.lock"),
+  });
+  return { dataFolder, store };
+}
+
+async function connect(store: Store): Promise<Client> {
+  const handler = createMcpHandler(() => buildServer(store), { legacy: "reject" });
+  const transport = new StreamableHTTPClientTransport(new URL("http://autofile.test/mcp"), {
+    fetch: (url, init) => handler.fetch(new Request(url, init)),
+  });
+  const client = new Client(
+    { name: "autofile-test", version: "1.0.0" },
+    { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+  );
+  await client.connect(transport);
+  connections.push({
+    client,
+    close: async () => {
+      await client.close();
+      await handler.close();
+    },
+  });
+  return client;
+}
+
+function assertToolJson(
+  result: CallToolResult,
+  expected: unknown,
+  options: { isError?: boolean } = {},
+): void {
+  assert.deepEqual(result.structuredContent, expected);
+  assert.equal(result.content.length, 1);
+  const content = result.content[0];
+  assert.ok(content !== undefined && content.type === "text");
+  assert.deepEqual(JSON.parse(content.text) as unknown, expected);
+  if (options.isError === true) assert.equal(result.isError, true);
+  else assert.notEqual(result.isError, true);
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  assert.ok(typeof value === "object" && value !== null && !Array.isArray(value));
+  return value as Record<string, unknown>;
+}
+
+async function createTasksType(store: Store): Promise<void> {
+  assert.deepEqual(await store.createType({
+    type: "tasks",
+    description: "Things to do.",
+    titleField: "title",
+    schema: taskSchema,
+  }), { uri: "autofile:///_types/tasks" });
+}
+
+afterEach(async () => {
+  for (const connection of connections.splice(0)) await connection.close();
+});
+
+after(async () => {
+  for (const root of roots) await rm(root, { recursive: true, force: true });
+});
+
+test("discovery sends the package version, exact description, capabilities, and build-time type instructions", async () => {
+  const empty = await makeStore();
+  const emptyClient = await connect(empty.store);
+  const packageJson = asObject(JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as unknown);
+
+  assert.equal(emptyClient.getServerVersion()?.version, packageJson.version);
+  assert.equal(emptyClient.getServerVersion()?.description, serverDescription);
+  assert.deepEqual(emptyClient.getServerCapabilities()?.resources, {});
+  assert.equal(
+    emptyClient.getInstructions(),
+    `${instructions}\n\nTypes: none yet. This list was taken when the session began; call \`list_types\` for types created since.`,
+  );
+
+  const populated = await makeStore();
+  for (const type of ["tasks", "contacts", "organizations"]) {
+    await populated.store.createType({
+      type,
+      description: `${type} description`,
+      schema: { type: "object" },
+    });
+  }
+  const populatedClient = await connect(populated.store);
+  assert.equal(
+    populatedClient.getInstructions(),
+    `${instructions}\n\nTypes: contacts, organizations, tasks. This list was taken when the session began; call \`list_types\` for types created since.`,
+  );
+
+  const resources = populatedClient.getServerCapabilities()?.resources;
+  assert.deepEqual(resources, {});
+  assert.ok(resources !== undefined && !("subscribe" in resources));
+  assert.ok(resources !== undefined && !("listChanged" in resources));
+});
+
+test("tools are listed in spec order with exact descriptions and described closed JSON Schemas", async () => {
+  const { store } = await makeStore();
+  const client = await connect(store);
+  const { tools } = await client.listTools();
+
+  assert.deepEqual(tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), [
+    {
+      name: "get_record",
+      description: "Returns one record by URI: its `uri`, `created` and `updated` times, and `value`. A record that does not match its type is still returned, with what must change in `error`.",
+      inputSchema: {
+        type: "object",
+        properties: { uri: { type: "string", description: "The URI of the record." } },
+        required: ["uri"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "create_record",
+      description: "Creates a record and returns its URI. `record` is the full record and must match the schema of its type, which `get_type` returns. `key` is optional and generated when absent. Autofile is where the user keeps durable information.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: { type: "string", description: "The type of the record." },
+          key: {
+            type: "string",
+            description: "The key of the new record: lowercase letters, digits and hyphens, starting with a letter or digit. Generated when absent.",
+          },
+          record: {
+            type: "object",
+            description: "The full record, which must match the schema of its type. A blob field may hold the absolute path of a local file or a `data:` URI with base64 contents; Autofile stores the file and puts its blob URI in the field.",
+          },
+        },
+        required: ["type", "record"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "update_record",
+      description: "Changes a record and returns its URI.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          uri: { type: "string", description: "The URI of the record." },
+          patch: {
+            type: "object",
+            description: "A [JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396): fields in the patch are set, a field set to `null` is removed, nested objects are merged, and arrays are replaced whole. A blob field may hold the absolute path of a local file or a `data:` URI with base64 contents; Autofile stores the file and puts its blob URI in the field.",
+          },
+        },
+        required: ["uri", "patch"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "delete_record",
+      description: "Deletes a record, removes the links to it from other records, and returns its URI.",
+      inputSchema: {
+        type: "object",
+        properties: { uri: { type: "string", description: "The URI of the record." } },
+        required: ["uri"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "list_types",
+      description: "Returns every type, ordered by name, with the URI of its declaration and its description.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "get_type",
+      description: "Returns the declaration of a type with its URI added.",
+      inputSchema: {
+        type: "object",
+        properties: { type: { type: "string", description: "The name of the type." } },
+        required: ["type"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "create_type",
+      description: "Declares a type and returns the URI of its declaration.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: { type: "string", description: "The name of the type." },
+          description: { type: "string", description: "What belongs in the folder." },
+          schema: { type: "object", description: "The JSON Schema for records of the type." },
+          titleField: {
+            type: "string",
+            description: "A top-level field of the record whose string value is shown as its title.",
+          },
+        },
+        required: ["type", "description", "schema"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "update_type",
+      description: "Replaces the description, schema or title field of a type, or any of them.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: { type: "string", description: "The name of the type." },
+          description: { type: "string", description: "The new description." },
+          schema: { type: "object", description: "The new JSON Schema." },
+          titleField: {
+            type: ["string", "null"],
+            description: "The new title field; `null` removes it.",
+          },
+        },
+        required: ["type"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "delete_type",
+      description: "Deletes a type and returns its URI.",
+      inputSchema: {
+        type: "object",
+        properties: { type: { type: "string", description: "The name of the type." } },
+        required: ["type"],
+        additionalProperties: false,
+      },
+    },
+  ]);
+  for (const tool of tools) {
+    assert.ok(typeof tool.description === "string" && tool.description.length > 0);
+    const properties = asObject(tool.inputSchema.properties ?? {});
+    for (const argument of Object.values(properties)) {
+      const argumentSchema = asObject(argument);
+      assert.ok(
+        typeof argumentSchema.description === "string" && argumentSchema.description.length > 0,
+      );
+    }
+  }
+});
+
+test("all nine tools map store results to matching structured and text JSON", async () => {
+  const { store } = await makeStore();
+  const client = await connect(store);
+
+  const createdType = await client.callTool({
+    name: "create_type",
+    arguments: {
+      type: "tasks",
+      description: "Things to do.",
+      titleField: "title",
+      schema: taskSchema,
+    },
+  });
+  assertToolJson(createdType, { uri: "autofile:///_types/tasks" });
+
+  const listedTypes = await client.callTool({ name: "list_types", arguments: {} });
+  assertToolJson(listedTypes, {
+    types: [{
+      uri: "autofile:///_types/tasks",
+      type: "tasks",
+      description: "Things to do.",
+    }],
+  });
+
+  const gotType = await client.callTool({ name: "get_type", arguments: { type: "tasks" } });
+  assertToolJson(gotType, {
+    uri: "autofile:///_types/tasks",
+    description: "Things to do.",
+    titleField: "title",
+    schema: taskSchema,
+  });
+
+  const createdRecord = await client.callTool({
+    name: "create_record",
+    arguments: {
+      type: "tasks",
+      key: "book-dentist",
+      record: { title: "Book dentist", status: "active" },
+    },
+  });
+  assertToolJson(createdRecord, { uri: "autofile:///tasks/book-dentist" });
+
+  const gotRecord = await client.callTool({
+    name: "get_record",
+    arguments: { uri: "autofile:///tasks/book-dentist" },
+  });
+  const record = asObject(gotRecord.structuredContent);
+  assert.equal(record.uri, "autofile:///tasks/book-dentist");
+  assert.deepEqual(record.value, { title: "Book dentist", status: "active" });
+  assert.equal(typeof record.created, "string");
+  assert.equal(record.updated, record.created);
+  assertToolJson(gotRecord, record);
+
+  const updatedRecord = await client.callTool({
+    name: "update_record",
+    arguments: {
+      uri: "autofile:///tasks/book-dentist",
+      patch: { status: "complete" },
+    },
+  });
+  assertToolJson(updatedRecord, { uri: "autofile:///tasks/book-dentist" });
+
+  const updatedType = await client.callTool({
+    name: "update_type",
+    arguments: { type: "tasks", description: "Completed and active tasks." },
+  });
+  assertToolJson(updatedType, { uri: "autofile:///_types/tasks", errors: [] });
+
+  const deletedRecord = await client.callTool({
+    name: "delete_record",
+    arguments: { uri: "autofile:///tasks/book-dentist" },
+  });
+  assertToolJson(deletedRecord, { uri: "autofile:///tasks/book-dentist" });
+
+  const deletedType = await client.callTool({ name: "delete_type", arguments: { type: "tasks" } });
+  assertToolJson(deletedType, { uri: "autofile:///_types/tasks" });
+});
+
+test("tool refusals are errors, accepted type changes with record errors are not", async () => {
+  const { store } = await makeStore();
+  await createTasksType(store);
+  await store.createRecord({
+    type: "tasks",
+    key: "unfinished",
+    record: { title: "Unfinished", status: "active" },
+  });
+  const client = await connect(store);
+
+  const refused = await client.callTool({
+    name: "get_record",
+    arguments: { uri: "autofile:///tasks/missing" },
+  });
+  assertToolJson(refused, {
+    errors: [{ uri: "autofile:///tasks/missing", message: "record does not exist" }],
+  }, { isError: true });
+
+  const accepted = await client.callTool({
+    name: "update_type",
+    arguments: {
+      type: "tasks",
+      schema: {
+        type: "object",
+        required: ["title", "status"],
+        properties: {
+          title: { type: "string" },
+          status: { const: "complete" },
+        },
+        additionalProperties: false,
+      },
+    },
+  });
+  const acceptedBody = asObject(accepted.structuredContent);
+  assert.equal(acceptedBody.uri, "autofile:///_types/tasks");
+  assert.ok(Array.isArray(acceptedBody.errors));
+  assert.equal(acceptedBody.errors.length, 1);
+  assert.deepEqual(asObject(acceptedBody.errors[0]).uri, "autofile:///tasks/unfinished");
+  assertToolJson(accepted, acceptedBody);
+  assert.notEqual(accepted.isError, true);
+});
+
+test("tool argument objects reject additional properties before calling the store", async () => {
+  const { store } = await makeStore();
+  const client = await connect(store);
+
+  const rejected = await client.callTool({
+    name: "list_types",
+    arguments: { unexpected: true },
+  });
+
+  assert.equal(rejected.isError, true);
+  assert.equal(rejected.structuredContent, undefined);
+  assert.equal(rejected.content.length, 1);
+  assert.equal(rejected.content[0]?.type, "text");
+});
+
+test("resources list every stored kind in URI order with their exact metadata", async () => {
+  const { dataFolder, store } = await makeStore();
+  await createTasksType(store);
+  await store.createRecord({
+    type: "tasks",
+    key: "book-dentist",
+    record: { title: "Book dentist", status: "active" },
+  });
+  const storedRecord = await store.getRecord({ uri: "autofile:///tasks/book-dentist" });
+  assert.ok("updated" in storedRecord);
+  const blobName = `${"a".repeat(64)}.pdf`;
+  const blob = Buffer.from("%PDF-1.7\nAutofile test\n", "utf8");
+  const unknownBlobName = `${"c".repeat(64)}.madeup`;
+  const unknownBlob = Buffer.from("unknown media type\n", "utf8");
+  await mkdir(join(dataFolder, "_blobs"), { recursive: true });
+  await Promise.all([
+    writeFile(join(dataFolder, "_blobs", blobName), blob),
+    writeFile(join(dataFolder, "_blobs", unknownBlobName), unknownBlob),
+  ]);
+  const client = await connect(store);
+
+  const result = await client.listResources();
+  assert.equal(result.ttlMs, 0);
+  assert.equal(result.cacheScope, "private");
+  assert.deepEqual(result.resources, [
+    {
+      uri: `autofile:///_blobs/${blobName}`,
+      name: `_blobs/${blobName}`,
+      mimeType: "application/pdf",
+      size: blob.byteLength,
+    },
+    {
+      uri: `autofile:///_blobs/${unknownBlobName}`,
+      name: `_blobs/${unknownBlobName}`,
+      mimeType: "application/octet-stream",
+      size: unknownBlob.byteLength,
+    },
+    {
+      uri: "autofile:///_types/tasks",
+      name: "_types/tasks",
+      mimeType: "application/json",
+      description: "Things to do.",
+    },
+    {
+      uri: "autofile:///tasks/book-dentist",
+      name: "tasks/book-dentist",
+      title: "Book dentist",
+      mimeType: "application/json",
+      annotations: { lastModified: storedRecord.updated },
+    },
+  ]);
+});
+
+test("resources/list pages after a deleted cursor URI and rejects a malformed cursor with -32602", async () => {
+  const { dataFolder, store } = await makeStore();
+  await store.createType({
+    type: "items",
+    description: "Paging fixtures.",
+    titleField: "name",
+    schema: {
+      type: "object",
+      required: ["name"],
+      properties: { name: { type: "string" } },
+      additionalProperties: false,
+    },
+  });
+  const timestamp = "2026-10-07T09:14:00Z";
+  await Promise.all(Array.from({ length: 205 }, async (_, index) => {
+    const key = `item-${String(index).padStart(3, "0")}`;
+    await writeFile(join(dataFolder, "items", `${key}.json`), `${JSON.stringify({
+      created: timestamp,
+      updated: timestamp,
+      value: { name: `Item ${String(index)}` },
+    }, null, 2)}\n`);
+  }));
+  const client = await connect(store);
+
+  let cursor: string | undefined;
+  let pages = 0;
+  let deletedCursorUri: string | undefined;
+  const uris: string[] = [];
+  do {
+    const page = await client.request({
+      method: "resources/list",
+      ...(cursor === undefined ? {} : { params: { cursor } }),
+    });
+    pages += 1;
+    assert.ok(pages < 20, "resources/list cursor did not advance");
+    assert.equal(page.ttlMs, 0);
+    assert.equal(page.cacheScope, "private");
+    assert.ok(page.resources.length > 0);
+    if (pages === 1) {
+      const lastResource = page.resources.at(-1);
+      assert.ok(lastResource !== undefined && lastResource.uri.startsWith("autofile:///items/"));
+      deletedCursorUri = lastResource.uri;
+      assert.deepEqual(await store.deleteRecord({ uri: deletedCursorUri }), { uri: deletedCursorUri });
+    } else if (pages === 2) {
+      assert.ok(deletedCursorUri !== undefined);
+      const firstResource = page.resources[0];
+      assert.ok(firstResource !== undefined && firstResource.uri > deletedCursorUri);
+    }
+    uris.push(...page.resources.map(({ uri }) => uri));
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+
+  assert.ok(pages > 1);
+  assert.equal(uris.length, 206);
+  assert.deepEqual(uris, [...uris].sort());
+
+  await assert.rejects(
+    client.request({ method: "resources/list", params: { cursor: "not-a-valid-cursor" } }),
+    (error: unknown) => {
+      assert.ok(error instanceof ProtocolError);
+      assert.equal(error.code, -32602);
+      return true;
+    },
+  );
+});
+
+test("resources/read returns exact stored text, blob bytes, cache fields, and not-found errors", async () => {
+  const { dataFolder, store } = await makeStore();
+  await createTasksType(store);
+  await store.createRecord({
+    type: "tasks",
+    key: "book-dentist",
+    record: { title: "Book dentist", status: "active" },
+  });
+  const blobName = `${"b".repeat(64)}.pdf`;
+  const blob = Buffer.from([0, 1, 2, 3, 250, 251, 252]);
+  await mkdir(join(dataFolder, "_blobs"), { recursive: true });
+  await writeFile(join(dataFolder, "_blobs", blobName), blob);
+  const [declarationText, recordText] = await Promise.all([
+    readFile(join(dataFolder, "_types", "tasks.json"), "utf8"),
+    readFile(join(dataFolder, "tasks", "book-dentist.json"), "utf8"),
+  ]);
+  const client = await connect(store);
+
+  const declaration = await client.readResource({ uri: "autofile:///_types/tasks" });
+  assert.deepEqual({
+    contents: declaration.contents,
+    ttlMs: declaration.ttlMs,
+    cacheScope: declaration.cacheScope,
+  }, {
+    contents: [{
+      uri: "autofile:///_types/tasks",
+      mimeType: "application/json",
+      text: declarationText,
+    }],
+    ttlMs: 0,
+    cacheScope: "private",
+  });
+
+  const record = await client.readResource({ uri: "autofile:///tasks/book-dentist" });
+  assert.deepEqual({
+    contents: record.contents,
+    ttlMs: record.ttlMs,
+    cacheScope: record.cacheScope,
+  }, {
+    contents: [{
+      uri: "autofile:///tasks/book-dentist",
+      mimeType: "application/json",
+      text: recordText,
+    }],
+    ttlMs: 0,
+    cacheScope: "private",
+  });
+
+  const readBlob = await client.readResource({ uri: `autofile:///_blobs/${blobName}` });
+  assert.deepEqual({
+    contents: readBlob.contents,
+    ttlMs: readBlob.ttlMs,
+    cacheScope: readBlob.cacheScope,
+  }, {
+    contents: [{
+      uri: `autofile:///_blobs/${blobName}`,
+      mimeType: "application/pdf",
+      blob: blob.toString("base64"),
+    }],
+    ttlMs: 0,
+    cacheScope: "private",
+  });
+
+  await assert.rejects(
+    client.readResource({ uri: "autofile:///tasks/missing" }),
+    (error: unknown) => {
+      assert.ok(error instanceof ProtocolError);
+      assert.equal(error.code, -32602);
+      return true;
+    },
+  );
+});

@@ -2,7 +2,18 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  truncate,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -692,6 +703,304 @@ test("refused updates and unreadable record files return errors without overwrit
   assert.match(errorMessages(await store.getRecord({
     uri: "autofile:///tasks/bad-time",
   }))[0] ?? "", /valid record/u);
+});
+
+test("invalid UTF-8 and BOM-prefixed declarations and records are not exposed", async () => {
+  const { dataFolder, store } = await makeStore();
+  await createTasksType(store);
+  const recordUri = "autofile:///tasks/malformed-utf8";
+  const recordPath = join(dataFolder, "tasks", "malformed-utf8.json");
+  await writeFile(recordPath, Buffer.concat([
+    Buffer.from('{"created":"2026-10-07T09:14:00Z","updated":"2026-10-07T09:14:00Z","value":{"title":"'),
+    Buffer.from([0xff]),
+    Buffer.from('","status":"active"}}\n'),
+  ]));
+
+  assert.match(errorMessages(await store.getRecord({ uri: recordUri }))[0] ?? "", /UTF-8/u);
+  assert.equal((await store.listResources()).some(({ uri }) => uri === recordUri), false);
+  assert.equal(await store.readResource(recordUri), undefined);
+
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  const bomRecordUri = "autofile:///tasks/bom-prefixed";
+  await writeFile(join(dataFolder, "tasks", "bom-prefixed.json"), Buffer.concat([
+    bom,
+    Buffer.from('{"created":"2026-10-07T09:14:00Z","updated":"2026-10-07T09:14:00Z","value":{"title":"BOM","status":"active"}}\n'),
+  ]));
+  await writeFile(join(dataFolder, "_types", "bom-type.json"), Buffer.concat([
+    bom,
+    Buffer.from('{"description":"BOM type.","schema":{"type":"object"}}\n'),
+  ]));
+  assert.match(errorMessages(await store.getRecord({ uri: bomRecordUri }))[0] ?? "", /JSON/u);
+  assert.match(errorMessages(await store.getType({ type: "bom-type" }))[0] ?? "", /JSON/u);
+  const resourcesBeforeDeclarationCorruption = await store.listResources();
+  for (const uri of [bomRecordUri, "autofile:///_types/bom-type"]) {
+    assert.equal(resourcesBeforeDeclarationCorruption.some((resource) => resource.uri === uri), false);
+    assert.equal(await store.readResource(uri), undefined);
+  }
+
+  const typeUri = "autofile:///_types/tasks";
+  await writeFile(join(dataFolder, "_types", "tasks.json"), Buffer.concat([
+    Buffer.from('{"description":"'),
+    Buffer.from([0xff]),
+    Buffer.from('","schema":{"type":"object"}}\n'),
+  ]));
+
+  assert.match(errorMessages(await store.getType({ type: "tasks" }))[0] ?? "", /UTF-8/u);
+  assert.equal((await store.listResources()).some(({ uri }) => uri === typeUri), false);
+  assert.equal(await store.readResource(typeUri), undefined);
+});
+
+test("resource reads reject symlinked storage directories and final files", async () => {
+  const timestamp = "2026-10-07T09:14:00Z";
+  const declarationText = `${JSON.stringify({
+    description: "Things to do.",
+    schema: { type: "object" },
+  }, null, 2)}\n`;
+  const recordText = `${JSON.stringify({
+    created: timestamp,
+    updated: timestamp,
+    value: { title: "Outside the store" },
+  }, null, 2)}\n`;
+  const blobName = `${"a".repeat(64)}.pdf`;
+
+  const directoryStore = await makeStore();
+  const external = join(directoryStore.root, "external");
+  await Promise.all([
+    mkdir(join(external, "types"), { recursive: true }),
+    mkdir(join(external, "blobs"), { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(join(external, "types", "tasks.json"), declarationText),
+    writeFile(join(external, "blobs", blobName), "outside blob"),
+    symlink(join(external, "types"), join(directoryStore.dataFolder, "_types"), "dir"),
+    symlink(join(external, "blobs"), join(directoryStore.dataFolder, "_blobs"), "dir"),
+  ]);
+
+  assert.deepEqual(await directoryStore.store.listResources(), []);
+  assert.equal(
+    await directoryStore.store.readResource("autofile:///_types/tasks"),
+    undefined,
+  );
+  assert.equal(
+    await directoryStore.store.readResource(`autofile:///_blobs/${blobName}`),
+    undefined,
+  );
+
+  const fileStore = await makeStore();
+  await fileStore.store.createType({
+    type: "tasks",
+    description: "Things to do.",
+    schema: { type: "object" },
+  });
+  await fileStore.store.createType({
+    type: "contacts",
+    description: "People.",
+    schema: { type: "object" },
+  });
+  await fileStore.store.createType({
+    type: "events",
+    description: "Events.",
+    schema: { type: "object" },
+  });
+  await mkdir(join(fileStore.root, "outside-files"), { recursive: true });
+  await Promise.all([
+    writeFile(join(fileStore.root, "outside-files", "record.json"), recordText),
+    writeFile(join(fileStore.root, "outside-files", "declaration.json"), declarationText),
+    writeFile(join(fileStore.root, "outside-files", "blob.pdf"), "outside blob"),
+    mkdir(join(fileStore.root, "outside-records"), { recursive: true }),
+    mkdir(join(fileStore.dataFolder, "_blobs"), { recursive: true }),
+  ]);
+  await writeFile(join(fileStore.root, "outside-records", "one.json"), recordText);
+  await rm(join(fileStore.dataFolder, "events"), { recursive: true });
+  await rm(join(fileStore.dataFolder, "_types", "contacts.json"));
+  await Promise.all([
+    symlink(
+      join(fileStore.root, "outside-records"),
+      join(fileStore.dataFolder, "events"),
+      "dir",
+    ),
+    symlink(
+      join(fileStore.root, "outside-files", "record.json"),
+      join(fileStore.dataFolder, "tasks", "linked.json"),
+    ),
+    symlink(
+      join(fileStore.root, "outside-files", "declaration.json"),
+      join(fileStore.dataFolder, "_types", "contacts.json"),
+    ),
+    symlink(
+      join(fileStore.root, "outside-files", "blob.pdf"),
+      join(fileStore.dataFolder, "_blobs", blobName),
+    ),
+  ]);
+
+  const resources = await fileStore.store.listResources();
+  for (const uri of [
+    "autofile:///events/one",
+    "autofile:///tasks/linked",
+    "autofile:///_types/contacts",
+    `autofile:///_blobs/${blobName}`,
+  ]) {
+    assert.equal(resources.some((resource) => resource.uri === uri), false);
+    assert.equal(await fileStore.store.readResource(uri), undefined);
+  }
+});
+
+test("resource reads reject FIFOs without waiting for a writer", { timeout: 5_000 }, async (context) => {
+  const { dataFolder, store } = await makeStore();
+  const blobName = `${"f".repeat(64)}.bin`;
+  const blobFolder = join(dataFolder, "_blobs");
+  const fifoPath = join(blobFolder, blobName);
+  await mkdir(blobFolder, { recursive: true });
+  const madeFifo = await new Promise<boolean>((resolveFifo, rejectFifo) => {
+    const child = spawn("mkfifo", [fifoPath], { stdio: "ignore" });
+    child.once("error", (error) => {
+      if ("code" in error && error.code === "ENOENT") resolveFifo(false);
+      else rejectFifo(error);
+    });
+    child.once("close", (code) => resolveFifo(code === 0));
+  });
+  if (!madeFifo) {
+    context.skip("mkfifo is not available on this platform");
+    return;
+  }
+
+  assert.equal(await store.readResource(`autofile:///_blobs/${blobName}`), undefined);
+});
+
+test("resource reads ignore storage paths whose components are not directories", async () => {
+  const wrongRoots = await makeStore();
+  await Promise.all([
+    writeFile(join(wrongRoots.dataFolder, "_types"), "not a directory\n"),
+    writeFile(join(wrongRoots.dataFolder, "_blobs"), "not a directory\n"),
+  ]);
+  assert.deepEqual(await wrongRoots.store.listResources(), []);
+  assert.equal(
+    await wrongRoots.store.readResource("autofile:///_types/tasks"),
+    undefined,
+  );
+  assert.equal(
+    await wrongRoots.store.readResource(`autofile:///_blobs/${"a".repeat(64)}.pdf`),
+    undefined,
+  );
+
+  const wrongTypeFolder = await makeStore();
+  await wrongTypeFolder.store.createType({
+    type: "tasks",
+    description: "Things to do.",
+    schema: { type: "object" },
+  });
+  await rm(join(wrongTypeFolder.dataFolder, "tasks"), { recursive: true });
+  await writeFile(join(wrongTypeFolder.dataFolder, "tasks"), "not a directory\n");
+  assert.deepEqual(await wrongTypeFolder.store.listResources(), [{
+    uri: "autofile:///_types/tasks",
+    name: "_types/tasks",
+    mimeType: "application/json",
+    description: "Things to do.",
+  }]);
+  assert.equal(
+    await wrongTypeFolder.store.readResource("autofile:///tasks/missing"),
+    undefined,
+  );
+});
+
+test("blob resources accept the size limit and ignore files one byte larger", async () => {
+  const { dataFolder, store } = await makeStore();
+  const maximumBlobBytes = 7_340_032;
+  const acceptedName = `${"b".repeat(64)}.bin`;
+  const oversizedName = `${"c".repeat(64)}.bin`;
+  const blobFolder = join(dataFolder, "_blobs");
+  await mkdir(blobFolder, { recursive: true });
+  await Promise.all([
+    writeFile(join(blobFolder, acceptedName), ""),
+    writeFile(join(blobFolder, oversizedName), ""),
+  ]);
+  await Promise.all([
+    truncate(join(blobFolder, acceptedName), maximumBlobBytes),
+    truncate(join(blobFolder, oversizedName), maximumBlobBytes + 1),
+  ]);
+
+  const resources = await store.listResources();
+  assert.deepEqual(resources, [{
+    uri: `autofile:///_blobs/${acceptedName}`,
+    name: `_blobs/${acceptedName}`,
+    mimeType: "application/octet-stream",
+    size: maximumBlobBytes,
+  }]);
+  const accepted = await store.readResource(`autofile:///_blobs/${acceptedName}`);
+  assert.ok(accepted !== undefined && "blob" in accepted);
+  assert.equal(Buffer.from(accepted.blob, "base64").byteLength, maximumBlobBytes);
+  assert.equal(await store.readResource(`autofile:///_blobs/${oversizedName}`), undefined);
+});
+
+test("resources enforce recognized files but keep schema-invalid stored envelopes", async () => {
+  const { dataFolder, store } = await makeStore();
+  await createTasksType(store);
+  await store.createRecord({
+    type: "tasks",
+    key: "kept",
+    record: { title: "Kept", status: "active" },
+  });
+  await store.updateType({
+    type: "tasks",
+    schema: {
+      type: "object",
+      required: ["status"],
+      properties: { status: { const: "complete" } },
+    },
+  });
+  const keptUri = "autofile:///tasks/kept";
+  const keptText = await readFile(join(dataFolder, "tasks", "kept.json"), "utf8");
+
+  const timestamp = "2026-10-07T09:14:00Z";
+  const blobDirectoryName = `${"d".repeat(64)}.pdf`;
+  const validEnvelope = `${JSON.stringify({
+    created: timestamp,
+    updated: timestamp,
+    value: { status: "complete" },
+  }, null, 2)}\n`;
+  await mkdir(join(dataFolder, "_blobs"), { recursive: true });
+  await Promise.all([
+    writeFile(join(dataFolder, "tasks", "malformed.json"), "{\n"),
+    writeFile(join(dataFolder, "tasks", "invalid.json"), '{"value":{}}\n'),
+    writeFile(join(dataFolder, "tasks", "Upper.json"), validEnvelope),
+    writeFile(join(dataFolder, "tasks", "note.txt"), validEnvelope),
+    mkdir(join(dataFolder, "tasks", "nested.json")),
+    writeFile(join(dataFolder, "_types", "malformed.json"), "{\n"),
+    writeFile(join(dataFolder, "_types", "invalid.json"), '{"description":42,"schema":{}}\n'),
+    writeFile(
+      join(dataFolder, "_types", "bad-schema.json"),
+      '{"description":"Bad schema.","schema":{"type":"not-a-type"}}\n',
+    ),
+    writeFile(join(dataFolder, "_types", "Bad.json"), '{"description":"Bad","schema":{}}\n'),
+    mkdir(join(dataFolder, "_types", "nested.json")),
+    writeFile(join(dataFolder, "_blobs", "not-a-blob.pdf"), "ignored"),
+    mkdir(join(dataFolder, "_blobs", blobDirectoryName)),
+  ]);
+
+  const resources = await store.listResources();
+  assert.equal(resources.some(({ uri }) => uri === keptUri), true);
+  assert.deepEqual(await store.readResource(keptUri), {
+    uri: keptUri,
+    mimeType: "application/json",
+    text: keptText,
+  });
+  for (const uri of [
+    "autofile:///tasks/malformed",
+    "autofile:///tasks/invalid",
+    "autofile:///tasks/Upper",
+    "autofile:///tasks/note.txt",
+    "autofile:///tasks/nested",
+    "autofile:///_types/malformed",
+    "autofile:///_types/invalid",
+    "autofile:///_types/bad-schema",
+    "autofile:///_types/Bad",
+    "autofile:///_types/nested",
+    "autofile:///_blobs/not-a-blob.pdf",
+    `autofile:///_blobs/${blobDirectoryName}`,
+  ]) {
+    assert.equal(resources.some((resource) => resource.uri === uri), false);
+    assert.equal(await store.readResource(uri), undefined);
+  }
 });
 
 test("record readers ignore names and locations Autofile could not have written", async () => {
