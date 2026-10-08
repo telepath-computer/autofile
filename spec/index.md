@@ -120,6 +120,16 @@ A type can be deleted only when its folder is empty. Types cannot be renamed, be
 
 The API of Autofile is the set of tools and resources it exposes as an MCP server, following the [MCP specification of 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28). Clients that speak an earlier version of MCP are refused. Autofile declares the `resources` capability with `subscribe` and `listChanged`.
 
+### Instructions
+
+Autofile describes itself to clients with the description "Typed records that agents file and retrieve, kept as JSON files in a folder the user owns." It also sends instructions for the model, which clients such as Claude Code place in the system prompt for the whole session:
+
+> Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree.
+>
+> Types: contacts, organizations, tasks. This list was taken when the session began; call `list_types` for types created since.
+
+The last line names the types that exist when the client connects, without their descriptions, so the instructions stay short however many types there are. Before any type exists, it begins "Types: none yet." Not every client shows instructions to the model, so the descriptions of `find_records` and `create_record` also say that Autofile is where durable information is kept.
+
 ### Resources
 
 Every record, type declaration and blob is an MCP resource at its URI:
