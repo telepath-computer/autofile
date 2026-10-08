@@ -2,8 +2,9 @@
 
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { open, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { open, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -213,6 +214,242 @@ test("serve shares one store across HTTP tool and resource requests", { timeout:
   assert.ok(content !== undefined && "text" in content);
   const stored = asObject(JSON.parse(content.text) as unknown);
   assert.equal(asObject(stored.value).title, "First note");
+});
+
+test("serve refuses local blob paths and accepts data URIs", { timeout: 30_000 }, async () => {
+  const root = await temp();
+  const dataFolder = join(root, "records");
+  const blobFolder = join(dataFolder, "_blobs");
+  const sourcePath = join(root, "local.pdf");
+  const localBytes = Buffer.from("local path contents\n", "utf8");
+  await Promise.all([
+    mkdir(blobFolder, { recursive: true }),
+    writeFile(sourcePath, localBytes),
+  ]);
+  const server = await startServer({ config: { storage: dataFolder } });
+  const client = await connect(server.endpoint);
+  await client.callTool({
+    name: "create_type",
+    arguments: {
+      type: "receipts",
+      description: "Receipts with scans.",
+      schema: {
+        type: "object",
+        required: ["scan"],
+        properties: { scan: { type: "string", format: "blob" } },
+        additionalProperties: false,
+      },
+    },
+  });
+
+  const refusedCreate = await client.callTool({
+    name: "create_record",
+    arguments: {
+      type: "receipts",
+      key: "local",
+      record: { scan: sourcePath },
+    },
+  });
+  assert.equal(refusedCreate.isError, true);
+  const createBody = asObject(refusedCreate.structuredContent);
+  assert.ok(Array.isArray(createBody.errors));
+  assert.match(String(asObject(createBody.errors[0]).message), /HTTP/iu);
+  assert.deepEqual(await readdir(blobFolder), []);
+  assert.deepEqual(
+    (await client.listResources()).resources.map(({ uri }) => uri),
+    ["autofile:///_types/receipts"],
+  );
+
+  const dataBytes = Buffer.from([0, 1, 2, 3, 250, 251, 252]);
+  const hash = createHash("sha256").update(dataBytes).digest("hex");
+  const blobUri = `autofile:///_blobs/${hash}.pdf`;
+  assert.deepEqual((await client.callTool({
+    name: "create_record",
+    arguments: {
+      type: "receipts",
+      key: "uploaded",
+      record: { scan: `data:application/pdf;base64,${dataBytes.toString("base64")}` },
+    },
+  })).structuredContent, { uri: "autofile:///receipts/uploaded" });
+
+  const record = await client.readResource({ uri: "autofile:///receipts/uploaded" });
+  const recordContent = record.contents[0];
+  assert.ok(recordContent !== undefined && "text" in recordContent);
+  const stored = asObject(JSON.parse(recordContent.text) as unknown);
+  assert.deepEqual(stored.value, { scan: blobUri });
+  const blob = await client.readResource({ uri: blobUri });
+  assert.deepEqual({
+    contents: blob.contents,
+    ttlMs: blob.ttlMs,
+    cacheScope: blob.cacheScope,
+  }, {
+    contents: [{
+      uri: blobUri,
+      mimeType: "application/pdf",
+      blob: dataBytes.toString("base64"),
+    }],
+    ttlMs: 0,
+    cacheScope: "private",
+  });
+
+  const filesBeforeUpdate = await readdir(blobFolder);
+  const refusedUpdate = await client.callTool({
+    name: "update_record",
+    arguments: {
+      uri: "autofile:///receipts/uploaded",
+      patch: { scan: sourcePath },
+    },
+  });
+  assert.equal(refusedUpdate.isError, true);
+  const updateBody = asObject(refusedUpdate.structuredContent);
+  assert.ok(Array.isArray(updateBody.errors));
+  assert.match(String(asObject(updateBody.errors[0]).message), /HTTP/iu);
+  assert.deepEqual(await readdir(blobFolder), filesBeforeUpdate);
+  const recordAfterRefusal = await client.readResource({ uri: "autofile:///receipts/uploaded" });
+  const contentAfterRefusal = recordAfterRefusal.contents[0];
+  assert.ok(contentAfterRefusal !== undefined && "text" in contentAfterRefusal);
+  assert.deepEqual(
+    asObject(JSON.parse(contentAfterRefusal.text) as unknown).value,
+    { scan: blobUri },
+  );
+});
+
+test("serve shares data URI blobs and collects them after update and delete", {
+  timeout: 30_000,
+}, async () => {
+  const root = await temp();
+  const dataFolder = join(root, "records");
+  const shared = Buffer.from("shared over HTTP\n", "utf8");
+  const first = Buffer.from("first over HTTP\n", "utf8");
+  const second = Buffer.from("second over HTTP\n", "utf8");
+  const replacement = Buffer.from("replacement over HTTP\n", "utf8");
+  const dataUri = (bytes: Buffer): string => (
+    `data:text/plain;base64,${bytes.toString("base64")}`
+  );
+  const blobUri = (bytes: Buffer): string => {
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    return `autofile:///_blobs/${hash}.txt`;
+  };
+  const sharedUri = blobUri(shared);
+  const firstUri = blobUri(first);
+  const secondUri = blobUri(second);
+  const replacementUri = blobUri(replacement);
+  const server = await startServer({ config: { storage: dataFolder } });
+  const client = await connect(server.endpoint);
+  await client.callTool({
+    name: "create_type",
+    arguments: {
+      type: "assets",
+      description: "Files uploaded over HTTP.",
+      schema: {
+        type: "object",
+        required: ["shared", "unique"],
+        properties: {
+          shared: { type: "string", format: "blob" },
+          unique: { type: "string", format: "blob" },
+        },
+        additionalProperties: false,
+      },
+    },
+  });
+  for (const [key, unique] of [["first", first], ["second", second]] as const) {
+    assert.deepEqual((await client.callTool({
+      name: "create_record",
+      arguments: {
+        type: "assets",
+        key,
+        record: { shared: dataUri(shared), unique: dataUri(unique) },
+      },
+    })).structuredContent, { uri: `autofile:///assets/${key}` });
+  }
+
+  let blobUris = (await client.listResources()).resources
+    .map(({ uri }) => uri)
+    .filter((uri) => uri.startsWith("autofile:///_blobs/"));
+  assert.deepEqual(blobUris.sort(), [firstUri, secondUri, sharedUri].sort());
+  assert.equal(blobUris.filter((uri) => uri === sharedUri).length, 1);
+
+  assert.deepEqual((await client.callTool({
+    name: "update_record",
+    arguments: {
+      uri: "autofile:///assets/first",
+      patch: { unique: dataUri(replacement) },
+    },
+  })).structuredContent, { uri: "autofile:///assets/first" });
+  blobUris = (await client.listResources()).resources
+    .map(({ uri }) => uri)
+    .filter((uri) => uri.startsWith("autofile:///_blobs/"));
+  assert.deepEqual(blobUris.sort(), [replacementUri, secondUri, sharedUri].sort());
+  assert.equal(blobUris.includes(firstUri), false);
+
+  assert.deepEqual((await client.callTool({
+    name: "delete_record",
+    arguments: { uri: "autofile:///assets/second" },
+  })).structuredContent, { uri: "autofile:///assets/second" });
+  blobUris = (await client.listResources()).resources
+    .map(({ uri }) => uri)
+    .filter((uri) => uri.startsWith("autofile:///_blobs/"));
+  assert.deepEqual(blobUris.sort(), [replacementUri, sharedUri].sort());
+  assert.equal(blobUris.includes(secondUri), false);
+
+  const kept = await client.readResource({ uri: sharedUri });
+  assert.ok(kept.contents[0] !== undefined && "blob" in kept.contents[0]);
+  assert.equal(kept.contents[0].blob, shared.toString("base64"));
+});
+
+test("serve refuses a path exposed by a conditional blob annotation", {
+  timeout: 30_000,
+}, async () => {
+  const root = await temp();
+  const dataFolder = join(root, "records");
+  const sourcePath = join(root, "local.txt");
+  await writeFile(sourcePath, "local contents\n", "utf8");
+  const server = await startServer({ config: { storage: dataFolder } });
+  const client = await connect(server.endpoint);
+  await client.callTool({
+    name: "create_type",
+    arguments: {
+      type: "conditional-assets",
+      description: "Files whose active blob field is selected conditionally.",
+      schema: {
+        type: "object",
+        required: ["primary", "fallback"],
+        properties: {
+          primary: { type: "string" },
+          fallback: { type: "string" },
+        },
+        allOf: [{
+          if: {
+            properties: { primary: { pattern: "^data:" } },
+            required: ["primary"],
+          },
+          then: { properties: { primary: { type: "string", format: "blob" } } },
+          else: { properties: { fallback: { type: "string", format: "blob" } } },
+        }],
+        additionalProperties: false,
+      },
+    },
+  });
+
+  const refused = await client.callTool({
+    name: "create_record",
+    arguments: {
+      type: "conditional-assets",
+      key: "refused",
+      record: {
+        primary: `data:text/plain;base64,${Buffer.from("uploaded\n").toString("base64")}`,
+        fallback: sourcePath,
+      },
+    },
+  });
+  assert.equal(refused.isError, true);
+  const body = asObject(refused.structuredContent);
+  assert.ok(Array.isArray(body.errors));
+  assert.match(String(asObject(body.errors[0]).message), /blob URI/iu);
+  assert.deepEqual(
+    (await client.listResources()).resources.map(({ uri }) => uri),
+    ["autofile:///_types/conditional-assets"],
+  );
 });
 
 test("serve options override HTTP settings for that process", { timeout: 30_000 }, async () => {

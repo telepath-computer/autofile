@@ -193,12 +193,16 @@ export async function buildServer(store: Store): Promise<McpServer> {
       description: "Creates a record and returns its URI. `record` is the full record and must match the schema of its type, which `get_type` returns. `key` is optional and generated when absent. Autofile is where the user keeps durable information.",
       inputSchema: createRecordSchema,
     },
-    async (input) => toolResult(await store.createRecord(input)),
+    async (input, context) => toolResult(await store.createRecord(input, {
+      allowLocalPaths: context.http === undefined,
+    })),
   );
   server.registerTool(
     "update_record",
     { description: "Changes a record and returns its URI.", inputSchema: updateRecordSchema },
-    async (input) => toolResult(await store.updateRecord(input)),
+    async (input, context) => toolResult(await store.updateRecord(input, {
+      allowLocalPaths: context.http === undefined,
+    })),
   );
   server.registerTool(
     "delete_record",

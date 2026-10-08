@@ -24,6 +24,17 @@ import { lookup as lookupMimeType } from "mime-types";
 import { Query } from "mingo";
 import lockfile from "proper-lockfile";
 
+import {
+  BLOB_NAME_PATTERN,
+  BLOB_URI_PATTERN,
+  MAX_BLOB_BYTES,
+  blobNameFromUri,
+  blobUri,
+  deleteBlobUris,
+  prepareBlob,
+  writePreparedBlobs,
+  type PreparedBlob,
+} from "./blobs.js";
 import { getStorage, getWriteLockPath } from "./config.js";
 import type { JsonObject, JsonValue } from "./json.js";
 import { prepareSchema, SchemaRefusal, type PreparedSchema } from "./schema.js";
@@ -34,10 +45,7 @@ const typeNamePattern = /^[a-z][a-z0-9-]*$/u;
 const keyPattern = /^[a-z0-9][a-z0-9-]*$/u;
 const recordUriPattern = /^autofile:\/\/\/([a-z][a-z0-9-]*)\/([a-z0-9][a-z0-9-]*)$/u;
 const typeUriPattern = /^autofile:\/\/\/_types\/([a-z][a-z0-9-]*)$/u;
-const blobNamePattern = /^[a-f0-9]{64}(?:\.[a-z0-9]+)?$/u;
-const blobUriPattern = /^autofile:\/\/\/_blobs\/([a-f0-9]{64}(?:\.[a-z0-9]+)?)$/u;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
-const MAX_BLOB_BYTES = 7_340_032;
 const MAX_FIND_RECORDS_PAGE_BYTES = 64 * 1024;
 const tidAlphabet = "234567abcdefghijklmnopqrstuvwxyz";
 const invalidTypeMessage = "type: must use lowercase letters, digits, and hyphens and start with a letter";
@@ -60,11 +68,16 @@ export interface OpenStoreOptions {
   writeLockPath?: string;
 }
 
+/** Transport-sensitive permissions for a record write. */
+export interface RecordWriteOptions {
+  allowLocalPaths?: boolean;
+}
+
 export interface Store {
   findRecords(input: FindRecordsInput): Promise<FindRecordsResult | Refusal>;
   getRecord(input: GetRecordInput): Promise<RecordResult | Refusal>;
-  createRecord(input: CreateRecordInput): Promise<UriResult | Refusal>;
-  updateRecord(input: UpdateRecordInput): Promise<UriResult | Refusal>;
+  createRecord(input: CreateRecordInput, options?: RecordWriteOptions): Promise<UriResult | Refusal>;
+  updateRecord(input: UpdateRecordInput, options?: RecordWriteOptions): Promise<UriResult | Refusal>;
   deleteRecord(input: DeleteRecordInput): Promise<UriResult | Refusal>;
   listTypes(input: Record<string, never>): Promise<ListTypesResult>;
   getType(input: GetTypeInput): Promise<TypeResult | Refusal>;
@@ -176,6 +189,7 @@ export async function openStore(options: OpenStoreOptions = {}): Promise<Store> 
 
 function createStore(dataFolder: string, writeLockPath: string): Store {
   const typeFolder = join(dataFolder, "_types");
+  const blobFolder = join(dataFolder, "_blobs");
 
   async function withWriteLock<T>(write: () => Promise<T>): Promise<T> {
     let release: () => Promise<void>;
@@ -356,7 +370,10 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
     return result;
   }
 
-  async function createRecord(input: CreateRecordInput): Promise<UriResult | Refusal> {
+  async function createRecord(
+    input: CreateRecordInput,
+    options: RecordWriteOptions = {},
+  ): Promise<UriResult | Refusal> {
     return withWriteLock(async () => {
       if (!typeNamePattern.test(input.type)) return refuse(invalidTypeMessage);
       if (input.key !== undefined && !keyPattern.test(input.key)) {
@@ -394,17 +411,38 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       }
 
       const uri = recordUri(input.type, key);
+      const materialized = await prepareRecordBlobs(
+        blobFolder,
+        schema,
+        input.record,
+        options.allowLocalPaths ?? true,
+        uri,
+      );
+      if ("errors" in materialized) return materialized;
+      const materializedLinkErrors = await missingLinkErrors(
+        dataFolder,
+        typeFolder,
+        schema,
+        materialized.value,
+        uri,
+      );
+      if (materializedLinkErrors.length > 0) return { errors: materializedLinkErrors };
+
       const now = new Date().toISOString();
+      await writePreparedBlobs(blobFolder, materialized.blobs);
       await writeJsonAtomically(recordPath(dataFolder, input.type, key), {
         createdAt: now,
         updatedAt: now,
-        value: input.record,
+        value: materialized.value,
       });
       return { uri };
     });
   }
 
-  async function updateRecord(input: UpdateRecordInput): Promise<UriResult | Refusal> {
+  async function updateRecord(
+    input: UpdateRecordInput,
+    options: RecordWriteOptions = {},
+  ): Promise<UriResult | Refusal> {
     return withWriteLock(async () => {
       const parsed = parseRecordUri(input.uri);
       if (parsed === undefined) return refuse(invalidRecordUriMessage);
@@ -432,11 +470,31 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       );
       if (linkErrors.length > 0) return { errors: linkErrors };
 
+      const materialized = await prepareRecordBlobs(
+        blobFolder,
+        schema,
+        value,
+        options.allowLocalPaths ?? true,
+        input.uri,
+      );
+      if ("errors" in materialized) return materialized;
+      const materializedLinkErrors = await missingLinkErrors(
+        dataFolder,
+        typeFolder,
+        schema,
+        materialized.value,
+        input.uri,
+      );
+      if (materializedLinkErrors.length > 0) return { errors: materializedLinkErrors };
+      const previousBlobs = await blobsHeldByRecord(stored.value.value, schema);
+
+      await writePreparedBlobs(blobFolder, materialized.blobs);
       await writeJsonAtomically(path, {
         createdAt: stored.value.createdAt,
         updatedAt: new Date().toISOString(),
-        value,
+        value: materialized.value,
       });
+      await deleteUnheldBlobs(dataFolder, typeFolder, previousBlobs);
       return { uri: input.uri };
     });
   }
@@ -452,12 +510,15 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
 
       const changes: Array<{ path: string; record: StoredRecord }> = [];
       const errors: StoreError[] = [];
+      let deletedRecord: StoredRecord | undefined;
       try {
         const target = await readStoredRecord(path);
         if (target.status === "missing") {
           errors.push({ uri: input.uri, message: "record does not exist" });
         } else if (target.status === "invalid") {
           errors.push({ uri: input.uri, message: target.message });
+        } else {
+          deletedRecord = target.value;
         }
       } catch (error) {
         errors.push({ uri: input.uri, message: recordFileReadError(error) });
@@ -533,8 +594,15 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
         return { errors };
       }
 
+      const targetSchema = await preparedDeclarationSchema(declaration.value, typeUri(parsed.type));
+      const previousBlobs = deletedRecord === undefined
+        ? new Set<string>()
+        : "errors" in targetSchema
+          ? blobUrisIn(deletedRecord.value)
+          : await blobsHeldByRecord(deletedRecord.value, targetSchema);
       for (const change of changes) await writeJsonAtomically(change.path, change.record);
       await unlink(path);
+      await deleteUnheldBlobs(dataFolder, typeFolder, previousBlobs);
       return { uri: input.uri };
     });
   }
@@ -689,9 +757,8 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       }
     }
 
-    const blobFolder = join(dataFolder, "_blobs");
     for (const entry of await readDirectory(blobFolder)) {
-      if (!entry.isFile() || !blobNamePattern.test(entry.name)) continue;
+      if (!entry.isFile() || !BLOB_NAME_PATTERN.test(entry.name)) continue;
       const size = await regularFileSize(join(blobFolder, entry.name), MAX_BLOB_BYTES);
       if (size === undefined) continue;
       resources.push({
@@ -715,10 +782,9 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       return { uri, mimeType: "application/json", text: declaration.text };
     }
 
-    const blobMatch = blobUriPattern.exec(uri);
+    const blobMatch = BLOB_URI_PATTERN.exec(uri);
     const blobName = blobMatch?.[1];
     if (blobName !== undefined) {
-      const blobFolder = join(dataFolder, "_blobs");
       if (!await isDirectory(blobFolder)) return undefined;
       const bytes = await readRegularFile(join(blobFolder, blobName), MAX_BLOB_BYTES);
       if (bytes === undefined) return undefined;
@@ -797,6 +863,195 @@ async function missingLinkErrors(
     });
   }
   return errors;
+}
+
+interface MaterializedRecordBlobs {
+  value: JsonObject;
+  blobs: PreparedBlob[];
+}
+
+async function prepareRecordBlobs(
+  blobFolder: string,
+  schema: PreparedSchema,
+  value: JsonObject,
+  allowLocalPaths: boolean,
+  uri: string,
+): Promise<MaterializedRecordBlobs | Refusal> {
+  const materialized = structuredClone(value);
+  const preparedBlobs = new Map<string, PreparedBlob>();
+  const errors: StoreError[] = [];
+  const visitedPointers = new Set<string>();
+  for (const field of schema.formatFields(value, "blob")) {
+    if (visitedPointers.has(field.pointer)) continue;
+    visitedPointers.add(field.pointer);
+    if (typeof field.value !== "string") continue;
+    const prepared = await prepareBlob(field.value, blobFolder, allowLocalPaths);
+    if ("message" in prepared) {
+      errors.push(formatFieldError(uri, field.location, prepared.message));
+      continue;
+    }
+    setValueAtPointer(materialized, field.pointer, prepared.uri);
+    preparedBlobs.set(prepared.uri, prepared);
+  }
+  if (errors.length > 0) return { errors };
+
+  const validationErrors = await schema.validate(materialized);
+  if (validationErrors.length > 0) {
+    return { errors: validationErrors.map((message) => ({ uri, message })) };
+  }
+
+  const finalBlobs = new Map<string, PreparedBlob>();
+  const finalPointers = new Set<string>();
+  for (const field of schema.formatFields(materialized, "blob")) {
+    if (finalPointers.has(field.pointer)) continue;
+    finalPointers.add(field.pointer);
+    const fieldValue = typeof field.value === "string" ? field.value : undefined;
+    if (fieldValue === undefined || blobNameFromUri(fieldValue) === undefined) {
+      const message = "must hold a blob URI after storing";
+      errors.push(formatFieldError(uri, field.location, message));
+      continue;
+    }
+
+    let prepared = preparedBlobs.get(fieldValue);
+    if (prepared === undefined) {
+      const existing = await prepareBlob(fieldValue, blobFolder, false);
+      if ("message" in existing) {
+        errors.push(formatFieldError(uri, field.location, existing.message));
+        continue;
+      }
+      prepared = existing;
+    }
+    finalBlobs.set(fieldValue, prepared);
+  }
+  if (errors.length > 0) return { errors };
+  return { value: materialized, blobs: [...finalBlobs.values()] };
+}
+
+function formatFieldError(uri: string, location: string, message: string): StoreError {
+  return { uri, message: location === "" ? message : `${location}: ${message}` };
+}
+
+async function blobsHeldByRecord(
+  value: JsonObject,
+  schema: PreparedSchema,
+): Promise<Set<string>> {
+  const validationErrors = await schema.validate(value);
+  if (validationErrors.length > 0) return blobUrisIn(value);
+  return new Set(schema.formatFields(value, "blob").flatMap(({ value: fieldValue }) => (
+    typeof fieldValue === "string" && blobNameFromUri(fieldValue) !== undefined
+      ? [fieldValue]
+      : []
+  )));
+}
+
+async function deleteUnheldBlobs(
+  dataFolder: string,
+  typeFolder: string,
+  candidates: ReadonlySet<string>,
+): Promise<void> {
+  if (candidates.size === 0) return;
+  const held = await blobsHeldInStore(dataFolder, typeFolder);
+  if (held === undefined) return;
+  await deleteBlobUris(
+    join(dataFolder, "_blobs"),
+    [...candidates].filter((uri) => !held.has(uri)),
+  );
+}
+
+async function blobsHeldInStore(
+  dataFolder: string,
+  typeFolder: string,
+): Promise<Set<string> | undefined> {
+  const held = new Set<string>();
+  let typeEntries;
+  try {
+    typeEntries = (await readDirectory(typeFolder)).filter((entry) => (
+      entry.isFile() && entry.name.endsWith(".json")
+    ));
+  } catch (error) {
+    if (hasErrorCode(error)) return undefined;
+    throw error;
+  }
+  for (const typeEntry of typeEntries) {
+    const type = typeEntry.name.slice(0, -".json".length);
+    if (!typeNamePattern.test(type)) continue;
+    let declaration: ReadResult<TypeDeclaration>;
+    try {
+      declaration = await readDeclaration(typeFolder, type);
+    } catch (error) {
+      if (!hasErrorCode(error)) throw error;
+      declaration = { status: "invalid", message: "type declaration cannot be read" };
+    }
+    let schema: PreparedSchema | undefined;
+    if (declaration.status === "found") {
+      const prepared = await preparedDeclarationSchema(declaration.value, typeUri(type));
+      if (!("errors" in prepared)) schema = prepared;
+    }
+
+    let recordEntries;
+    try {
+      recordEntries = await recognizedRecordEntries(join(dataFolder, type));
+    } catch (error) {
+      if (hasErrorCode(error)) return undefined;
+      throw error;
+    }
+    for (const entry of recordEntries) {
+      let record: TextReadResult<unknown>;
+      try {
+        record = await readJsonText(join(dataFolder, type, entry.name), "record file");
+      } catch (error) {
+        if (hasErrorCode(error)) return undefined;
+        throw error;
+      }
+      if (record.status === "invalid") return undefined;
+      if (record.status === "missing") continue;
+      if (schema !== undefined && isStoredRecord(record.value)) {
+        for (const uri of await blobsHeldByRecord(record.value.value, schema)) held.add(uri);
+      } else {
+        for (const uri of blobUrisIn(record.value)) held.add(uri);
+      }
+    }
+  }
+  return held;
+}
+
+function blobUrisIn(value: unknown): Set<string> {
+  const uris = new Set<string>();
+  collectBlobUris(value, uris);
+  return uris;
+}
+
+function collectBlobUris(value: unknown, uris: Set<string>): void {
+  if (typeof value === "string") {
+    if (blobNameFromUri(value) !== undefined) uris.add(value);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectBlobUris(item, uris);
+  } else if (typeof value === "object" && value !== null) {
+    for (const item of Object.values(value)) collectBlobUris(item, uris);
+  }
+}
+
+function setValueAtPointer(value: JsonObject, pointer: string, replacement: string): void {
+  const path = parseJsonPointer(pointer);
+  const field = path.at(-1);
+  if (field === undefined) return;
+  let parent: JsonValue = value;
+  for (const part of path.slice(0, -1)) {
+    let next: JsonValue | undefined;
+    if (Array.isArray(parent)) next = parent[Number(part)];
+    else if (isJsonObject(parent)) next = parent[part];
+    if (next === undefined) return;
+    parent = next;
+  }
+  if (Array.isArray(parent)) parent[Number(field)] = replacement;
+  else if (isJsonObject(parent)) {
+    Object.defineProperty(parent, field, {
+      value: replacement,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
 }
 
 async function recordExists(
@@ -963,7 +1218,7 @@ function nextTid(): string {
 export function isResourceUri(uri: string): boolean {
   return parseRecordUri(uri) !== undefined
     || typeUriPattern.test(uri)
-    || blobUriPattern.test(uri);
+    || BLOB_URI_PATTERN.test(uri);
 }
 
 function parseRecordUri(uri: string): { type: string; key: string } | undefined {
@@ -978,10 +1233,6 @@ function recordUri(type: string, key: string): string {
 
 function typeUri(type: string): string {
   return `autofile:///_types/${type}`;
-}
-
-function blobUri(name: string): string {
-  return `autofile:///_blobs/${name}`;
 }
 
 function mimeTypeForBlob(name: string): string {
@@ -1269,5 +1520,9 @@ function isJsonObject(value: unknown): value is JsonObject {
 }
 
 function hasCode(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+  return hasErrorCode(error) && error.code === code;
+}
+
+function hasErrorCode(error: unknown): error is Error & { code: string } {
+  return error instanceof Error && "code" in error && typeof error.code === "string";
 }

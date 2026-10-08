@@ -25,12 +25,12 @@ import {
 } from "@hyperjump/json-schema/annotated-instance/experimental";
 import { JSE, type ErrorObject, type JSEOutput } from "@hyperjump/json-schema-errors";
 
+import { isBlobInput } from "./blobs.js";
 import type { JsonObject, JsonValue } from "./json.js";
 
 const DIALECT = "https://json-schema.org/draft/2020-12/schema";
 const FORMAT_KEYWORD = "https://json-schema.org/keyword/draft-2020-12/format";
 const BLOB_FORMAT = "https://autofile.dev/formats/blob";
-const blobUriPattern = /^autofile:\/\/\/_blobs\/[a-f0-9]{64}(?:\.[a-z0-9]+)?$/u;
 const knownFormats = new Set([
   "date-time",
   "date",
@@ -78,7 +78,7 @@ addFormat({
   id: BLOB_FORMAT,
   // JSON Schema formats ignore other instance types. Autofile's separate
   // annotation check gives URI and blob values their stricter string rule.
-  handler: (value) => typeof value !== "string" || blobUriPattern.test(value),
+  handler: (value) => typeof value !== "string" || isBlobInput(value),
 });
 setFormatHandler(FORMAT_KEYWORD, "blob", BLOB_FORMAT);
 
