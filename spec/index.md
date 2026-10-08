@@ -88,17 +88,20 @@ A declaration has these fields:
 - `description` says what belongs in the folder. Agents read it to choose where to file.
 - `schema` is the JSON Schema that every record of the type must match. Guidance about a single field goes in the standard `description` keyword of that field.
 - `titleField`, which is optional, names a top-level field of the record that holds its title, such as `name` for contacts. Clients show the title in place of the key; see [Resources](#resources). A record whose value for that field is not a string has no title.
+- `view`, which is optional, tells clients how to lay out a record of the type: `body` names the top-level field holding the main prose, in Markdown, shown below the title, and `panel` lists, in order, the top-level fields shown beside or above it. Without a `view`, or without `panel`, a client shows every field other than the title in the panel; without `body`, it shows no body. Autofile stores `view` and serves it but does not use it.
 
 ```json
 {
   "description": "People the user knows or deals with, one record per person.",
   "titleField": "name",
+  "view": { "body": "details", "panel": ["employer"] },
   "schema": {
     "type": "object",
     "required": ["name"],
     "properties": {
       "name": { "type": "string", "description": "Full name as the person uses it." },
-      "employer": { "type": "string", "format": "uri", "pattern": "^autofile:///organizations/" }
+      "employer": { "type": "string", "format": "uri", "pattern": "^autofile:///organizations/" },
+      "details": { "type": "string", "description": "Who they are and how the user knows them, in Markdown." }
     }
   }
 }
@@ -317,6 +320,7 @@ Declares a type and returns `{ "uri": "autofile:///_types/<type>" }`. Refused if
 | `description` | string, required | What belongs in the folder. |
 | `schema` | object, required | The JSON Schema for records of the type. |
 | `titleField` | string | The field that holds the title of a record, as described in [Types](#types). |
+| `view` | object | How clients lay out a record: `body` and `panel`, as described in [Types](#types). |
 
 ```json
 {
@@ -329,7 +333,7 @@ Declares a type and returns `{ "uri": "autofile:///_types/<type>" }`. Refused if
 
 #### update_type
 
-Replaces the description, schema or title field of a type, or any of them. A valid change is always accepted, as described in [Changing types](#changing-types); the call is refused if the type does not exist or the schema is not one Autofile accepts, as for `create_type`. Returns the URI of the declaration, and in `errors` each record that no longer matches:
+Replaces the description, schema, title field or view of a type, or any of them. A valid change is always accepted, as described in [Changing types](#changing-types); the call is refused if the type does not exist or the schema is not one Autofile accepts, as for `create_type`. Returns the URI of the declaration, and in `errors` each record that no longer matches:
 
 ```json
 {
@@ -346,6 +350,7 @@ Replaces the description, schema or title field of a type, or any of them. A val
 | `description` | string | The new description. |
 | `schema` | object | The new JSON Schema. |
 | `titleField` | string or null | The new title field; `null` removes it. |
+| `view` | object or null | The new view; `null` removes it. |
 
 #### delete_type
 
