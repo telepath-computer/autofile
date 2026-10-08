@@ -236,6 +236,71 @@ test("HTTP settings print their defaults", async () => {
   });
 });
 
+test("every setting completes a set, get, unset, and default lifecycle", async () => {
+  const root = await temp();
+  const cases = [
+    {
+      setting: "storage",
+      values: [join(root, "records")],
+      configured: `${join(root, "records")}\n`,
+      defaultValue: (autofileHome: string) => `${join(autofileHome, "data")}\n`,
+    },
+    {
+      setting: "http.host",
+      values: ["0.0.0.0"],
+      configured: "0.0.0.0\n",
+      defaultValue: () => "127.0.0.1\n",
+    },
+    {
+      setting: "http.port",
+      values: ["2366"],
+      configured: "2366\n",
+      defaultValue: () => "7319\n",
+    },
+    {
+      setting: "http.origins",
+      values: ["https://app.example", "http://rubot:8080"],
+      configured: "https://app.example\nhttp://rubot:8080\n",
+      defaultValue: () => "",
+    },
+  ];
+
+  await Promise.all(cases.map(async ({
+    setting,
+    values,
+    configured,
+    defaultValue,
+  }, index) => {
+    const autofileHome = join(root, `autofile-home-${String(index)}`);
+    const options = { autofileHome, home: root };
+    assert.deepEqual(await run(["set", setting, ...values], options), {
+      stdout: "",
+      stderr: "",
+      code: 0,
+    });
+    assert.deepEqual(await run(["get", setting], options), {
+      stdout: configured,
+      stderr: "",
+      code: 0,
+    });
+    assert.deepEqual(await run(["unset", setting], options), {
+      stdout: "",
+      stderr: "",
+      code: 0,
+    });
+    assert.deepEqual(await run(["get", setting], options), {
+      stdout: defaultValue(autofileHome),
+      stderr: "",
+      code: 0,
+    });
+    assert.deepEqual(await run(["unset", setting], options), {
+      stdout: "",
+      stderr: "",
+      code: 0,
+    });
+  }));
+});
+
 test("set preserves sibling settings and writes the nested HTTP settings", async () => {
   const root = await temp();
   const autofileHome = join(root, "autofile-home");
@@ -420,6 +485,31 @@ test("invalid stored HTTP settings report the config path", async () => {
     stderr: `autofile: ${configPath}: http.port must be an integer from 1 to 65535\n`,
     code: 1,
   });
+});
+
+test("all invalid stored config shapes are refused through the command", async () => {
+  const root = await temp();
+  const cases: Array<[unknown, string]> = [
+    [[], "must contain a JSON object"],
+    [{ http: [] }, "http must be a JSON object"],
+    [{ http: { host: "" } }, "http.host must be a non-empty string"],
+    [
+      { http: { origins: ["ftp://example.com"] } },
+      "http.origins must contain only http or https origins without paths",
+    ],
+  ];
+
+  await Promise.all(cases.map(async ([config, message], index) => {
+    const autofileHome = join(root, `invalid-config-${String(index)}`);
+    const configPath = join(autofileHome, "config.json");
+    await mkdir(autofileHome);
+    await writeFile(configPath, `${JSON.stringify(config)}\n`);
+    assert.deepEqual(await run(["get", "storage"], { autofileHome, home: root }), {
+      stdout: "",
+      stderr: `autofile: ${configPath}: ${message}\n`,
+      code: 1,
+    });
+  }));
 });
 
 test("serve refuses an invalid port override with one line", async () => {

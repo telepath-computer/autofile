@@ -14,8 +14,10 @@ import { after, afterEach, test } from "node:test";
 
 import {
   Client,
+  ProtocolError,
   SdkHttpError,
   StreamableHTTPClientTransport,
+  type CallToolResult,
 } from "@modelcontextprotocol/client";
 
 const cli = resolve("dist/cli.js");
@@ -150,6 +152,20 @@ async function request(
 function asObject(value: unknown): Record<string, unknown> {
   assert.ok(typeof value === "object" && value !== null && !Array.isArray(value));
   return value as Record<string, unknown>;
+}
+
+function assertToolJson(
+  result: CallToolResult,
+  expected: unknown,
+  options: { isError?: boolean } = {},
+): void {
+  assert.deepEqual(result.structuredContent, expected);
+  assert.equal(result.content.length, 1);
+  const content = result.content[0];
+  assert.ok(content !== undefined && content.type === "text");
+  assert.deepEqual(JSON.parse(content.text) as unknown, expected);
+  if (options.isError === true) assert.equal(result.isError, true);
+  else assert.notEqual(result.isError, true);
 }
 
 async function stopServer(server: StartedServer, timeout = 5_000): Promise<boolean> {
@@ -452,6 +468,282 @@ test("serve refuses a path exposed by a conditional blob annotation", {
   );
 });
 
+test("an HTTP agent can search, patch, invalidate, read resources, and clean linked data", {
+  timeout: 30_000,
+}, async () => {
+  const root = await temp();
+  const dataFolder = join(root, "records");
+  const localPath = join(root, "local.png");
+  const dataBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 9, 8, 7, 6]);
+  const blobHash = createHash("sha256").update(dataBytes).digest("hex");
+  const blobUri = `autofile:///_blobs/${blobHash}.png`;
+  await writeFile(localPath, dataBytes);
+  const server = await startServer({ config: { storage: dataFolder } });
+  const creator = await connect(server.endpoint);
+
+  const organizationSchema = {
+    type: "object",
+    required: ["name", "logo"],
+    properties: {
+      name: { type: "string" },
+      logo: { type: "string", format: "blob" },
+    },
+    additionalProperties: false,
+  };
+  const contactSchema = {
+    type: "object",
+    required: ["name", "status"],
+    properties: {
+      name: { type: "string" },
+      status: { type: "string", enum: ["active", "complete"] },
+      employer: {
+        type: "string",
+        format: "uri",
+        pattern: "^autofile:///organizations/",
+      },
+      notes: { type: "string" },
+      details: { type: "object" },
+      labels: { type: "array" },
+    },
+    additionalProperties: false,
+  };
+  assert.equal(
+    creator.getInstructions(),
+    "Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree.\n\nTypes: none yet. This list was taken when the session began; call `list_types` for types created since.",
+  );
+  assertToolJson(await creator.callTool({
+    name: "create_type",
+    arguments: {
+      type: "organizations",
+      description: "Organizations reached over HTTP.",
+      titleField: "name",
+      view: { panel: ["logo"] },
+      schema: organizationSchema,
+    },
+  }), { uri: "autofile:///_types/organizations" });
+  assertToolJson(await creator.callTool({
+    name: "create_type",
+    arguments: {
+      type: "contacts",
+      description: "Contacts reached over HTTP.",
+      titleField: "name",
+      view: { body: "notes", panel: ["employer", "status"] },
+      schema: contactSchema,
+    },
+  }), { uri: "autofile:///_types/contacts" });
+
+  const client = await connect(server.endpoint);
+  assert.equal(client.getServerVersion()?.description, "Typed records that agents file and retrieve, kept as JSON files in a folder the user owns.");
+  assert.match(client.getInstructions() ?? "", /Types: contacts, organizations\./u);
+
+  const refusedPath = await client.callTool({
+    name: "create_record",
+    arguments: {
+      type: "organizations",
+      key: "local",
+      record: { name: "Local path", logo: localPath },
+    },
+  });
+  const refusedPathBody = asObject(refusedPath.structuredContent);
+  assert.ok(Array.isArray(refusedPathBody.errors));
+  assert.match(String(asObject(refusedPathBody.errors[0]).message), /only over stdio, not HTTP/u);
+  assertToolJson(refusedPath, refusedPathBody, { isError: true });
+
+  const createdOrganization = await client.callTool({
+    name: "create_record",
+    arguments: {
+      type: "organizations",
+      record: {
+        name: "Network Acme",
+        logo: `data:image/png;base64,${dataBytes.toString("base64")}`,
+      },
+    },
+  });
+  const createdOrganizationBody = asObject(createdOrganization.structuredContent);
+  const organizationUri = String(createdOrganizationBody.uri);
+  assert.match(organizationUri, /^autofile:\/\/\/organizations\/[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}$/u);
+  assertToolJson(createdOrganization, createdOrganizationBody);
+
+  const missingUri = "autofile:///organizations/missing";
+  const refusedLink = await client.callTool({
+    name: "create_record",
+    arguments: {
+      type: "contacts",
+      key: "missing-link",
+      record: { name: "Missing", status: "active", employer: missingUri },
+    },
+  });
+  assertToolJson(refusedLink, {
+    errors: [{
+      uri: "autofile:///contacts/missing-link",
+      message: `employer: links to a record that does not exist: ${missingUri}`,
+    }],
+  }, { isError: true });
+
+  const contactUri = "autofile:///contacts/ada";
+  assertToolJson(await client.callTool({
+    name: "create_record",
+    arguments: {
+      type: "contacts",
+      key: "ada",
+      record: {
+        name: "Ada Lovelace",
+        status: "active",
+        employer: organizationUri,
+        notes: "Analytical engines and mathematics.",
+        details: { role: "Engineer", remove: true },
+        labels: ["old"],
+      },
+    },
+  }), { uri: contactUri });
+
+  const found = await client.callTool({
+    name: "find_records",
+    arguments: {
+      type: "contacts",
+      q: "ada engines",
+      where: { status: "active", employer: organizationUri },
+      fields: ["name"],
+    },
+  });
+  const foundBody = asObject(found.structuredContent);
+  assert.ok(Array.isArray(foundBody.records));
+  assert.equal(foundBody.records.length, 1);
+  assert.deepEqual(asObject(foundBody.records[0]).value, { name: "Ada Lovelace" });
+  assert.deepEqual(foundBody.errors, []);
+  assertToolJson(found, foundBody);
+
+  const beforePatchResult = await client.callTool({
+    name: "get_record",
+    arguments: { uri: contactUri },
+  });
+  const beforePatch = asObject(beforePatchResult.structuredContent);
+  assertToolJson(beforePatchResult, beforePatch);
+  assertToolJson(await client.callTool({
+    name: "update_record",
+    arguments: {
+      uri: contactUri,
+      patch: {
+        details: { remove: null, note: "kept" },
+        labels: ["new"],
+      },
+    },
+  }), { uri: contactUri });
+  const afterPatchResult = await client.callTool({
+    name: "get_record",
+    arguments: { uri: contactUri },
+  });
+  const afterPatch = asObject(afterPatchResult.structuredContent);
+  assert.equal(afterPatch.createdAt, beforePatch.createdAt);
+  assert.notEqual(afterPatch.updatedAt, beforePatch.updatedAt);
+  assert.deepEqual(asObject(afterPatch.value).details, { role: "Engineer", note: "kept" });
+  assert.deepEqual(asObject(afterPatch.value).labels, ["new"]);
+  assertToolJson(afterPatchResult, afterPatch);
+
+  const completeOnlySchema = {
+    ...contactSchema,
+    properties: {
+      ...contactSchema.properties,
+      status: { const: "complete" },
+    },
+  };
+  const changedType = await client.callTool({
+    name: "update_type",
+    arguments: { type: "contacts", schema: completeOnlySchema },
+  });
+  const changedTypeBody = asObject(changedType.structuredContent);
+  assert.equal(changedTypeBody.uri, "autofile:///_types/contacts");
+  assert.ok(Array.isArray(changedTypeBody.errors));
+  assert.equal(asObject(changedTypeBody.errors[0]).uri, contactUri);
+  assert.match(String(asObject(changedTypeBody.errors[0]).message), /status/u);
+  assertToolJson(changedType, changedTypeBody);
+
+  const invalidSearch = await client.callTool({
+    name: "find_records",
+    arguments: { type: "contacts", q: "Ada", where: { status: "active" } },
+  });
+  const invalidSearchBody = asObject(invalidSearch.structuredContent);
+  assert.deepEqual(invalidSearchBody.records, []);
+  assert.ok(Array.isArray(invalidSearchBody.errors));
+  assert.equal(asObject(invalidSearchBody.errors[0]).uri, contactUri);
+  assertToolJson(invalidSearch, invalidSearchBody);
+
+  const invalidRecord = await client.callTool({
+    name: "get_record",
+    arguments: { uri: contactUri },
+  });
+  const invalidRecordBody = asObject(invalidRecord.structuredContent);
+  assert.match(String(invalidRecordBody.error), /status/u);
+  assertToolJson(invalidRecord, invalidRecordBody);
+
+  assertToolJson(await client.callTool({
+    name: "update_record",
+    arguments: { uri: contactUri, patch: { status: "complete" } },
+  }), { uri: contactUri });
+  const repairedResult = await client.callTool({
+    name: "get_record",
+    arguments: { uri: contactUri },
+  });
+  const repaired = asObject(repairedResult.structuredContent);
+  assert.equal("error" in repaired, false);
+  assertToolJson(repairedResult, repaired);
+
+  const resources = await client.listResources();
+  assert.equal(resources.ttlMs, 0);
+  assert.equal(resources.cacheScope, "private");
+  assert.deepEqual(resources.resources.find(({ uri }) => uri === "autofile:///_types/contacts"), {
+    uri: "autofile:///_types/contacts",
+    name: "_types/contacts",
+    mimeType: "application/json",
+    description: "Contacts reached over HTTP.",
+  });
+  assert.deepEqual(resources.resources.find(({ uri }) => uri === contactUri), {
+    uri: contactUri,
+    name: "contacts/ada",
+    title: "Ada Lovelace",
+    mimeType: "application/json",
+    annotations: { lastModified: repaired.updatedAt },
+  });
+  assert.deepEqual(resources.resources.find(({ uri }) => uri === blobUri), {
+    uri: blobUri,
+    name: `_blobs/${blobHash}.png`,
+    mimeType: "image/png",
+    size: dataBytes.byteLength,
+  });
+
+  const declaration = await client.readResource({ uri: "autofile:///_types/contacts" });
+  const declarationContent = declaration.contents[0];
+  assert.ok(declarationContent !== undefined && "text" in declarationContent);
+  assert.deepEqual(JSON.parse(declarationContent.text) as unknown, {
+    description: "Contacts reached over HTTP.",
+    titleField: "name",
+    view: { body: "notes", panel: ["employer", "status"] },
+    schema: completeOnlySchema,
+  });
+  const blob = await client.readResource({ uri: blobUri });
+  assert.deepEqual(blob.contents, [{
+    uri: blobUri,
+    mimeType: "image/png",
+    blob: dataBytes.toString("base64"),
+  }]);
+
+  assertToolJson(await client.callTool({
+    name: "delete_record",
+    arguments: { uri: organizationUri },
+  }), { uri: organizationUri });
+  const afterDeleteResult = await client.callTool({
+    name: "get_record",
+    arguments: { uri: contactUri },
+  });
+  const afterDelete = asObject(afterDeleteResult.structuredContent);
+  assert.equal("employer" in asObject(afterDelete.value), false);
+  assertToolJson(afterDeleteResult, afterDelete);
+  await assert.rejects(
+    client.readResource({ uri: blobUri }),
+    (error: unknown) => error instanceof ProtocolError && error.code === -32602,
+  );
+});
+
 test("serve options override HTTP settings for that process", { timeout: 30_000 }, async () => {
   const port = await freePort();
   const server = await startServer({
@@ -637,6 +929,7 @@ test("serve returns 404 outside /mcp", { timeout: 30_000 }, async () => {
 
   assert.equal(response.status, 404);
   assert.equal(response.headers.get("connection"), "close");
+  assert.equal(await response.text(), "Not Found\n");
 });
 
 test("SIGTERM closes an active connection without falling back to SIGKILL", {
