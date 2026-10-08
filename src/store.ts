@@ -21,6 +21,7 @@ import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { lookup as lookupMimeType } from "mime-types";
+import { Query } from "mingo";
 import lockfile from "proper-lockfile";
 
 import { getStorage, getWriteLockPath } from "./config.js";
@@ -59,6 +60,7 @@ export interface OpenStoreOptions {
 }
 
 export interface Store {
+  findRecords(input: FindRecordsInput): Promise<FindRecordsResult | Refusal>;
   getRecord(input: GetRecordInput): Promise<RecordResult | Refusal>;
   createRecord(input: CreateRecordInput): Promise<UriResult | Refusal>;
   updateRecord(input: UpdateRecordInput): Promise<UriResult | Refusal>;
@@ -72,6 +74,13 @@ export interface Store {
   readResource(uri: string): Promise<StoreResourceContents | undefined>;
 }
 
+export interface FindRecordsInput {
+  type: string;
+  q?: string;
+  where?: JsonObject;
+  limit?: number;
+  cursor?: string;
+}
 export interface GetRecordInput { uri: string }
 export interface CreateRecordInput { type: string; key?: string; record: JsonObject }
 export interface UpdateRecordInput { uri: string; patch: JsonObject }
@@ -92,6 +101,11 @@ export interface UpdateTypeInput {
 export interface DeleteTypeInput { type: string }
 
 export interface UriResult { uri: string }
+export interface FindRecordsResult {
+  records: RecordResult[];
+  errors: StoreError[];
+  cursor?: string;
+}
 export interface RecordResult extends UriResult {
   created: string;
   updated: string;
@@ -184,6 +198,101 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
     } finally {
       await release();
     }
+  }
+
+  async function findRecords(
+    input: FindRecordsInput,
+  ): Promise<FindRecordsResult | Refusal> {
+    if (!typeNamePattern.test(input.type)) return refuse(invalidTypeMessage);
+    if (input.q !== undefined && typeof input.q !== "string") {
+      return refuse("q: must be a string");
+    }
+    if (input.where !== undefined && !isJsonObject(input.where)) {
+      return refuse("where: must be a JSON object");
+    }
+    const limit = input.limit ?? 50;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      return refuse("limit: must be an integer from 1 to 200");
+    }
+    if (input.cursor !== undefined && typeof input.cursor !== "string") {
+      return refuse("cursor: must be a string");
+    }
+    const whereRefusal = input.where === undefined
+      ? undefined
+      : findWhereRefusal(input.where);
+    if (whereRefusal !== undefined) return refuse(whereRefusal);
+
+    const afterUri = input.cursor === undefined
+      ? undefined
+      : decodeRecordCursor(input.cursor, input.type);
+    if (input.cursor !== undefined && afterUri === undefined) {
+      return refuse("cursor: is invalid");
+    }
+
+    const declaration = await readDeclaration(typeFolder, input.type);
+    if (declaration.status !== "found") return declarationRefusal(input.type, declaration);
+    const schema = await preparedDeclarationSchema(declaration.value, typeUri(input.type));
+    if ("errors" in schema) return schema;
+
+    const entries = (await recognizedRecordEntries(join(dataFolder, input.type)))
+      .map((entry) => ({
+        entry,
+        uri: recordUri(input.type, entry.name.slice(0, -".json".length)),
+      }))
+      .sort((left, right) => left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0);
+    const start = afterUri === undefined
+      ? 0
+      : entries.findIndex(({ uri }) => uri > afterUri);
+    const firstPageIndex = start < 0 ? entries.length : start;
+    const words = input.q?.trim().toLowerCase().split(/\s+/u).filter(Boolean) ?? [];
+    const query = new Query<JsonObject>(input.where ?? {}, { scriptEnabled: false });
+    const records: RecordResult[] = [];
+    const errors: StoreError[] = [];
+    let nextIndex = firstPageIndex;
+    let lastReadUri: string | undefined;
+
+    while (nextIndex < entries.length && records.length + errors.length < limit) {
+      const current = entries[nextIndex];
+      if (current === undefined) break;
+      nextIndex += 1;
+      const { entry, uri } = current;
+      lastReadUri = uri;
+      let stored: ReadResult<StoredRecord>;
+      try {
+        stored = await readStoredRecord(join(dataFolder, input.type, entry.name));
+      } catch (error) {
+        errors.push({ uri, message: recordFileReadError(error) });
+        continue;
+      }
+      if (stored.status !== "found") {
+        errors.push({
+          uri,
+          message: stored.status === "invalid" ? stored.message : "record does not exist",
+        });
+        continue;
+      }
+      if (!stringValuesContainWords(stored.value.value, words)) continue;
+      if (!query.test(stored.value.value)) continue;
+      const validationErrors = await schema.validate(stored.value.value);
+      if (validationErrors.length > 0) {
+        errors.push({ uri, message: validationErrors.join("; ") });
+        continue;
+      }
+      records.push({
+        uri,
+        created: stored.value.created,
+        updated: stored.value.updated,
+        value: stored.value.value,
+      });
+    }
+
+    return {
+      records,
+      errors,
+      ...(lastReadUri !== undefined && nextIndex < entries.length
+        ? { cursor: encodeRecordCursor(lastReadUri) }
+        : {}),
+    };
   }
 
   async function getRecord(input: GetRecordInput): Promise<RecordResult | Refusal> {
@@ -481,6 +590,7 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
   }
 
   return {
+    findRecords,
     getRecord,
     createRecord,
     updateRecord,
@@ -688,6 +798,70 @@ function mimeTypeForBlob(name: string): string {
 
 function recordPath(dataFolder: string, type: string, key: string): string {
   return join(dataFolder, type, `${key}.json`);
+}
+
+function encodeRecordCursor(uri: string): string {
+  return Buffer.from(uri, "utf8").toString("base64url");
+}
+
+function decodeRecordCursor(cursor: string, type: string): string | undefined {
+  if (!/^[A-Za-z0-9_-]+$/u.test(cursor)) return undefined;
+  const bytes = Buffer.from(cursor, "base64url");
+  if (bytes.toString("base64url") !== cursor) return undefined;
+  let uri: string;
+  try {
+    uri = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return undefined;
+  }
+  const record = parseRecordUri(uri);
+  return record?.type === type ? uri : undefined;
+}
+
+function findWhereRefusal(value: JsonValue): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const refusal = findWhereRefusal(item);
+      if (refusal !== undefined) return refusal;
+    }
+    return undefined;
+  }
+  if (!isJsonObject(value)) return undefined;
+  for (const [key, item] of Object.entries(value)) {
+    if (key.startsWith("$")) return `where: the operator ${key} is not supported`;
+    const unsafeKey = key.split(".").find((part) => (
+      part === "__proto__" || part === "constructor" || part === "prototype"
+    ));
+    if (unsafeKey !== undefined) return `where: the key ${unsafeKey} is not supported`;
+    const refusal = findWhereRefusal(item);
+    if (refusal !== undefined) return refusal;
+  }
+  return undefined;
+}
+
+function recordFileReadError(error: unknown): string {
+  const code = error instanceof Error && "code" in error && typeof error.code === "string"
+    ? `: ${error.code}`
+    : "";
+  return `record file cannot be read${code}`;
+}
+
+function stringValuesContainWords(value: JsonValue, words: string[]): boolean {
+  if (words.length === 0) return true;
+  const strings: string[] = [];
+  collectStringValues(value, strings);
+  const normalized = strings.map((item) => item.toLowerCase());
+  return words.every((word) => normalized.some((item) => item.includes(word)));
+}
+
+function collectStringValues(value: JsonValue, strings: string[]): void {
+  if (typeof value === "string") {
+    strings.push(value);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectStringValues(item, strings);
+  } else if (isJsonObject(value)) {
+    for (const item of Object.values(value)) collectStringValues(item, strings);
+  }
 }
 
 function refuse(message: string, uri?: string): Refusal {

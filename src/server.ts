@@ -22,6 +22,7 @@ import type {
   CreateTypeInput,
   DeleteRecordInput,
   DeleteTypeInput,
+  FindRecordsInput,
   GetRecordInput,
   GetTypeInput,
   JsonObject,
@@ -35,6 +36,33 @@ const BASE_INSTRUCTIONS = "Autofile is where the user keeps durable information,
 const RESOURCE_PAGE_SIZE = 100;
 const packageJson = createRequire(import.meta.url)("../package.json") as { version: string };
 
+const findRecordsSchema = fromJsonSchema<FindRecordsInput>({
+  type: "object",
+  properties: {
+    type: { type: "string", description: "The type to search." },
+    q: {
+      type: "string",
+      description: "Words that must all appear, ignoring case, in the string values of a record at any depth.",
+    },
+    where: {
+      type: "object",
+      description: "Fields to match by value using MongoDB query syntax. An array field matches when any item equals the value, and `null` also matches a missing field. Keys starting with `$`, and the keys `__proto__`, `constructor` and `prototype`, are not supported at any depth or in dotted paths.",
+    },
+    limit: {
+      type: "integer",
+      minimum: 1,
+      maximum: 200,
+      default: 50,
+      description: "The most results the page returns, counting records and entries in `errors`. From 1 to 200; defaults to 50.",
+    },
+    cursor: {
+      type: "string",
+      description: "An opaque cursor returned by the previous page. The next page starts after the last record file that page read, even if that file was deleted.",
+    },
+  },
+  required: ["type"],
+  additionalProperties: false,
+});
 const getRecordSchema = fromJsonSchema<GetRecordInput>({
   type: "object",
   properties: { uri: { type: "string", description: "The URI of the record." } },
@@ -137,6 +165,14 @@ export async function buildServer(store: Store): Promise<McpServer> {
     },
   );
 
+  server.registerTool(
+    "find_records",
+    {
+      description: "Searches the records of one type and returns matching records in URI order. It reads past nonmatching files until the page has `limit` results or no files remain. A schema-invalid record is listed in `errors` only when it matches the search; a file that cannot be read or parsed as JSON is always listed. Autofile is where the user keeps durable information.",
+      inputSchema: findRecordsSchema,
+    },
+    async (input) => toolResult(await store.findRecords(input)),
+  );
   server.registerTool(
     "get_record",
     {
@@ -244,7 +280,7 @@ function toolResult(result: object): CallToolResult {
   return {
     content: [{ type: "text", text: JSON.stringify(body) }],
     structuredContent: body,
-    ...("errors" in body && !("uri" in body) ? { isError: true } : {}),
+    ...("errors" in body && !("uri" in body) && !("records" in body) ? { isError: true } : {}),
   };
 }
 

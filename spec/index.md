@@ -196,14 +196,14 @@ Searches the records of one type.
 | `type` | string, required | The type to search. |
 | `q` | string | Words that must all appear in the string values of a record, at any depth, ignoring case. |
 | `where` | object | Fields matched by value, in the [MongoDB query syntax](https://www.mongodb.com/docs/manual/tutorial/query-documents/) and with its matching rules: for an array field, a record matches if any item equals the value, and `null` matches a field that is missing. MongoDB operators such as `$lt` and `$in` are not supported yet, and a `where` that uses one is refused. They can be added later without changing this form. |
-| `limit` | integer | The number of record files each page covers, counting those listed in `errors`: 50 by default, from 1 to 200. |
+| `limit` | integer | The most results a page returns, counting records and those listed in `errors`: 50 by default, from 1 to 200. |
 | `cursor` | string | The `cursor` from the previous page. |
 
 ```json
 { "type": "tasks", "q": "dentist", "where": { "status": "active" }, "limit": 50 }
 ```
 
-Results are ordered by URI. `cursor` is present when more records remain, and the next page starts after the last file the current page covered. Each page lists in `errors` the problems among the files it covered. Each record is returned as the contents of its file with its URI added in `uri`. The names `uri` and `value` follow AT Protocol. A record that does not match its type, or cannot be read as JSON, is left out of `records` and listed in `errors` with its URI and a message. Code that relies on the schema therefore receives only matching records, and no record is dropped without notice.
+Results are ordered by URI. A page reads record files in that order until it has `limit` results or no files remain; `cursor` is present when files remain, and the next page starts after the last file the current page read. Each record is returned as the contents of its file with its URI added in `uri`. The names `uri` and `value` follow AT Protocol. A record that does not match its type is left out of `records`, and listed in `errors` with its URI and a message when it matches `q` and `where`. A file that cannot be read as JSON is always listed in `errors`, since it cannot be searched. Code that relies on the schema therefore receives only matching records, and no record the search would find is dropped without notice.
 
 ```json
 {

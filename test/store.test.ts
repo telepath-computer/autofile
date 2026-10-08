@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import {
+import fsPromises, {
   mkdir,
   mkdtemp,
   readFile,
@@ -14,6 +14,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -68,7 +69,11 @@ function errorMessages(result: unknown): string[] {
   return errors.map(({ message }) => message);
 }
 
-async function runChild(script: string, args: string[], timeoutMs = 45_000): Promise<void> {
+async function runChild(
+  script: string,
+  args: string[],
+  timeoutMs = 45_000,
+): Promise<void> {
   await new Promise<void>((done, reject) => {
     const child = spawn(process.execPath, ["--input-type=module", "--eval", script, ...args], {
       cwd: resolve("."),
@@ -430,6 +435,360 @@ test("create_record writes the exact envelope and get_record returns it with its
     updated: record.updated,
     value: { title: "Book dentist", status: "active" },
   });
+});
+
+test("find_records combines recursive word search with MongoDB field matching", async () => {
+  const { store } = await makeStore();
+  await store.createType({
+    type: "entries",
+    description: "Searchable entries.",
+    schema: {
+      type: "object",
+      required: ["title", "status"],
+      properties: {
+        title: { type: "string" },
+        status: { type: "string" },
+        details: { type: "object" },
+        tags: { type: "array" },
+        priority: { type: "integer" },
+        optional: { type: ["string", "null"] },
+      },
+      additionalProperties: false,
+    },
+  });
+  const records: Array<[string, JsonObject]> = [
+    ["alpha", {
+      title: "Book the DENTIST",
+      status: "active",
+      details: { people: [{ name: "Priya" }] },
+      tags: ["health", "urgent"],
+      priority: 42,
+    }],
+    ["beta", {
+      title: "Dentist receipt",
+      status: "complete",
+      details: { note: "Archive it" },
+      tags: ["health"],
+      optional: null,
+    }],
+    ["gamma", {
+      title: "Call the bank",
+      status: "active",
+      details: { note: "Ask about the dentist recommendation" },
+      tags: ["finance"],
+    }],
+    ["omega", {
+      title: "Unrelated",
+      status: "active",
+      tags: ["misc"],
+    }],
+  ];
+  for (const [key, record] of records) {
+    await store.createRecord({ type: "entries", key, record });
+  }
+
+  const wordsAndField = await store.findRecords({
+    type: "entries",
+    q: "dEnTiSt PRIYA",
+    where: { status: "active" },
+  });
+  assert.ok("records" in wordsAndField);
+  assert.deepEqual(wordsAndField.records.map(({ uri }) => uri), [
+    "autofile:///entries/alpha",
+  ]);
+  assert.deepEqual(wordsAndField.errors, []);
+  assert.equal("cursor" in wordsAndField, false);
+
+  const arrayEquality = await store.findRecords({ type: "entries", where: { tags: "health" } });
+  assert.ok("records" in arrayEquality);
+  assert.deepEqual(arrayEquality.records.map(({ uri }) => uri), [
+    "autofile:///entries/alpha",
+    "autofile:///entries/beta",
+  ]);
+
+  const missingOrNull = await store.findRecords({ type: "entries", where: { optional: null } });
+  assert.ok("records" in missingOrNull);
+  assert.deepEqual(missingOrNull.records.map(({ uri }) => uri), [
+    "autofile:///entries/alpha",
+    "autofile:///entries/beta",
+    "autofile:///entries/gamma",
+    "autofile:///entries/omega",
+  ]);
+
+  const dottedField = await store.findRecords({
+    type: "entries",
+    where: { "details.note": "Archive it" },
+  });
+  assert.ok("records" in dottedField);
+  assert.deepEqual(dottedField.records.map(({ uri }) => uri), [
+    "autofile:///entries/beta",
+  ]);
+
+  for (const q of ["priority", "42"]) {
+    const valuesOnly = await store.findRecords({ type: "entries", q });
+    assert.ok("records" in valuesOnly);
+    assert.deepEqual(valuesOnly.records, []);
+  }
+});
+
+test("find_records reports only schema-invalid records that match the search", async () => {
+  const { dataFolder, store } = await makeStore();
+  await createTasksType(store);
+  await store.createRecord({
+    type: "tasks",
+    key: "matching",
+    record: { title: "Needle", status: "complete" },
+  });
+  const timestamp = "2026-10-07T09:14:00Z";
+  await Promise.all([
+    writeFile(join(dataFolder, "tasks", "invalid-filtered-by-q.json"), `${JSON.stringify({
+      created: timestamp,
+      updated: timestamp,
+      value: { title: "Haystack", status: "complete", unexpected: true },
+    }, null, 2)}\n`),
+    writeFile(join(dataFolder, "tasks", "invalid-filtered-by-where.json"), `${JSON.stringify({
+      created: timestamp,
+      updated: timestamp,
+      value: { title: "Needle with the wrong status", status: "unknown" },
+    }, null, 2)}\n`),
+    writeFile(join(dataFolder, "tasks", "invalid-matching.json"), `${JSON.stringify({
+      created: timestamp,
+      updated: timestamp,
+      value: { title: "Needle in an invalid record", status: "complete", unexpected: true },
+    }, null, 2)}\n`),
+    writeFile(join(dataFolder, "tasks", "unreadable.json"), "{\n"),
+  ]);
+
+  const result = await store.findRecords({
+    type: "tasks",
+    q: "needle",
+    where: { status: "complete" },
+  });
+  assert.ok("records" in result);
+  assert.deepEqual(result.records.map(({ uri, value }) => ({ uri, value })), [{
+    uri: "autofile:///tasks/matching",
+    value: { title: "Needle", status: "complete" },
+  }]);
+  assert.deepEqual(result.errors.map(({ uri }) => uri), [
+    "autofile:///tasks/invalid-matching",
+    "autofile:///tasks/unreadable",
+  ]);
+  assert.match(result.errors[0]?.message ?? "", /unexpected|additional/u);
+  assert.match(result.errors[1]?.message ?? "", /JSON/u);
+});
+
+test("find_records reads past nonmatches until it fills the result page", async () => {
+  const { store } = await makeStore();
+  await createTasksType(store);
+  const records: Array<[string, string]> = [
+    ["a", "Haystack A"],
+    ["b", "Needle B"],
+    ["c", "Haystack C"],
+    ["d", "Needle D"],
+    ["e", "Haystack E"],
+  ];
+  for (const [key, title] of records) {
+    await store.createRecord({ type: "tasks", key, record: { title, status: "active" } });
+  }
+
+  const first = await store.findRecords({ type: "tasks", q: "needle", limit: 2 });
+  assert.ok("records" in first && first.cursor !== undefined);
+  assert.deepEqual(first.records.map(({ uri }) => uri), [
+    "autofile:///tasks/b",
+    "autofile:///tasks/d",
+  ]);
+  assert.deepEqual(first.errors, []);
+
+  const second = await store.findRecords({ type: "tasks", q: "needle", limit: 2, cursor: first.cursor });
+  assert.ok("records" in second);
+  assert.deepEqual(second, { records: [], errors: [] });
+});
+
+test("find_records pages record files in URI order and advances after a deleted cursor file", async () => {
+  const { dataFolder, store } = await makeStore();
+  await createTasksType(store);
+  const timestamp = "2026-10-07T09:14:00Z";
+  const storedRecord = (title: string, status = "active") => `${JSON.stringify({
+    created: timestamp,
+    updated: timestamp,
+    value: { title, status },
+  }, null, 2)}\n`;
+  await Promise.all([
+    writeFile(join(dataFolder, "tasks", "e.json"), storedRecord("E")),
+    writeFile(join(dataFolder, "tasks", "d.json"), storedRecord("D", "unknown")),
+    writeFile(join(dataFolder, "tasks", "c.json"), storedRecord("C")),
+    writeFile(join(dataFolder, "tasks", "b.json"), "{\n"),
+    writeFile(join(dataFolder, "tasks", "a.json"), storedRecord("A")),
+  ]);
+
+  const first = await store.findRecords({ type: "tasks", limit: 2 });
+  assert.ok("records" in first && first.cursor !== undefined);
+  assert.deepEqual(first.records.map(({ uri }) => uri), ["autofile:///tasks/a"]);
+  assert.deepEqual(first.errors, [{
+    uri: "autofile:///tasks/b",
+    message: "record file cannot be read as JSON",
+  }]);
+
+  assert.deepEqual(await store.deleteRecord({ uri: "autofile:///tasks/b" }), {
+    uri: "autofile:///tasks/b",
+  });
+  const second = await store.findRecords({ type: "tasks", limit: 2, cursor: first.cursor });
+  assert.ok("records" in second && second.cursor !== undefined);
+  assert.deepEqual(second.records.map(({ uri }) => uri), ["autofile:///tasks/c"]);
+  assert.deepEqual(second.errors.map(({ uri }) => uri), ["autofile:///tasks/d"]);
+  assert.match(second.errors[0]?.message ?? "", /status/u);
+
+  const third = await store.findRecords({ type: "tasks", limit: 2, cursor: second.cursor });
+  assert.ok("records" in third);
+  assert.deepEqual(third.records.map(({ uri }) => uri), ["autofile:///tasks/e"]);
+  assert.deepEqual(third.errors, []);
+  assert.equal("cursor" in third, false);
+});
+
+test("find_records returns at most 50 results by default", async () => {
+  const { dataFolder, store } = await makeStore();
+  await createTasksType(store);
+  const timestamp = "2026-10-07T09:14:00Z";
+  await Promise.all(Array.from({ length: 51 }, async (_, index) => {
+    const key = `item-${String(index).padStart(2, "0")}`;
+    await writeFile(join(dataFolder, "tasks", `${key}.json`), `${JSON.stringify({
+      created: timestamp,
+      updated: timestamp,
+      value: { title: key, status: "active" },
+    }, null, 2)}\n`);
+  }));
+
+  const first = await store.findRecords({ type: "tasks" });
+  assert.ok("records" in first && first.cursor !== undefined);
+  assert.equal(first.records.length, 50);
+  assert.equal(first.records[0]?.uri, "autofile:///tasks/item-00");
+  assert.equal(first.records.at(-1)?.uri, "autofile:///tasks/item-49");
+  assert.deepEqual(first.errors, []);
+
+  const second = await store.findRecords({ type: "tasks", cursor: first.cursor });
+  assert.ok("records" in second);
+  assert.deepEqual(second.records.map(({ uri }) => uri), [
+    "autofile:///tasks/item-50",
+  ]);
+  assert.deepEqual(second.errors, []);
+  assert.equal("cursor" in second, false);
+});
+
+test("find_records refuses invalid arguments, operators at any depth, and invalid cursors", async () => {
+  const { store } = await makeStore();
+  await createTasksType(store);
+  await store.createRecord({
+    type: "tasks",
+    key: "one",
+    record: { title: "One", status: "active" },
+  });
+  await store.createRecord({
+    type: "tasks",
+    key: "two",
+    record: { title: "Two", status: "active" },
+  });
+
+  assert.deepEqual(await store.findRecords({ type: "Tasks" }), {
+    errors: [{
+      message: "type: must use lowercase letters, digits, and hyphens and start with a letter",
+    }],
+  });
+  assert.deepEqual(await store.findRecords({ type: "missing" }), {
+    errors: [{ uri: "autofile:///_types/missing", message: "type does not exist" }],
+  });
+  assert.deepEqual(await store.findRecords({
+    type: "tasks",
+    q: 42 as unknown as string,
+  }), { errors: [{ message: "q: must be a string" }] });
+  assert.deepEqual(await store.findRecords({
+    type: "tasks",
+    where: [] as unknown as JsonObject,
+  }), { errors: [{ message: "where: must be a JSON object" }] });
+  for (const limit of [0, 1.5, 201]) {
+    assert.deepEqual(await store.findRecords({ type: "tasks", limit }), {
+      errors: [{ message: "limit: must be an integer from 1 to 200" }],
+    });
+  }
+  assert.deepEqual(await store.findRecords({
+    type: "tasks",
+    cursor: 42 as unknown as string,
+  }), { errors: [{ message: "cursor: must be a string" }] });
+  assert.deepEqual(await store.findRecords({
+    type: "tasks",
+    where: { nested: [{ condition: { $lt: 3 } }] },
+  }), { errors: [{ message: "where: the operator $lt is not supported" }] });
+  const unsafeWhereCases: Array<[JsonObject, string]> = [
+    [JSON.parse('{"__proto__":"value"}') as JsonObject, "__proto__"],
+    [{ nested: [{ constructor: "value" }] }, "constructor"],
+    [{ "details.prototype.name": "value" }, "prototype"],
+  ];
+  for (const [where, key] of unsafeWhereCases) {
+    assert.deepEqual(await store.findRecords({ type: "tasks", where }), {
+      errors: [{ message: `where: the key ${key} is not supported` }],
+    });
+  }
+  assert.deepEqual(await store.findRecords({ type: "tasks", cursor: "not-a-cursor" }), {
+    errors: [{ message: "cursor: is invalid" }],
+  });
+
+  await store.createType({
+    type: "notes",
+    description: "Notes.",
+    schema: { type: "object" },
+  });
+  await store.createRecord({ type: "notes", key: "one", record: {} });
+  await store.createRecord({ type: "notes", key: "two", record: {} });
+  const notesPage = await store.findRecords({ type: "notes", limit: 1 });
+  assert.ok("records" in notesPage && notesPage.cursor !== undefined);
+  assert.deepEqual(await store.findRecords({ type: "tasks", cursor: notesPage.cursor }), {
+    errors: [{ message: "cursor: is invalid" }],
+  });
+});
+
+test("find_records reports an operating-system read refusal and continues", async () => {
+  const { dataFolder, store } = await makeStore();
+  await createTasksType(store);
+  await store.createRecord({
+    type: "tasks",
+    key: "denied",
+    record: { title: "Denied", status: "active" },
+  });
+  await store.createRecord({
+    type: "tasks",
+    key: "kept",
+    record: { title: "Kept", status: "active" },
+  });
+  const kept = await store.getRecord({ uri: "autofile:///tasks/kept" });
+  assert.ok("value" in kept);
+  const deniedPath = join(dataFolder, "tasks", "denied.json");
+  const originalOpen = fsPromises.open;
+  // The test process runs as root, so mode bits cannot produce EACCES. Replace
+  // only the filesystem boundary for this path with the error open(2) returns.
+  fsPromises.open = (async (...args: Parameters<typeof originalOpen>) => {
+    if (args[0] === deniedPath) {
+      throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+    }
+    return originalOpen(...args);
+  }) as typeof fsPromises.open;
+  syncBuiltinESMExports();
+  try {
+    const result = await store.findRecords({ type: "tasks" });
+    assert.deepEqual(result, {
+      records: [{
+        uri: kept.uri,
+        created: kept.created,
+        updated: kept.updated,
+        value: kept.value,
+      }],
+      errors: [{
+        uri: "autofile:///tasks/denied",
+        message: "record file cannot be read: EACCES",
+      }],
+    });
+  } finally {
+    fsPromises.open = originalOpen;
+    syncBuiltinESMExports();
+  }
 });
 
 test("record keys and canonical record URIs are enforced", async () => {

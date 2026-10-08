@@ -148,6 +148,37 @@ test("tools are listed in spec order with exact descriptions and described close
 
   assert.deepEqual(tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), [
     {
+      name: "find_records",
+      description: "Searches the records of one type and returns matching records in URI order. It reads past nonmatching files until the page has `limit` results or no files remain. A schema-invalid record is listed in `errors` only when it matches the search; a file that cannot be read or parsed as JSON is always listed. Autofile is where the user keeps durable information.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: { type: "string", description: "The type to search." },
+          q: {
+            type: "string",
+            description: "Words that must all appear, ignoring case, in the string values of a record at any depth.",
+          },
+          where: {
+            type: "object",
+            description: "Fields to match by value using MongoDB query syntax. An array field matches when any item equals the value, and `null` also matches a missing field. Keys starting with `$`, and the keys `__proto__`, `constructor` and `prototype`, are not supported at any depth or in dotted paths.",
+          },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: 200,
+            default: 50,
+            description: "The most results the page returns, counting records and entries in `errors`. From 1 to 200; defaults to 50.",
+          },
+          cursor: {
+            type: "string",
+            description: "An opaque cursor returned by the previous page. The next page starts after the last record file that page read, even if that file was deleted.",
+          },
+        },
+        required: ["type"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "get_record",
       description: "Returns one record by URI: its `uri`, `created` and `updated` times, and `value`. A record that does not match its type is still returned, with what must change in `error`.",
       inputSchema: {
@@ -281,7 +312,7 @@ test("tools are listed in spec order with exact descriptions and described close
   }
 });
 
-test("all nine tools map store results to matching structured and text JSON", async () => {
+test("all ten tools map store results to matching structured and text JSON", async () => {
   const { store } = await makeStore();
   const client = await connect(store);
 
@@ -323,6 +354,17 @@ test("all nine tools map store results to matching structured and text JSON", as
   });
   assertToolJson(createdRecord, { uri: "autofile:///tasks/book-dentist" });
 
+  const foundRecords = await client.callTool({
+    name: "find_records",
+    arguments: { type: "tasks", q: "dentist", where: { status: "active" } },
+  });
+  const found = asObject(foundRecords.structuredContent);
+  assert.ok(Array.isArray(found.records));
+  assert.equal(found.records.length, 1);
+  assert.equal(asObject(found.records[0]).uri, "autofile:///tasks/book-dentist");
+  assert.deepEqual(found.errors, []);
+  assertToolJson(foundRecords, found);
+
   const gotRecord = await client.callTool({
     name: "get_record",
     arguments: { uri: "autofile:///tasks/book-dentist" },
@@ -357,6 +399,67 @@ test("all nine tools map store results to matching structured and text JSON", as
 
   const deletedType = await client.callTool({ name: "delete_type", arguments: { type: "tasks" } });
   assertToolJson(deletedType, { uri: "autofile:///_types/tasks" });
+});
+
+test("find_records returns complete records and error-only pages as successful results", async () => {
+  const { dataFolder, store } = await makeStore();
+  await createTasksType(store);
+  await store.createRecord({
+    type: "tasks",
+    key: "book-dentist",
+    record: { title: "Book dentist", status: "active" },
+  });
+  await writeFile(join(dataFolder, "tasks", "a-broken.json"), "{\n");
+  const stored = await store.getRecord({ uri: "autofile:///tasks/book-dentist" });
+  assert.ok("value" in stored);
+  const client = await connect(store);
+
+  const errorOnlyPage = await client.callTool({
+    name: "find_records",
+    arguments: { type: "tasks", limit: 1 },
+  });
+  const errorOnlyBody = asObject(errorOnlyPage.structuredContent);
+  assert.equal(typeof errorOnlyBody.cursor, "string");
+  assertToolJson(errorOnlyPage, {
+    records: [],
+    errors: [{
+      uri: "autofile:///tasks/a-broken",
+      message: "record file cannot be read as JSON",
+    }],
+    cursor: errorOnlyBody.cursor,
+  });
+
+  const recordPage = await client.callTool({
+    name: "find_records",
+    arguments: { type: "tasks", cursor: errorOnlyBody.cursor },
+  });
+  assertToolJson(recordPage, {
+    records: [{
+      uri: stored.uri,
+      created: stored.created,
+      updated: stored.updated,
+      value: stored.value,
+    }],
+    errors: [],
+  });
+
+  assert.deepEqual(errorOnlyBody.errors, [{
+    uri: "autofile:///tasks/a-broken",
+    message: "record file cannot be read as JSON",
+  }]);
+
+  const refusals = [
+    [{ type: "tasks", where: { status: { $in: ["active"] } } }, {
+      errors: [{ message: "where: the operator $in is not supported" }],
+    }],
+    [{ type: "tasks", cursor: "not-a-cursor" }, {
+      errors: [{ message: "cursor: is invalid" }],
+    }],
+  ] as const;
+  for (const [argumentsValue, expected] of refusals) {
+    const refusal = await client.callTool({ name: "find_records", arguments: argumentsValue });
+    assertToolJson(refusal, expected, { isError: true });
+  }
 });
 
 test("tool refusals are errors, accepted type changes with record errors are not", async () => {
