@@ -101,17 +101,24 @@ export interface CreateRecordInput { type: string; key?: string; record: JsonObj
 export interface UpdateRecordInput { uri: string; patch: JsonObject }
 export interface DeleteRecordInput { uri: string }
 export interface GetTypeInput { type: string }
+/** Client layout hints stored with a type declaration. */
+export interface TypeView {
+  body?: string;
+  panel?: string[];
+}
 export interface CreateTypeInput {
   type: string;
   description: string;
   schema: JsonObject;
   titleField?: string;
+  view?: TypeView;
 }
 export interface UpdateTypeInput {
   type: string;
   description?: string;
   schema?: JsonObject;
   titleField?: string | null;
+  view?: TypeView | null;
 }
 export interface DeleteTypeInput { type: string }
 
@@ -136,6 +143,7 @@ export interface TypeResult extends UriResult {
   description: string;
   schema: JsonObject;
   titleField?: string;
+  view?: TypeView;
 }
 export interface UpdateTypeResult extends UriResult { errors: StoreError[] }
 
@@ -158,6 +166,7 @@ interface TypeDeclaration {
   description: string;
   schema: JsonObject;
   titleField?: string;
+  view?: TypeView;
 }
 
 interface StoredRecord {
@@ -634,6 +643,7 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       ...(declaration.value.titleField === undefined
         ? {}
         : { titleField: declaration.value.titleField }),
+      ...(declaration.value.view === undefined ? {} : { view: declaration.value.view }),
       schema: declaration.value.schema,
     };
   }
@@ -644,6 +654,10 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       if (typeof input.description !== "string") return refuse("description: must be a string");
       if (input.titleField !== undefined && typeof input.titleField !== "string") {
         return refuse("titleField: must be a string");
+      }
+      if (input.view !== undefined) {
+        const error = typeViewError(input.view);
+        if (error !== undefined) return refuse(error);
       }
       if (!isJsonObject(input.schema)) return refuse("schema: must be a JSON object");
       const declarationPath = join(typeFolder, `${input.type}.json`);
@@ -660,6 +674,7 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       await writeJsonAtomically(declarationPath, {
         description: input.description,
         ...(input.titleField === undefined ? {} : { titleField: input.titleField }),
+        ...(input.view === undefined ? {} : { view: input.view }),
         schema: input.schema,
       });
       return { uri: typeUri(input.type) };
@@ -681,6 +696,10 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       ) {
         return refuse("titleField: must be a string or null");
       }
+      if (input.view !== undefined) {
+        const error = typeViewError(input.view, true);
+        if (error !== undefined) return refuse(error);
+      }
       if (input.schema !== undefined && !isJsonObject(input.schema)) {
         return refuse("schema: must be a JSON object");
       }
@@ -692,9 +711,11 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
             ? {}
             : { titleField: input.titleField ?? current.value.titleField }
         ),
+        ...(input.view === null ? {} : { view: input.view ?? current.value.view }),
         schema: input.schema ?? current.value.schema,
       };
       if (declaration.titleField === undefined) delete declaration.titleField;
+      if (declaration.view === undefined) delete declaration.view;
       const schema = await prepareDeclarationSchema(declaration.schema, typeUri(input.type));
       if ("errors" in schema) return schema;
 
@@ -1493,11 +1514,29 @@ async function pathExists(path: string): Promise<boolean> {
 
 function isTypeDeclaration(value: unknown): value is TypeDeclaration {
   if (!isJsonObject(value)) return false;
-  if (Object.keys(value).some((key) => !["description", "titleField", "schema"].includes(key))) {
+  if (Object.keys(value).some((key) => !["description", "titleField", "view", "schema"].includes(key))) {
     return false;
   }
   if (typeof value.description !== "string" || !isJsonObject(value.schema)) return false;
-  return value.titleField === undefined || typeof value.titleField === "string";
+  if (value.titleField !== undefined && typeof value.titleField !== "string") return false;
+  return value.view === undefined || typeViewError(value.view) === undefined;
+}
+
+function typeViewError(value: unknown, allowNull = false): string | undefined {
+  if (allowNull && value === null) return undefined;
+  if (!isJsonObject(value)) return `view: must be an object${allowNull ? " or null" : ""}`;
+  const unexpected = Object.keys(value).find((key) => key !== "body" && key !== "panel");
+  if (unexpected !== undefined) return `view.${unexpected}: is not allowed`;
+  if (value.body !== undefined && typeof value.body !== "string") {
+    return "view.body: must be a string";
+  }
+  if (
+    value.panel !== undefined
+    && (!Array.isArray(value.panel) || value.panel.some((field) => typeof field !== "string"))
+  ) {
+    return "view.panel: must be an array of strings";
+  }
+  return undefined;
 }
 
 function isStoredRecord(value: unknown): value is StoredRecord {

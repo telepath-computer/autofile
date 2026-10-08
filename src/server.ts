@@ -130,6 +130,22 @@ const createTypeSchema = fromJsonSchema<CreateTypeInput>({
       type: "string",
       description: "A top-level field of the record whose string value is shown as its title.",
     },
+    view: {
+      type: "object",
+      properties: {
+        body: {
+          type: "string",
+          description: "The top-level field containing the main prose in Markdown.",
+        },
+        panel: {
+          type: "array",
+          items: { type: "string" },
+          description: "The top-level fields shown in the panel, in order.",
+        },
+      },
+      additionalProperties: false,
+      description: "How clients lay out a record: `body` names the top-level prose field and `panel` lists top-level panel fields in order.",
+    },
   },
   required: ["type", "description", "schema"],
   additionalProperties: false,
@@ -143,6 +159,22 @@ const updateTypeSchema = fromJsonSchema<UpdateTypeInput>({
     titleField: {
       type: ["string", "null"],
       description: "The new title field; `null` removes it.",
+    },
+    view: {
+      type: ["object", "null"],
+      properties: {
+        body: {
+          type: "string",
+          description: "The top-level field containing the main prose in Markdown.",
+        },
+        panel: {
+          type: "array",
+          items: { type: "string" },
+          description: "The top-level fields shown in the panel, in order.",
+        },
+      },
+      additionalProperties: false,
+      description: "The new view; `null` removes it.",
     },
   },
   required: ["type"],
@@ -233,7 +265,7 @@ export async function buildServer(store: Store): Promise<McpServer> {
   server.registerTool(
     "update_type",
     {
-      description: "Replaces the description, schema or title field of a type, or any of them.",
+      description: "Replaces the description, schema, title field or view of a type, or any of them.",
       inputSchema: updateTypeSchema,
     },
     async (input) => toolResult(await store.updateType(input)),
