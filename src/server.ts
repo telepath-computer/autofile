@@ -17,18 +17,19 @@ import {
   type ReadResourceResult,
 } from "@modelcontextprotocol/server";
 
-import type {
-  CreateRecordInput,
-  CreateTypeInput,
-  DeleteRecordInput,
-  DeleteTypeInput,
-  FindRecordsInput,
-  GetRecordInput,
-  GetTypeInput,
-  JsonObject,
-  Store,
-  UpdateRecordInput,
-  UpdateTypeInput,
+import {
+  isResourceUri,
+  type CreateRecordInput,
+  type CreateTypeInput,
+  type DeleteRecordInput,
+  type DeleteTypeInput,
+  type FindRecordsInput,
+  type GetRecordInput,
+  type GetTypeInput,
+  type JsonObject,
+  type Store,
+  type UpdateRecordInput,
+  type UpdateTypeInput,
 } from "./store.js";
 
 const SERVER_DESCRIPTION = "Typed records that agents file and retrieve, kept as JSON files in a folder the user owns.";
@@ -293,7 +294,8 @@ function decodeCursor(cursor: string): string | undefined {
   const bytes = Buffer.from(cursor, "base64url");
   if (bytes.toString("base64url") !== cursor) return undefined;
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const uri = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return isResourceUri(uri) ? uri : undefined;
   } catch {
     return undefined;
   }

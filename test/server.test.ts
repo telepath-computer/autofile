@@ -504,6 +504,147 @@ test("tool refusals are errors, accepted type changes with record errors are not
   assert.notEqual(accepted.isError, true);
 });
 
+test("record link writes and deletes return their results and refusals through MCP", async () => {
+  const { dataFolder, store } = await makeStore();
+  await store.createType({
+    type: "targets",
+    description: "Link targets.",
+    schema: { type: "object" },
+  });
+  await store.createType({
+    type: "sources",
+    description: "Optional links.",
+    schema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        target: { type: "string", format: "uri" },
+      },
+      additionalProperties: false,
+    },
+  });
+  await store.createType({
+    type: "blockers",
+    description: "Required links.",
+    schema: {
+      type: "object",
+      required: ["target"],
+      properties: { target: { type: "string", format: "uri" } },
+      additionalProperties: false,
+    },
+  });
+  const targetUri = "autofile:///targets/one";
+  const sourceUri = "autofile:///sources/one";
+  const blockerUri = "autofile:///blockers/one";
+  const missingUri = "autofile:///targets/missing";
+  await store.createRecord({ type: "targets", key: "one", record: {} });
+  await store.createRecord({
+    type: "sources",
+    key: "one",
+    record: { name: "Source", target: targetUri },
+  });
+  await store.createRecord({
+    type: "blockers",
+    key: "one",
+    record: { target: targetUri },
+  });
+  const client = await connect(store);
+
+  const refusedCreate = await client.callTool({
+    name: "create_record",
+    arguments: {
+      type: "sources",
+      key: "dangling",
+      record: { name: "Dangling", target: missingUri },
+    },
+  });
+  assertToolJson(refusedCreate, {
+    errors: [{
+      uri: "autofile:///sources/dangling",
+      message: `target: links to a record that does not exist: ${missingUri}`,
+    }],
+  }, { isError: true });
+
+  const beforeUpdate = await client.callTool({
+    name: "get_record",
+    arguments: { uri: sourceUri },
+  });
+  const beforeUpdateBody = asObject(beforeUpdate.structuredContent);
+  const refusedUpdate = await client.callTool({
+    name: "update_record",
+    arguments: { uri: sourceUri, patch: { target: missingUri } },
+  });
+  assertToolJson(refusedUpdate, {
+    errors: [{
+      uri: sourceUri,
+      message: `target: links to a record that does not exist: ${missingUri}`,
+    }],
+  }, { isError: true });
+  const afterUpdate = await client.callTool({
+    name: "get_record",
+    arguments: { uri: sourceUri },
+  });
+  assertToolJson(afterUpdate, beforeUpdateBody);
+
+  const refusedDelete = await client.callTool({
+    name: "delete_record",
+    arguments: { uri: targetUri },
+  });
+  assertToolJson(refusedDelete, {
+    errors: [{ uri: blockerUri, message: "missing required property: target" }],
+  }, { isError: true });
+
+  const removedBlocker = await client.callTool({
+    name: "delete_record",
+    arguments: { uri: blockerUri },
+  });
+  assertToolJson(removedBlocker, { uri: blockerUri });
+  const deletedTarget = await client.callTool({
+    name: "delete_record",
+    arguments: { uri: targetUri },
+  });
+  assertToolJson(deletedTarget, { uri: targetUri });
+
+  const sourceAfterDelete = await client.callTool({
+    name: "get_record",
+    arguments: { uri: sourceUri },
+  });
+  const sourceAfterDeleteBody = asObject(sourceAfterDelete.structuredContent);
+  assert.deepEqual(sourceAfterDeleteBody.value, { name: "Source" });
+  assertToolJson(sourceAfterDelete, sourceAfterDeleteBody);
+
+  const malformedTargetUri = "autofile:///targets/malformed";
+  const malformedBlockerUri = "autofile:///blockers/malformed";
+  const malformedTargetPath = join(dataFolder, "targets", "malformed.json");
+  const malformedBlockerPath = join(dataFolder, "blockers", "malformed.json");
+  await store.createRecord({ type: "targets", key: "malformed", record: {} });
+  await store.createRecord({
+    type: "blockers",
+    key: "malformed",
+    record: { target: malformedTargetUri },
+  });
+  await writeFile(malformedTargetPath, "{\n");
+  const filesBeforeMalformedDelete = await Promise.all([
+    readFile(malformedTargetPath, "utf8"),
+    readFile(malformedBlockerPath, "utf8"),
+  ]);
+
+  const refusedMalformedDelete = await client.callTool({
+    name: "delete_record",
+    arguments: { uri: malformedTargetUri },
+  });
+  assertToolJson(refusedMalformedDelete, {
+    errors: [
+      { uri: malformedBlockerUri, message: "missing required property: target" },
+      { uri: malformedTargetUri, message: "record file cannot be read as JSON" },
+    ],
+  }, { isError: true });
+  assert.deepEqual(await Promise.all([
+    readFile(malformedTargetPath, "utf8"),
+    readFile(malformedBlockerPath, "utf8"),
+  ]), filesBeforeMalformedDelete);
+});
+
 test("tool argument objects reject additional properties before calling the store", async () => {
   const { store } = await makeStore();
   const client = await connect(store);
@@ -572,7 +713,7 @@ test("resources list every stored kind in URI order with their exact metadata", 
   ]);
 });
 
-test("resources/list pages after a deleted cursor URI and rejects a malformed cursor with -32602", async () => {
+test("resources/list pages after a deleted cursor URI and rejects invalid cursors with -32602", async () => {
   const { dataFolder, store } = await makeStore();
   await store.createType({
     type: "items",
@@ -630,6 +771,15 @@ test("resources/list pages after a deleted cursor URI and rejects a malformed cu
 
   await assert.rejects(
     client.request({ method: "resources/list", params: { cursor: "not-a-valid-cursor" } }),
+    (error: unknown) => {
+      assert.ok(error instanceof ProtocolError);
+      assert.equal(error.code, -32602);
+      return true;
+    },
+  );
+  const nonResourceCursor = Buffer.from("not a resource URI", "utf8").toString("base64url");
+  await assert.rejects(
+    client.request({ method: "resources/list", params: { cursor: nonResourceCursor } }),
     (error: unknown) => {
       assert.ok(error instanceof ProtocolError);
       assert.equal(error.code, -32602);

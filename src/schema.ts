@@ -21,7 +21,6 @@ import { annotate, type Annotator } from "@hyperjump/json-schema/annotations/exp
 import {
   annotatedWith,
   annotation,
-  uri as instanceUri,
   value as instanceValue,
 } from "@hyperjump/json-schema/annotated-instance/experimental";
 import { JSE, type ErrorObject, type JSEOutput } from "@hyperjump/json-schema-errors";
@@ -86,6 +85,14 @@ setFormatHandler(FORMAT_KEYWORD, "blob", BLOB_FORMAT);
 /** A compiled schema that returns all readable validation problems. */
 export interface PreparedSchema {
   validate(value: JsonValue): Promise<string[]>;
+  formatFields(value: JsonValue, format: "uri" | "blob"): FormatField[];
+}
+
+/** One instance value reached by a schema's `format` annotation. */
+export interface FormatField {
+  pointer: string;
+  location: string;
+  value: JsonValue;
 }
 
 /** Checks that a declaration schema is safe, valid 2020-12 JSON Schema. */
@@ -125,6 +132,7 @@ async function compileSchema(schema: JsonObject, schemaUri: string): Promise<Pre
     const annotator = await annotate(schemaUri);
     return {
       validate: (value) => validateValue(validator, annotator, value),
+      formatFields: (value, format) => findFormatFields(annotator, value, format),
     };
   } catch (error) {
     if (registered) unregisterSchema(schemaUri);
@@ -136,6 +144,25 @@ async function compileSchema(schema: JsonObject, schemaUri: string): Promise<Pre
       error instanceof Error ? `schema: ${error.message}` : `schema: ${String(error)}`,
     ]);
   }
+}
+
+function findFormatFields(
+  annotator: Annotator,
+  value: JsonValue,
+  format: "uri" | "blob",
+): FormatField[] {
+  const fields: FormatField[] = [];
+  const annotated = annotator(value);
+  for (const node of annotatedWith(annotated, "format", DIALECT)) {
+    if (!annotation<string>(node, "format", DIALECT).includes(format)) continue;
+    const pointer = node.pointer;
+    fields.push({
+      pointer,
+      location: formatInstancePointer(pointer),
+      value: instanceValue<JsonValue>(node),
+    });
+  }
+  return fields;
 }
 
 async function validateValue(
@@ -158,7 +185,7 @@ async function validateValue(
       formats.some((format) => format === "uri" || format === "blob")
       && typeof instanceValue(node) !== "string"
     ) {
-      const location = formatInstanceLocation(instanceUri(node));
+      const location = formatInstancePointer(node.pointer);
       errors.push(location === "" ? "must be a string" : `${location}: must be a string`);
     }
   }
@@ -248,6 +275,15 @@ function formatInstanceLocation(location: string): string {
   const pointer = decodeURIComponent(fragment).replace(/^\//u, "");
   return pointer
     .split("/")
+    .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))
+    .join(".");
+}
+
+function formatInstancePointer(pointer: string): string {
+  if (pointer === "") return "";
+  const parts = pointer.slice(1).split("/");
+  if (parts.some((part) => part === "")) return pointer;
+  return parts
     .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))
     .join(".");
 }

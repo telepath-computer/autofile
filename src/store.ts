@@ -334,6 +334,16 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
         return { errors: validationErrors.map((message) => ({ ...(uri === undefined ? {} : { uri }), message })) };
       }
 
+      const sourceUri = input.key === undefined ? undefined : recordUri(input.type, input.key);
+      const linkErrors = await missingLinkErrors(
+        dataFolder,
+        typeFolder,
+        schema,
+        input.record,
+        sourceUri,
+      );
+      if (linkErrors.length > 0) return { errors: linkErrors };
+
       await mkdir(join(dataFolder, input.type), { recursive: true });
       let key = input.key;
       if (key === undefined) {
@@ -373,6 +383,15 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
         return { errors: validationErrors.map((message) => ({ uri: input.uri, message })) };
       }
 
+      const linkErrors = await missingLinkErrors(
+        dataFolder,
+        typeFolder,
+        schema,
+        value,
+        input.uri,
+      );
+      if (linkErrors.length > 0) return { errors: linkErrors };
+
       await writeJsonAtomically(path, {
         createdAt: stored.value.createdAt,
         updatedAt: new Date().toISOString(),
@@ -390,6 +409,91 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       if (declaration.status !== "found") return declarationRefusal(parsed.type, declaration);
       const path = recordPath(dataFolder, parsed.type, parsed.key);
       if (!await isRegularFile(path)) return refuse("record does not exist", input.uri);
+
+      const changes: Array<{ path: string; record: StoredRecord }> = [];
+      const errors: StoreError[] = [];
+      try {
+        const target = await readStoredRecord(path);
+        if (target.status === "missing") {
+          errors.push({ uri: input.uri, message: "record does not exist" });
+        } else if (target.status === "invalid") {
+          errors.push({ uri: input.uri, message: target.message });
+        }
+      } catch (error) {
+        errors.push({ uri: input.uri, message: recordFileReadError(error) });
+      }
+      const typeEntries = (await readDirectory(typeFolder))
+        .filter((entry) => (
+          entry.isFile()
+          && entry.name.endsWith(".json")
+          && typeNamePattern.test(entry.name.slice(0, -".json".length))
+        ))
+        .sort((left, right) => left.name.localeCompare(right.name));
+      for (const typeEntry of typeEntries) {
+        const type = typeEntry.name.slice(0, -".json".length);
+        const otherDeclaration = await readValidDeclaration(typeFolder, type);
+        if (otherDeclaration === undefined) continue;
+        const schema = await preparedDeclarationSchema(otherDeclaration, typeUri(type));
+        if ("errors" in schema) continue;
+        for (const entry of await recognizedRecordEntries(join(dataFolder, type))) {
+          const key = entry.name.slice(0, -".json".length);
+          const uri = recordUri(type, key);
+          if (uri === input.uri) continue;
+          let stored: ReadResult<StoredRecord>;
+          try {
+            stored = await readStoredRecord(join(dataFolder, type, entry.name));
+          } catch (error) {
+            errors.push({ uri, message: recordFileReadError(error) });
+            continue;
+          }
+          if (stored.status !== "found") {
+            errors.push({
+              uri,
+              message: stored.status === "invalid" ? stored.message : "record does not exist",
+            });
+            continue;
+          }
+
+          const validationErrors = await schema.validate(stored.value.value);
+          if (validationErrors.length > 0) {
+            if (containsStringValue(stored.value.value, input.uri)) {
+              errors.push({
+                uri,
+                message: `record does not match its type and holds ${input.uri} as a string value`,
+              });
+            }
+            continue;
+          }
+
+          const pointers = schema.formatFields(stored.value.value, "uri")
+            .filter((field) => field.value === input.uri)
+            .map(({ pointer }) => pointer);
+          if (pointers.length === 0) continue;
+          const value = removeFields(stored.value.value, pointers);
+          const remainingErrors = await schema.validate(value);
+          if (remainingErrors.length > 0) {
+            errors.push({ uri, message: remainingErrors.join("; ") });
+            continue;
+          }
+          changes.push({
+            path: join(dataFolder, type, entry.name),
+            record: {
+              createdAt: stored.value.createdAt,
+              updatedAt: timestampAfter(stored.value.updatedAt),
+              value,
+            },
+          });
+        }
+      }
+      if (errors.length > 0) {
+        errors.sort((left, right) => {
+          const uriOrder = (left.uri ?? "").localeCompare(right.uri ?? "");
+          return uriOrder === 0 ? left.message.localeCompare(right.message) : uriOrder;
+        });
+        return { errors };
+      }
+
+      for (const change of changes) await writeJsonAtomically(change.path, change.record);
       await unlink(path);
       return { uri: input.uri };
     });
@@ -626,6 +730,47 @@ async function preparedDeclarationSchema(
   return prepareDeclarationSchema(declaration.schema, uri);
 }
 
+async function missingLinkErrors(
+  dataFolder: string,
+  typeFolder: string,
+  schema: PreparedSchema,
+  value: JsonObject,
+  sourceUri?: string,
+): Promise<StoreError[]> {
+  const errors: StoreError[] = [];
+  const existence = new Map<string, boolean>();
+  const checkedFields = new Set<string>();
+  for (const field of schema.formatFields(value, "uri")) {
+    if (typeof field.value !== "string" || !/^autofile:/iu.test(field.value)) continue;
+    const fieldKey = `${field.pointer}\0${field.value}`;
+    if (checkedFields.has(fieldKey)) continue;
+    checkedFields.add(fieldKey);
+    let exists = existence.get(field.value);
+    if (exists === undefined) {
+      exists = await recordExists(dataFolder, typeFolder, field.value);
+      existence.set(field.value, exists);
+    }
+    if (exists) continue;
+    errors.push({
+      ...(sourceUri === undefined ? {} : { uri: sourceUri }),
+      message: `${field.location}: links to a record that does not exist: ${field.value}`,
+    });
+  }
+  return errors;
+}
+
+async function recordExists(
+  dataFolder: string,
+  typeFolder: string,
+  uri: string,
+): Promise<boolean> {
+  const parsed = parseRecordUri(uri);
+  if (parsed === undefined) return false;
+  if (await readValidDeclaration(typeFolder, parsed.type) === undefined) return false;
+  const stored = await readStoredRecord(recordPath(dataFolder, parsed.type, parsed.key));
+  return stored.status === "found";
+}
+
 async function readValidDeclaration(
   typeFolder: string,
   type: string,
@@ -774,6 +919,13 @@ function nextTid(): string {
   return tid;
 }
 
+/** Returns whether a string is the canonical URI of an Autofile resource. */
+export function isResourceUri(uri: string): boolean {
+  return parseRecordUri(uri) !== undefined
+    || typeUriPattern.test(uri)
+    || blobUriPattern.test(uri);
+}
+
 function parseRecordUri(uri: string): { type: string; key: string } | undefined {
   const match = recordUriPattern.exec(uri);
   if (match === null || match[1] === undefined || match[2] === undefined) return undefined;
@@ -862,6 +1014,61 @@ function collectStringValues(value: JsonValue, strings: string[]): void {
   } else if (isJsonObject(value)) {
     for (const item of Object.values(value)) collectStringValues(item, strings);
   }
+}
+
+function containsStringValue(value: JsonValue, expected: string): boolean {
+  if (typeof value === "string") return value === expected;
+  if (Array.isArray(value)) return value.some((item) => containsStringValue(item, expected));
+  return isJsonObject(value)
+    && Object.values(value).some((item) => containsStringValue(item, expected));
+}
+
+function removeFields(value: JsonObject, pointers: string[]): JsonObject {
+  const result = structuredClone(value);
+  const paths = [...new Set(pointers)].map(parseJsonPointer);
+  paths.sort((left, right) => {
+    const leftParent = left.slice(0, -1).join("\0");
+    const rightParent = right.slice(0, -1).join("\0");
+    if (leftParent === rightParent) {
+      const leftIndex = Number(left.at(-1));
+      const rightIndex = Number(right.at(-1));
+      if (Number.isInteger(leftIndex) && Number.isInteger(rightIndex)) {
+        return rightIndex - leftIndex;
+      }
+    }
+    return right.length - left.length;
+  });
+  for (const path of paths) {
+    const field = path.at(-1);
+    if (field === undefined) continue;
+    let parent: JsonValue = result;
+    let parentFound = true;
+    for (const part of path.slice(0, -1)) {
+      let next: JsonValue | undefined;
+      if (Array.isArray(parent)) next = parent[Number(part)];
+      else if (isJsonObject(parent)) next = parent[part];
+      if (next === undefined) {
+        parentFound = false;
+        break;
+      }
+      parent = next;
+    }
+    if (!parentFound) continue;
+    if (Array.isArray(parent)) parent.splice(Number(field), 1);
+    else if (isJsonObject(parent)) delete parent[field];
+  }
+  return result;
+}
+
+function parseJsonPointer(pointer: string): string[] {
+  if (pointer === "") return [];
+  return pointer.slice(1).split("/").map((part) => (
+    part.replaceAll("~1", "/").replaceAll("~0", "~")
+  ));
+}
+
+function timestampAfter(previous: string): string {
+  return new Date(Math.max(Date.now(), new Date(previous).valueOf() + 1)).toISOString();
 }
 
 function refuse(message: string, uri?: string): Refusal {

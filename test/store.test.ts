@@ -411,6 +411,659 @@ test("blob format accepts only lowercase Autofile blob URIs in stage 2", async (
   }
 });
 
+test("record writes check annotated link fields at every depth and ignore plain text URIs", async () => {
+  const { dataFolder, store } = await makeStore();
+  await store.createType({
+    type: "organizations",
+    description: "Organizations.",
+    schema: { type: "object", required: ["name"], properties: { name: { type: "string" } } },
+  });
+  await store.createType({
+    type: "people",
+    description: "People and their links.",
+    schema: {
+      $defs: { link: { type: "string", format: "uri" } },
+      type: "object",
+      required: ["name"],
+      properties: {
+        name: { type: "string" },
+        employer: { $ref: "#/$defs/link" },
+        related: { type: "array", items: { $ref: "#/$defs/link" } },
+        details: {
+          type: "object",
+          properties: { website: { $ref: "#/$defs/link" } },
+        },
+        markdown: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  });
+  await store.createRecord({
+    type: "organizations",
+    key: "existing",
+    record: { name: "Existing" },
+  });
+
+  assert.deepEqual(await store.createRecord({
+    type: "people",
+    key: "valid",
+    record: {
+      name: "Valid links",
+      employer: "autofile:///organizations/existing",
+      related: ["https://example.com/person"],
+      details: { website: "mailto:person@example.com" },
+      markdown: "See [missing](autofile:///organizations/missing).",
+    },
+  }), { uri: "autofile:///people/valid" });
+
+  const danglingUri = "autofile:///organizations/missing";
+  assert.deepEqual(await store.createRecord({
+    type: "people",
+    key: "dangling-ref",
+    record: { name: "Dangling ref", employer: danglingUri },
+  }), {
+    errors: [{
+      uri: "autofile:///people/dangling-ref",
+      message: `employer: links to a record that does not exist: ${danglingUri}`,
+    }],
+  });
+  assert.deepEqual(await store.createRecord({
+    type: "people",
+    key: "dangling-nested",
+    record: { name: "Dangling nested", details: { website: danglingUri } },
+  }), {
+    errors: [{
+      uri: "autofile:///people/dangling-nested",
+      message: `details.website: links to a record that does not exist: ${danglingUri}`,
+    }],
+  });
+  assert.deepEqual(await store.createRecord({
+    type: "people",
+    record: { name: "Dangling generated", related: [danglingUri] },
+  }), {
+    errors: [{
+      message: `related.0: links to a record that does not exist: ${danglingUri}`,
+    }],
+  });
+  const uppercaseSchemeUri = "AUTOFILE:///organizations/missing";
+  assert.deepEqual(await store.createRecord({
+    type: "people",
+    key: "uppercase-scheme",
+    record: { name: "Uppercase scheme", employer: uppercaseSchemeUri },
+  }), {
+    errors: [{
+      uri: "autofile:///people/uppercase-scheme",
+      message: `employer: links to a record that does not exist: ${uppercaseSchemeUri}`,
+    }],
+  });
+  for (const key of ["dangling-ref", "dangling-nested"]) {
+    await assert.rejects(stat(join(dataFolder, "people", `${key}.json`)));
+  }
+
+  const validPath = join(dataFolder, "people", "valid.json");
+  const before = await readFile(validPath, "utf8");
+  assert.deepEqual(await store.updateRecord({
+    uri: "autofile:///people/valid",
+    patch: { related: [danglingUri] },
+  }), {
+    errors: [{
+      uri: "autofile:///people/valid",
+      message: `related.0: links to a record that does not exist: ${danglingUri}`,
+    }],
+  });
+  assert.equal(await readFile(validPath, "utf8"), before);
+});
+
+test("link refusals distinguish an empty property name from the record root", async () => {
+  const { dataFolder, store } = await makeStore();
+  await store.createType({
+    type: "targets",
+    description: "Link targets.",
+    schema: { type: "object" },
+  });
+  await store.createType({
+    type: "empty-fields",
+    description: "Records whose link field has an empty name.",
+    schema: {
+      type: "object",
+      required: [""],
+      properties: { "": { type: "string", format: "uri" } },
+      additionalProperties: false,
+    },
+  });
+  await store.createRecord({ type: "targets", key: "existing", record: {} });
+  const missingUri = "autofile:///targets/missing";
+
+  assert.deepEqual(await store.createRecord({
+    type: "empty-fields",
+    key: "create",
+    record: { "": missingUri },
+  }), {
+    errors: [{
+      uri: "autofile:///empty-fields/create",
+      message: `/: links to a record that does not exist: ${missingUri}`,
+    }],
+  });
+
+  await store.createRecord({
+    type: "empty-fields",
+    key: "update",
+    record: { "": "autofile:///targets/existing" },
+  });
+  const path = join(dataFolder, "empty-fields", "update.json");
+  const before = await readFile(path, "utf8");
+  assert.deepEqual(await store.updateRecord({
+    uri: "autofile:///empty-fields/update",
+    patch: { "": missingUri },
+  }), {
+    errors: [{
+      uri: "autofile:///empty-fields/update",
+      message: `/: links to a record that does not exist: ${missingUri}`,
+    }],
+  });
+  assert.equal(await readFile(path, "utf8"), before);
+});
+
+test("only successful anyOf branches contribute link annotations", async () => {
+  const { store } = await makeStore();
+  const targetUri = "autofile:///targets/existing";
+  const missingUri = "autofile:///targets/missing";
+  await store.createType({
+    type: "targets",
+    description: "Link targets.",
+    schema: { type: "object" },
+  });
+  await store.createType({
+    type: "choices",
+    description: "Values selected through anyOf.",
+    schema: {
+      type: "object",
+      properties: {
+        linked: {
+          anyOf: [
+            { type: "string", format: "uri", pattern: "^autofile:" },
+            { const: "plain" },
+          ],
+        },
+        notALink: {
+          anyOf: [
+            { type: "string", format: "uri", pattern: "^https:" },
+            { enum: [targetUri, missingUri] },
+          ],
+        },
+      },
+      additionalProperties: false,
+    },
+  });
+  await store.createRecord({ type: "targets", key: "existing", record: {} });
+
+  assert.deepEqual(await store.createRecord({
+    type: "choices",
+    key: "failed-branch",
+    record: { linked: "plain", notALink: missingUri },
+  }), { uri: "autofile:///choices/failed-branch" });
+  assert.deepEqual(await store.createRecord({
+    type: "choices",
+    key: "dangling",
+    record: { linked: missingUri, notALink: targetUri },
+  }), {
+    errors: [{
+      uri: "autofile:///choices/dangling",
+      message: `linked: links to a record that does not exist: ${missingUri}`,
+    }],
+  });
+  await store.createRecord({
+    type: "choices",
+    key: "cleanup",
+    record: { linked: targetUri, notALink: targetUri },
+  });
+
+  assert.deepEqual(await store.deleteRecord({ uri: targetUri }), { uri: targetUri });
+  const cleaned = await store.getRecord({ uri: "autofile:///choices/cleanup" });
+  assert.ok("value" in cleaned);
+  assert.deepEqual(cleaned.value, { notALink: targetUri });
+});
+
+test("a link target must be a record of a declared type but may fail its own schema", async () => {
+  const { dataFolder, store } = await makeStore();
+  await store.createType({
+    type: "targets",
+    description: "Link targets.",
+    schema: { type: "object" },
+  });
+  await store.createType({
+    type: "sources",
+    description: "Link sources.",
+    schema: {
+      type: "object",
+      required: ["target"],
+      properties: { target: { type: "string", format: "uri" } },
+      additionalProperties: false,
+    },
+  });
+  await store.createRecord({ type: "targets", key: "invalid", record: { old: true } });
+  await store.updateType({
+    type: "targets",
+    schema: {
+      type: "object",
+      required: ["new"],
+      properties: { new: { type: "boolean" } },
+      additionalProperties: false,
+    },
+  });
+  assert.deepEqual(await store.createRecord({
+    type: "sources",
+    key: "schema-invalid-target",
+    record: { target: "autofile:///targets/invalid" },
+  }), { uri: "autofile:///sources/schema-invalid-target" });
+
+  await mkdir(join(dataFolder, "undeclared"));
+  await writeFile(join(dataFolder, "undeclared", "orphan.json"), `${JSON.stringify({
+    createdAt: "2026-10-07T09:14:00Z",
+    updatedAt: "2026-10-07T09:14:00Z",
+    value: {},
+  }, null, 2)}\n`);
+  const undeclaredUri = "autofile:///undeclared/orphan";
+  assert.deepEqual(await store.createRecord({
+    type: "sources",
+    key: "undeclared-target",
+    record: { target: undeclaredUri },
+  }), {
+    errors: [{
+      uri: "autofile:///sources/undeclared-target",
+      message: `target: links to a record that does not exist: ${undeclaredUri}`,
+    }],
+  });
+
+  await writeFile(join(dataFolder, "targets", "malformed.json"), "{}\n");
+  const malformedUri = "autofile:///targets/malformed";
+  assert.deepEqual(await store.createRecord({
+    type: "sources",
+    key: "malformed-target",
+    record: { target: malformedUri },
+  }), {
+    errors: [{
+      uri: "autofile:///sources/malformed-target",
+      message: `target: links to a record that does not exist: ${malformedUri}`,
+    }],
+  });
+});
+
+test("record writes propagate an operating-system refusal while reading a link target", async () => {
+  const { dataFolder, store } = await makeStore();
+  await store.createType({
+    type: "targets",
+    description: "Link targets.",
+    schema: { type: "object" },
+  });
+  await store.createType({
+    type: "sources",
+    description: "Link sources.",
+    schema: {
+      type: "object",
+      required: ["target"],
+      properties: { target: { type: "string", format: "uri" } },
+      additionalProperties: false,
+    },
+  });
+  const targetUri = "autofile:///targets/denied";
+  const targetPath = join(dataFolder, "targets", "denied.json");
+  const updatedPath = join(dataFolder, "sources", "updated.json");
+  await store.createRecord({ type: "targets", key: "denied", record: {} });
+  await store.createRecord({
+    type: "sources",
+    key: "updated",
+    record: { target: "https://example.com/previous" },
+  });
+  const beforeUpdate = await readFile(updatedPath, "utf8");
+
+  const originalOpen = fsPromises.open;
+  fsPromises.open = (async (...args: Parameters<typeof originalOpen>) => {
+    if (args[0] === targetPath) {
+      throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+    }
+    return originalOpen(...args);
+  }) as typeof fsPromises.open;
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(
+      store.createRecord({
+        type: "sources",
+        key: "created",
+        record: { target: targetUri },
+      }),
+      { code: "EACCES" },
+    );
+    await assert.rejects(
+      store.updateRecord({
+        uri: "autofile:///sources/updated",
+        patch: { target: targetUri },
+      }),
+      { code: "EACCES" },
+    );
+  } finally {
+    fsPromises.open = originalOpen;
+    syncBuiltinESMExports();
+  }
+  await assert.rejects(stat(join(dataFolder, "sources", "created.json")));
+  assert.equal(await readFile(updatedPath, "utf8"), beforeUpdate);
+});
+
+test("delete_record removes annotated links from nested fields and arrays across types", async () => {
+  const { store } = await makeStore();
+  await store.createType({
+    type: "targets",
+    description: "Link targets.",
+    schema: { type: "object" },
+  });
+  await store.createType({
+    type: "contacts",
+    description: "Contacts.",
+    schema: {
+      $defs: { link: { type: "string", format: "uri" } },
+      type: "object",
+      required: ["name"],
+      properties: {
+        name: { type: "string" },
+        employer: { $ref: "#/$defs/link" },
+        related: { type: "array", items: { $ref: "#/$defs/link" } },
+        details: {
+          type: "object",
+          properties: { mentor: { $ref: "#/$defs/link" } },
+        },
+        markdown: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  });
+  await store.createType({
+    type: "projects",
+    description: "Projects.",
+    schema: {
+      type: "object",
+      properties: {
+        sponsor: { type: "string", format: "uri" },
+        references: { type: "array", items: { type: "string", format: "uri" } },
+      },
+      additionalProperties: false,
+    },
+  });
+  const deletedUri = "autofile:///targets/deleted";
+  const keptUri = "autofile:///targets/kept";
+  await store.createRecord({ type: "targets", key: "deleted", record: {} });
+  await store.createRecord({ type: "targets", key: "kept", record: {} });
+  await store.createRecord({
+    type: "contacts",
+    key: "one",
+    record: {
+      name: "One",
+      employer: deletedUri,
+      related: [deletedUri, keptUri, deletedUri, "https://example.com/reference"],
+      details: { mentor: deletedUri },
+      markdown: `The plain text ${deletedUri} remains.`,
+    },
+  });
+  await store.createRecord({
+    type: "projects",
+    key: "one",
+    record: { sponsor: deletedUri, references: [keptUri, deletedUri] },
+  });
+  const contactBefore = await store.getRecord({ uri: "autofile:///contacts/one" });
+  const projectBefore = await store.getRecord({ uri: "autofile:///projects/one" });
+  assert.ok("createdAt" in contactBefore && "createdAt" in projectBefore);
+  await delay(5);
+
+  assert.deepEqual(await store.deleteRecord({ uri: deletedUri }), { uri: deletedUri });
+  assert.match(errorMessages(await store.getRecord({ uri: deletedUri }))[0] ?? "", /does not exist/u);
+  const contactAfter = await store.getRecord({ uri: "autofile:///contacts/one" });
+  const projectAfter = await store.getRecord({ uri: "autofile:///projects/one" });
+  assert.ok("createdAt" in contactAfter && "createdAt" in projectAfter);
+  assert.equal(contactAfter.createdAt, contactBefore.createdAt);
+  assert.equal(projectAfter.createdAt, projectBefore.createdAt);
+  assert.notEqual(contactAfter.updatedAt, contactBefore.updatedAt);
+  assert.notEqual(projectAfter.updatedAt, projectBefore.updatedAt);
+  assert.deepEqual(contactAfter.value, {
+    name: "One",
+    related: [keptUri, "https://example.com/reference"],
+    details: {},
+    markdown: `The plain text ${deletedUri} remains.`,
+  });
+  assert.deepEqual(projectAfter.value, { references: [keptUri] });
+});
+
+test("delete_record refuses every invalid link removal and changes no file", async () => {
+  const { dataFolder, store } = await makeStore();
+  await store.createType({
+    type: "targets",
+    description: "Link targets.",
+    schema: { type: "object" },
+  });
+  for (const type of ["contacts", "projects"]) {
+    await store.createType({
+      type,
+      description: "Required links.",
+      schema: {
+        type: "object",
+        required: ["target"],
+        properties: { target: { type: "string", format: "uri" } },
+        additionalProperties: false,
+      },
+    });
+  }
+  await store.createType({
+    type: "notes",
+    description: "Optional links.",
+    schema: {
+      type: "object",
+      properties: { target: { type: "string", format: "uri" } },
+      additionalProperties: false,
+    },
+  });
+  const targetUri = "autofile:///targets/required";
+  await store.createRecord({ type: "targets", key: "required", record: {} });
+  await store.createRecord({ type: "contacts", key: "one", record: { target: targetUri } });
+  await store.createRecord({ type: "projects", key: "one", record: { target: targetUri } });
+  await store.createRecord({ type: "notes", key: "removable", record: { target: targetUri } });
+  const paths = [
+    join(dataFolder, "contacts", "one.json"),
+    join(dataFolder, "notes", "removable.json"),
+    join(dataFolder, "projects", "one.json"),
+    join(dataFolder, "targets", "required.json"),
+  ];
+  const before = await Promise.all(paths.map((path) => readFile(path, "utf8")));
+
+  const result = await store.deleteRecord({ uri: targetUri });
+  assert.ok("errors" in result);
+  assert.deepEqual(result.errors.map(({ uri }) => uri), [
+    "autofile:///contacts/one",
+    "autofile:///projects/one",
+  ]);
+  assert.ok(result.errors.every(({ message }) => message.includes("target")));
+  assert.deepEqual(
+    await Promise.all(paths.map((path) => readFile(path, "utf8"))),
+    before,
+  );
+});
+
+test("delete_record writes changed records before deleting their target", async () => {
+  const { dataFolder, store } = await makeStore();
+  await store.createType({
+    type: "targets",
+    description: "Link targets.",
+    schema: { type: "object" },
+  });
+  await store.createType({
+    type: "sources",
+    description: "Link sources.",
+    schema: {
+      type: "object",
+      properties: { target: { type: "string", format: "uri" } },
+      additionalProperties: false,
+    },
+  });
+  const targetUri = "autofile:///targets/ordered";
+  const targetPath = join(dataFolder, "targets", "ordered.json");
+  const sourcePath = join(dataFolder, "sources", "one.json");
+  await store.createRecord({ type: "targets", key: "ordered", record: {} });
+  await store.createRecord({ type: "sources", key: "one", record: { target: targetUri } });
+
+  const operations: string[] = [];
+  const originalRename = fsPromises.rename;
+  const originalUnlink = fsPromises.unlink;
+  fsPromises.rename = (async (...args: Parameters<typeof originalRename>) => {
+    if (args[1] === sourcePath) operations.push("write source");
+    return originalRename(...args);
+  }) as typeof fsPromises.rename;
+  fsPromises.unlink = (async (...args: Parameters<typeof originalUnlink>) => {
+    if (args[0] === targetPath) operations.push("delete target");
+    return originalUnlink(...args);
+  }) as typeof fsPromises.unlink;
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(await store.deleteRecord({ uri: targetUri }), { uri: targetUri });
+  } finally {
+    fsPromises.rename = originalRename;
+    fsPromises.unlink = originalUnlink;
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(operations, ["write source", "delete target"]);
+});
+
+test("delete_record is blocked by an invalid record holding the URI or an unreadable record", async () => {
+  const { dataFolder, store } = await makeStore();
+  await store.createType({
+    type: "targets",
+    description: "Link targets.",
+    schema: { type: "object" },
+  });
+  await store.createType({
+    type: "notes",
+    description: "Notes.",
+    schema: { type: "object" },
+  });
+  const targetUri = "autofile:///targets/blocked";
+  await store.createRecord({ type: "targets", key: "blocked", record: {} });
+  await store.createRecord({ type: "notes", key: "invalid", record: { text: targetUri } });
+  await store.updateType({
+    type: "notes",
+    schema: {
+      type: "object",
+      required: ["fixed"],
+      properties: { fixed: { type: "boolean" } },
+      additionalProperties: false,
+    },
+  });
+  const targetPath = join(dataFolder, "targets", "blocked.json");
+  const invalidPath = join(dataFolder, "notes", "invalid.json");
+  const beforeInvalid = [await readFile(targetPath, "utf8"), await readFile(invalidPath, "utf8")];
+
+  assert.deepEqual(await store.deleteRecord({ uri: targetUri }), {
+    errors: [{
+      uri: "autofile:///notes/invalid",
+      message: `record does not match its type and holds ${targetUri} as a string value`,
+    }],
+  });
+  assert.deepEqual(
+    [await readFile(targetPath, "utf8"), await readFile(invalidPath, "utf8")],
+    beforeInvalid,
+  );
+
+  await store.updateRecord({ uri: "autofile:///notes/invalid", patch: { text: null, fixed: true } });
+  const brokenPath = join(dataFolder, "notes", "broken.json");
+  await writeFile(brokenPath, "{\n");
+  const beforeUnreadable = [await readFile(targetPath, "utf8"), await readFile(brokenPath, "utf8")];
+  assert.deepEqual(await store.deleteRecord({ uri: targetUri }), {
+    errors: [{
+      uri: "autofile:///notes/broken",
+      message: "record file cannot be read as JSON",
+    }],
+  });
+  assert.deepEqual(
+    [await readFile(targetPath, "utf8"), await readFile(brokenPath, "utf8")],
+    beforeUnreadable,
+  );
+
+  await writeFile(brokenPath, `${JSON.stringify({
+    createdAt: "2026-10-07T09:14:00Z",
+    updatedAt: "2026-10-07T09:14:00Z",
+    value: { fixed: true },
+  }, null, 2)}\n`);
+  await writeFile(targetPath, "{\n");
+  await store.createType({
+    type: "required-links",
+    description: "Links that cannot be removed.",
+    schema: {
+      type: "object",
+      required: ["target"],
+      properties: { target: { type: "string", format: "uri" } },
+      additionalProperties: false,
+    },
+  });
+  await writeFile(targetPath, `${JSON.stringify({
+    createdAt: "2026-10-07T09:14:00Z",
+    updatedAt: "2026-10-07T09:14:00Z",
+    value: {},
+  }, null, 2)}\n`);
+  await store.createRecord({
+    type: "required-links",
+    key: "blocked",
+    record: { target: targetUri },
+  });
+  await writeFile(targetPath, "{\n");
+  const requiredPath = join(dataFolder, "required-links", "blocked.json");
+  const beforeTargetBlockers = [
+    await readFile(requiredPath, "utf8"),
+    await readFile(targetPath, "utf8"),
+  ];
+  assert.deepEqual(await store.deleteRecord({ uri: targetUri }), {
+    errors: [
+      {
+        uri: "autofile:///required-links/blocked",
+        message: "missing required property: target",
+      },
+      {
+        uri: targetUri,
+        message: "record file cannot be read as JSON",
+      },
+    ],
+  });
+  assert.deepEqual(
+    [await readFile(requiredPath, "utf8"), await readFile(targetPath, "utf8")],
+    beforeTargetBlockers,
+  );
+});
+
+test("delete_record reports an operating-system refusal while reading its target", async () => {
+  const { dataFolder, store } = await makeStore();
+  await store.createType({
+    type: "targets",
+    description: "Link targets.",
+    schema: { type: "object" },
+  });
+  const uri = "autofile:///targets/denied";
+  const path = join(dataFolder, "targets", "denied.json");
+  await store.createRecord({ type: "targets", key: "denied", record: {} });
+  const before = await readFile(path, "utf8");
+
+  const originalOpen = fsPromises.open;
+  fsPromises.open = (async (...args: Parameters<typeof originalOpen>) => {
+    if (args[0] === path) {
+      throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+    }
+    return originalOpen(...args);
+  }) as typeof fsPromises.open;
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(await store.deleteRecord({ uri }), {
+      errors: [{ uri, message: "record file cannot be read: EACCES" }],
+    });
+  } finally {
+    fsPromises.open = originalOpen;
+    syncBuiltinESMExports();
+  }
+  assert.equal(await readFile(path, "utf8"), before);
+});
+
 test("create_record writes the exact envelope and get_record returns it with its URI", async () => {
   const { dataFolder, store } = await makeStore();
   await createTasksType(store);
@@ -636,18 +1289,19 @@ test("find_records pages record files in URI order and advances after a deleted 
     writeFile(join(dataFolder, "tasks", "e.json"), storedRecord("E")),
     writeFile(join(dataFolder, "tasks", "d.json"), storedRecord("D", "unknown")),
     writeFile(join(dataFolder, "tasks", "c.json"), storedRecord("C")),
-    writeFile(join(dataFolder, "tasks", "b.json"), "{\n"),
-    writeFile(join(dataFolder, "tasks", "a.json"), storedRecord("A")),
+    writeFile(join(dataFolder, "tasks", "b.json"), storedRecord("B")),
+    writeFile(join(dataFolder, "tasks", "a.json"), "{\n"),
   ]);
 
   const first = await store.findRecords({ type: "tasks", limit: 2 });
   assert.ok("records" in first && first.cursor !== undefined);
-  assert.deepEqual(first.records.map(({ uri }) => uri), ["autofile:///tasks/a"]);
+  assert.deepEqual(first.records.map(({ uri }) => uri), ["autofile:///tasks/b"]);
   assert.deepEqual(first.errors, [{
-    uri: "autofile:///tasks/b",
+    uri: "autofile:///tasks/a",
     message: "record file cannot be read as JSON",
   }]);
 
+  await writeFile(join(dataFolder, "tasks", "a.json"), storedRecord("A"));
   assert.deepEqual(await store.deleteRecord({ uri: "autofile:///tasks/b" }), {
     uri: "autofile:///tasks/b",
   });
