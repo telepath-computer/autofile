@@ -16,6 +16,11 @@ function getAutofileHome(): string {
   return resolve(process.env.AUTOFILE_HOME ?? join(homedir(), ".autofile"));
 }
 
+/** Returns the path shared stores use to serialize writes between processes. */
+export function getWriteLockPath(): string {
+  return join(getAutofileHome(), "write.lock");
+}
+
 async function readConfig(): Promise<Config> {
   const configPath = join(getAutofileHome(), "config.json");
   let text: string;

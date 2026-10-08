@@ -30,6 +30,12 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/proper-lockfile": "4.1.4",
     "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@hyperjump/json-schema": "1.18.0",
+    "@hyperjump/json-schema-errors": "1.0.0",
+    "proper-lockfile": "4.1.2"
   }
 }
