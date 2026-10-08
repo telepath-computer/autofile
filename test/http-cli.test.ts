@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { open, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { open, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -19,6 +19,8 @@ import {
   StreamableHTTPClientTransport,
   type CallToolResult,
 } from "@modelcontextprotocol/client";
+
+import { openStore } from "../dist/store.js";
 
 const cli = resolve("dist/cli.js");
 const roots: string[] = [];
@@ -166,6 +168,77 @@ function assertToolJson(
   assert.deepEqual(JSON.parse(content.text) as unknown, expected);
   if (options.isError === true) assert.equal(result.isError, true);
   else assert.notEqual(result.isError, true);
+}
+
+interface ResourceNotices {
+  listChanged: number;
+  listeners: Set<() => void>;
+  updated: string[];
+}
+
+interface ResourceNoticeCheckpoint {
+  listChanged: number;
+  updated: number;
+}
+
+function collectResourceNotices(client: Client): ResourceNotices {
+  const notices: ResourceNotices = { listChanged: 0, listeners: new Set(), updated: [] };
+  client.setNotificationHandler("notifications/resources/updated", (notification) => {
+    notices.updated.push(notification.params.uri);
+    for (const listener of notices.listeners) listener();
+  });
+  client.setNotificationHandler("notifications/resources/list_changed", () => {
+    notices.listChanged += 1;
+    for (const listener of notices.listeners) listener();
+  });
+  return notices;
+}
+
+function resourceNoticeCheckpoint(notices: ResourceNotices): ResourceNoticeCheckpoint {
+  return { listChanged: notices.listChanged, updated: notices.updated.length };
+}
+
+async function waitForResourceNoticeCondition(
+  notices: ResourceNotices,
+  condition: () => boolean,
+  message: string,
+): Promise<void> {
+  if (condition()) return;
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(
+        `${message}; received ${JSON.stringify(notices.updated)} and ${String(notices.listChanged)} list changes`,
+      ));
+    }, 10_000);
+    const listener = () => {
+      if (!condition()) return;
+      cleanup();
+      resolve();
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      notices.listeners.delete(listener);
+    };
+    notices.listeners.add(listener);
+  });
+}
+
+async function expectResourceNotices(
+  notices: ResourceNotices,
+  start: ResourceNoticeCheckpoint,
+  expectedUpdated: string[],
+  expectsListChanged: boolean,
+  message: string,
+): Promise<void> {
+  await waitForResourceNoticeCondition(
+    notices,
+    () => (
+      expectedUpdated.every((uri) => notices.updated.slice(start.updated).includes(uri))
+      && (!expectsListChanged || notices.listChanged > start.listChanged)
+    ),
+    message,
+  );
 }
 
 async function stopServer(server: StartedServer, timeout = 5_000): Promise<boolean> {
@@ -466,6 +539,247 @@ test("serve refuses a path exposed by a conditional blob annotation", {
     (await client.listResources()).resources.map(({ uri }) => uri),
     ["autofile:///_types/conditional-assets"],
   );
+});
+
+test("serve publishes watched resource and list changes over HTTP", {
+  timeout: 30_000,
+}, async () => {
+  const root = await temp();
+  const dataFolder = join(root, "data");
+  const store = await openStore({
+    dataFolder,
+    writeLockPath: join(root, "autofile-home", "write.lock"),
+  });
+  await store.createType({
+    type: "tasks",
+    description: "Things to do.",
+    titleField: "title",
+    schema: {
+      type: "object",
+      required: ["title", "status"],
+      properties: {
+        title: { type: "string" },
+        status: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  });
+  await store.createRecord({
+    type: "tasks",
+    key: "watched",
+    record: { title: "Watched", status: "active" },
+  });
+
+  const server = await startServer({ config: { storage: dataFolder } });
+  const otherServer = await startServer({ config: { storage: dataFolder } });
+  const client = await connect(server.endpoint);
+  const other = await connect(otherServer.endpoint);
+  const notices = collectResourceNotices(client);
+  const blobName = `${"c".repeat(64)}.txt`;
+  const blobUri = `autofile:///_blobs/${blobName}`;
+  const resourceSubscriptions = [
+    "autofile:///tasks/watched",
+    "autofile:///tasks/outside",
+    "autofile:///tasks/.ignored",
+    "autofile:///tasks/sentinel",
+    "autofile:///tasks",
+    "autofile:///_types/tasks",
+    "autofile:///_types/watched-type",
+    "autofile:///_types/reborn",
+    "autofile:///_types",
+    blobUri,
+    "autofile:///_blobs",
+    "autofile:///reborn/new",
+    "autofile:///reborn",
+    "autofile:///",
+  ];
+  const subscription = await client.listen({
+    resourceSubscriptions,
+    resourcesListChanged: true,
+  });
+  assert.deepEqual(subscription.honoredFilter, {
+    resourcesListChanged: true,
+    resourceSubscriptions,
+  });
+
+  try {
+    let checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await client.callTool({
+      name: "update_record",
+      arguments: { uri: "autofile:///tasks/watched", patch: { status: "complete" } },
+    }), { uri: "autofile:///tasks/watched" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///tasks/watched",
+      "autofile:///tasks",
+      "autofile:///",
+    ], false, "same-process HTTP change notices did not arrive");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "update_record",
+      arguments: { uri: "autofile:///tasks/watched", patch: { title: "Changed elsewhere" } },
+    }), { uri: "autofile:///tasks/watched" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///tasks/watched",
+      "autofile:///tasks",
+      "autofile:///",
+    ], true, "cross-process HTTP change notices did not arrive");
+
+    const timestamp = new Date().toISOString();
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await writeFile(join(dataFolder, "tasks", "outside.json"), `${JSON.stringify({
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      value: { title: "Outside", status: "active" },
+    }, null, 2)}\n`);
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///tasks/outside",
+      "autofile:///tasks",
+      "autofile:///",
+    ], true, "outside HTTP record notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await writeFile(join(dataFolder, "tasks", ".ignored.json"), "{}\n");
+    assertToolJson(await client.callTool({
+      name: "create_record",
+      arguments: {
+        type: "tasks",
+        key: "sentinel",
+        record: { title: "Sentinel", status: "active" },
+      },
+    }), { uri: "autofile:///tasks/sentinel" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///tasks/sentinel",
+      "autofile:///tasks",
+      "autofile:///",
+    ], true, "the HTTP sentinel change after an ignored file was not reported");
+    assert.equal(
+      notices.updated.slice(checkpoint.updated).includes("autofile:///tasks/.ignored"),
+      false,
+      "an ignored file produced an HTTP resource notice",
+    );
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "delete_record",
+      arguments: { uri: "autofile:///tasks/outside" },
+    }), { uri: "autofile:///tasks/outside" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///tasks/outside",
+      "autofile:///tasks",
+      "autofile:///",
+    ], true, "HTTP record deletion notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "create_type",
+      arguments: {
+        type: "watched-type",
+        description: "Watched declarations.",
+        schema: { type: "object" },
+      },
+    }), { uri: "autofile:///_types/watched-type" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/watched-type",
+      "autofile:///_types",
+      "autofile:///",
+    ], true, "HTTP declaration creation notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "update_type",
+      arguments: { type: "watched-type", description: "Changed declarations." },
+    }), { uri: "autofile:///_types/watched-type", errors: [] });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/watched-type",
+      "autofile:///_types",
+      "autofile:///",
+    ], true, "HTTP declaration change notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "delete_type",
+      arguments: { type: "watched-type" },
+    }), { uri: "autofile:///_types/watched-type" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/watched-type",
+      "autofile:///_types",
+      "autofile:///",
+    ], true, "HTTP declaration deletion notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await mkdir(join(dataFolder, "_blobs"), { recursive: true });
+    await writeFile(join(dataFolder, "_blobs", blobName), "watched blob");
+    await expectResourceNotices(notices, checkpoint, [
+      blobUri,
+      "autofile:///_blobs",
+      "autofile:///",
+    ], true, "HTTP blob creation notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await writeFile(join(dataFolder, "_blobs", blobName), "changed watched blob");
+    await expectResourceNotices(notices, checkpoint, [
+      blobUri,
+      "autofile:///_blobs",
+      "autofile:///",
+    ], false, "HTTP blob change notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await unlink(join(dataFolder, "_blobs", blobName));
+    await expectResourceNotices(notices, checkpoint, [
+      blobUri,
+      "autofile:///_blobs",
+      "autofile:///",
+    ], true, "HTTP blob deletion notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await rm(dataFolder, { recursive: true });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/tasks",
+      "autofile:///_types",
+      "autofile:///",
+      "autofile:///tasks/watched",
+      "autofile:///tasks",
+      "autofile:///",
+    ], true, "HTTP data-folder deletion notices did not arrive");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "create_type",
+      arguments: {
+        type: "reborn",
+        description: "Recreated data.",
+        titleField: "title",
+        schema: {
+          type: "object",
+          required: ["title", "status"],
+          properties: {
+            title: { type: "string" },
+            status: { type: "string" },
+          },
+          additionalProperties: false,
+        },
+      },
+    }), { uri: "autofile:///_types/reborn" });
+    assertToolJson(await other.callTool({
+      name: "create_record",
+      arguments: {
+        type: "reborn",
+        key: "new",
+        record: { title: "New", status: "active" },
+      },
+    }), { uri: "autofile:///reborn/new" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/reborn",
+      "autofile:///_types",
+      "autofile:///",
+      "autofile:///reborn/new",
+      "autofile:///reborn",
+      "autofile:///",
+    ], true, "HTTP notices stopped after data-folder recreation");
+  } finally {
+    await subscription.close();
+  }
 });
 
 test("an HTTP agent can search, patch, invalidate, read resources, and clean linked data", {

@@ -8,6 +8,7 @@ import { createMcpHandler } from "@modelcontextprotocol/server";
 import { normalizeHttpOrigin, type HttpSettings } from "./config.js";
 import { buildServer } from "./server.js";
 import type { Store } from "./store.js";
+import { resourceNotificationUris, watchStore } from "./watch.js";
 
 const MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024;
 const CORS_ALLOW_HEADERS = "Content-Type, MCP-Protocol-Version, Mcp-Method, Mcp-Name";
@@ -21,12 +22,22 @@ export interface RunningHttpServer {
 /** Starts one modern-only Streamable HTTP endpoint around a process-shared store. */
 export async function startHttpServer(
   store: Store,
+  dataFolder: string,
   settings: HttpSettings,
+  onError: (error: Error) => void,
 ): Promise<RunningHttpServer> {
   const handler = createMcpHandler(() => buildServer(store), {
     legacy: "reject",
     maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
+    onerror: onError,
   });
+  const watcher = await watchStore(dataFolder, store, (batch) => {
+    const uris = new Set(batch.changes.flatMap(({ uri }) => resourceNotificationUris(uri)));
+    for (const uri of uris) {
+      handler.notify.resourceUpdated(uri);
+    }
+    if (batch.listChanged) handler.notify.resourcesChanged();
+  }, onError);
   const serveMcp = toNodeHandler(handler, { maxRequestBodySize: MAX_REQUEST_BODY_BYTES });
   const allowedOrigins = new Set(settings.origins);
   const allowedHosts = new Set([
@@ -50,7 +61,7 @@ export async function startHttpServer(
       });
     });
   } catch (error) {
-    await handler.close();
+    await Promise.all([watcher.close(), handler.close()]);
     throw error;
   }
 
@@ -68,8 +79,7 @@ export async function startHttpServer(
   async function closeHttpServer(): Promise<void> {
     httpServer.close();
     httpServer.closeAllConnections();
-    await handler.close();
-    await closed;
+    await Promise.all([watcher.close(), handler.close(), closed]);
   }
 }
 

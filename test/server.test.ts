@@ -115,7 +115,10 @@ test("discovery sends the package version, exact description, capabilities, and 
 
   assert.equal(emptyClient.getServerVersion()?.version, packageJson.version);
   assert.equal(emptyClient.getServerVersion()?.description, serverDescription);
-  assert.deepEqual(emptyClient.getServerCapabilities()?.resources, {});
+  assert.deepEqual(emptyClient.getServerCapabilities()?.resources, {
+    subscribe: true,
+    listChanged: true,
+  });
   assert.equal(
     emptyClient.getInstructions(),
     `${instructions}\n\nTypes: none yet. This list was taken when the session began; call \`list_types\` for types created since.`,
@@ -136,9 +139,7 @@ test("discovery sends the package version, exact description, capabilities, and 
   );
 
   const resources = populatedClient.getServerCapabilities()?.resources;
-  assert.deepEqual(resources, {});
-  assert.ok(resources !== undefined && !("subscribe" in resources));
-  assert.ok(resources !== undefined && !("listChanged" in resources));
+  assert.deepEqual(resources, { subscribe: true, listChanged: true });
 });
 
 test("tools are listed in spec order with exact descriptions and described closed JSON Schemas", async () => {

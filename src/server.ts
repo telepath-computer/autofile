@@ -276,10 +276,10 @@ export async function buildServer(store: Store): Promise<McpServer> {
     async (input) => toolResult(await store.deleteType(input)),
   );
 
-  // The high-level resource API advertises listChanged and returns every
-  // resource at once. Stage 3 needs neither, so these handlers stay at the
-  // low-level boundary where capability flags and cursors remain explicit.
-  server.server.registerCapabilities({ resources: {} });
+  // The high-level resource API returns every resource at once. These
+  // handlers stay at the low-level boundary where cursors remain explicit;
+  // the process-level watcher supplies the advertised change notices.
+  server.server.registerCapabilities({ resources: { subscribe: true, listChanged: true } });
   server.server.setRequestHandler("resources/list", async (request): Promise<ListResourcesResult> => {
     const resources = await store.listResources();
     const cursor = request.params?.cursor;

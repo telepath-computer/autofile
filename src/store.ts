@@ -85,6 +85,9 @@ export interface Store {
   updateType(input: UpdateTypeInput): Promise<UpdateTypeResult | Refusal>;
   deleteType(input: DeleteTypeInput): Promise<UriResult | Refusal>;
   listResources(): Promise<StoreResource[]>;
+  getResourceMetadata(uri: string): Promise<StoreResource | undefined>;
+  listResourceFolder(folder: string): Promise<StoreResource[]>;
+  listTypeResources(type: string): Promise<StoreResource[]>;
   readResource(uri: string): Promise<StoreResourceContents | undefined>;
 }
 
@@ -744,54 +747,86 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
   }
 
   async function listResources(): Promise<StoreResource[]> {
-    const resources: StoreResource[] = [];
     const declarationEntries = await readDirectory(typeFolder);
+    const resources: StoreResource[] = [];
     for (const entry of declarationEntries) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const type = entry.name.slice(0, -".json".length);
-      if (!typeNamePattern.test(type)) continue;
-      const declaration = await readValidDeclaration(typeFolder, type);
-      if (declaration === undefined) continue;
-
-      resources.push({
-        uri: typeUri(type),
-        name: `_types/${type}`,
-        mimeType: "application/json",
-        description: declaration.description,
-      });
-
-      const recordEntries = await recognizedRecordEntries(join(dataFolder, type));
-      for (const recordEntry of recordEntries) {
-        const key = recordEntry.name.slice(0, -".json".length);
-        const stored = await readStoredRecord(join(dataFolder, type, recordEntry.name));
-        if (stored.status !== "found") continue;
-        const title = declaration.titleField === undefined
-          ? undefined
-          : stored.value.value[declaration.titleField];
-        resources.push({
-          uri: recordUri(type, key),
-          name: `${type}/${key}`,
-          ...(typeof title === "string" ? { title } : {}),
-          mimeType: "application/json",
-          lastModified: stored.value.updatedAt,
-        });
-      }
+      resources.push(...await listTypeResources(entry.name.slice(0, -".json".length)));
     }
-
-    for (const entry of await readDirectory(blobFolder)) {
-      if (!entry.isFile() || !BLOB_NAME_PATTERN.test(entry.name)) continue;
-      const size = await regularFileSize(join(blobFolder, entry.name), MAX_BLOB_BYTES);
-      if (size === undefined) continue;
-      resources.push({
-        uri: blobUri(entry.name),
-        name: `_blobs/${entry.name}`,
-        mimeType: mimeTypeForBlob(entry.name),
-        size,
-      });
-    }
+    resources.push(...await listResourceFolder("_blobs"));
 
     resources.sort((left, right) => left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0);
     return resources;
+  }
+
+  async function getResourceMetadata(uri: string): Promise<StoreResource | undefined> {
+    const typeMatch = typeUriPattern.exec(uri);
+    const type = typeMatch?.[1];
+    if (type !== undefined) {
+      const declaration = await readValidDeclaration(typeFolder, type);
+      return declaration === undefined ? undefined : declarationResource(type, declaration);
+    }
+
+    const blobName = BLOB_URI_PATTERN.exec(uri)?.[1];
+    if (blobName !== undefined) {
+      const size = await regularFileSize(join(blobFolder, blobName), MAX_BLOB_BYTES);
+      return size === undefined ? undefined : {
+        uri,
+        name: `_blobs/${blobName}`,
+        mimeType: mimeTypeForBlob(blobName),
+        size,
+      };
+    }
+
+    const record = parseRecordUri(uri);
+    if (record === undefined) return undefined;
+    const [declaration, stored] = await Promise.all([
+      readValidDeclaration(typeFolder, record.type),
+      readStoredRecord(recordPath(dataFolder, record.type, record.key)),
+    ]);
+    if (declaration === undefined || stored.status !== "found") return undefined;
+    return recordResource(record.type, record.key, declaration, stored.value);
+  }
+
+  async function listTypeResources(type: string): Promise<StoreResource[]> {
+    if (!typeNamePattern.test(type)) return [];
+    const declaration = await readValidDeclaration(typeFolder, type);
+    if (declaration === undefined) return [];
+    const resources = [declarationResource(type, declaration)];
+    const recordEntries = await recognizedRecordEntries(join(dataFolder, type));
+    for (const entry of recordEntries) {
+      const key = entry.name.slice(0, -".json".length);
+      const stored = await readStoredRecord(join(dataFolder, type, entry.name));
+      if (stored.status !== "found") continue;
+      resources.push(recordResource(type, key, declaration, stored.value));
+    }
+    return resources;
+  }
+
+  async function listResourceFolder(folder: string): Promise<StoreResource[]> {
+    if (folder === "_types") {
+      const declarationEntries = await readDirectory(typeFolder);
+      const resources: StoreResource[] = [];
+      for (const entry of declarationEntries) {
+        if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+        const type = entry.name.slice(0, -".json".length);
+        const resource = await getResourceMetadata(typeUri(type));
+        if (resource !== undefined) resources.push(resource);
+      }
+      return resources;
+    }
+    if (folder === "_blobs") {
+      const resources: StoreResource[] = [];
+      for (const entry of await readDirectory(blobFolder)) {
+        if (!entry.isFile() || !BLOB_NAME_PATTERN.test(entry.name)) continue;
+        const resource = await getResourceMetadata(blobUri(entry.name));
+        if (resource !== undefined) resources.push(resource);
+      }
+      return resources;
+    }
+    if (!typeNamePattern.test(folder)) return [];
+    const recordPrefix = `autofile:///${folder}/`;
+    return (await listTypeResources(folder)).filter(({ uri }) => uri.startsWith(recordPrefix));
   }
 
   async function readResource(uri: string): Promise<StoreResourceContents | undefined> {
@@ -832,7 +867,37 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
     updateType,
     deleteType,
     listResources,
+    getResourceMetadata,
+    listResourceFolder,
+    listTypeResources,
     readResource,
+  };
+}
+
+function declarationResource(type: string, declaration: TypeDeclaration): StoreResource {
+  return {
+    uri: typeUri(type),
+    name: `_types/${type}`,
+    mimeType: "application/json",
+    description: declaration.description,
+  };
+}
+
+function recordResource(
+  type: string,
+  key: string,
+  declaration: TypeDeclaration,
+  stored: StoredRecord,
+): StoreResource {
+  const title = declaration.titleField === undefined
+    ? undefined
+    : stored.value[declaration.titleField];
+  return {
+    uri: recordUri(type, key),
+    name: `${type}/${key}`,
+    ...(typeof title === "string" ? { title } : {}),
+    mimeType: "application/json",
+    lastModified: stored.updatedAt,
   };
 }
 

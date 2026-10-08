@@ -418,6 +418,6 @@ A process holds the write lock for the whole of each write, including the link r
 
 A write that changes several files makes its changes in an order that keeps the store valid if the process stops partway: a blob is stored before the record that holds it, links to a record are removed before the record is deleted, and blobs that no record holds are deleted last. A process that stops partway can therefore leave links removed from a record that still exists, which deleting the record again completes, or a blob that no record holds, which only takes space.
 
-Each process watches the data folder and sends the change notices described in [Resources](#resources) for every change: those made by the process itself, by other `autofile` processes, and outside Autofile, such as a file restored from a backup.
+Each process watches the data folder and sends the change notices described in [Resources](#resources) for every change: those made by the process itself, by other `autofile` processes, and outside Autofile, such as a file restored from a backup. A notice tells a client to look again, so changes close together may share one notice, and a file created and removed before the watcher sees it may send none; once files stop changing, every change has been followed by a notice.
 
 The rules in [Links](#links) and [Blobs](#blobs) hold while every write goes through Autofile on one machine. A sync service that brings in writes from another machine can leave a link to a deleted record, or a blob field that holds a deleted blob.

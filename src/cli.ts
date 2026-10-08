@@ -15,6 +15,11 @@ import {
 import { startHttpServer } from "./http.js";
 import { buildServer } from "./server.js";
 import { openStore } from "./store.js";
+import {
+  resourceNotificationUris,
+  watchStore,
+  type StoreWatcher,
+} from "./watch.js";
 
 const usage = `Usage:
   autofile
@@ -39,13 +44,7 @@ try {
 
 async function main(args: string[]): Promise<void> {
   if (args.length === 0) {
-    const store = await openStore();
-    serveStdio(() => buildServer(store), {
-      legacy: "reject",
-      transport: new StdioServerTransport(process.stdin, process.stdout, {
-        maxBufferSize: 64 * 1024 * 1024,
-      }),
-    });
+    await runStdio();
     return;
   }
 
@@ -79,6 +78,59 @@ async function main(args: string[]): Promise<void> {
   throw new UsageError();
 }
 
+async function runStdio(): Promise<void> {
+  const settings = await getSettings();
+  const store = await openStore({ dataFolder: settings.storage });
+  let connectedServer: Awaited<ReturnType<typeof buildServer>> | undefined;
+  let watcher: StoreWatcher | undefined;
+  let handle: ReturnType<typeof serveStdio> | undefined;
+  let stopping: Promise<void> | undefined;
+
+  const stop = (): Promise<void> => {
+    stopping ??= Promise.all([
+      watcher?.close() ?? Promise.resolve(),
+      handle?.close() ?? Promise.resolve(),
+    ]).then(() => undefined);
+    return stopping;
+  };
+  watcher = await watchStore(settings.storage, store, async (batch) => {
+    const server = connectedServer;
+    if (server === undefined || !server.isConnected()) return;
+    try {
+      const uris = new Set(batch.changes.flatMap(({ uri }) => resourceNotificationUris(uri)));
+      for (const uri of uris) {
+        await server.server.sendResourceUpdated({ uri });
+      }
+      if (batch.listChanged) await server.server.sendResourceListChanged();
+    } catch (error) {
+      // Closing the connection can race an event already queued by Chokidar.
+      if (server.isConnected()) throw error;
+    }
+  }, reportError);
+  handle = serveStdio(async () => {
+    const server = await buildServer(store);
+    connectedServer = server;
+    return server;
+  }, {
+    legacy: "reject",
+    transport: new StdioServerTransport(process.stdin, process.stdout, {
+      maxBufferSize: 64 * 1024 * 1024,
+    }),
+    onerror: reportError,
+  });
+
+  const requestStop = (): void => {
+    void stop().catch((error: unknown) => {
+      reportError(error);
+      process.exitCode = 1;
+    });
+  };
+  process.stdin.once("end", requestStop);
+  process.stdin.once("close", requestStop);
+  process.once("SIGINT", requestStop);
+  process.once("SIGTERM", requestStop);
+}
+
 async function serve(args: string[]): Promise<void> {
   const overrides = parseServeOptions(args);
   const settings = await getSettings();
@@ -88,7 +140,7 @@ async function serve(args: string[]): Promise<void> {
     ...(overrides.port === undefined ? {} : { port: overrides.port }),
   };
   const store = await openStore({ dataFolder: settings.storage });
-  const running = await startHttpServer(store, http);
+  const running = await startHttpServer(store, settings.storage, http, reportError);
   process.stderr.write(`autofile: listening on ${running.endpoint.href}\n`);
 
   const stop = () => {

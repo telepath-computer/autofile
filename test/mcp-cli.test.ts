@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, open, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -15,6 +15,8 @@ import {
 } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
+import { openStore } from "../dist/store.js";
+
 const cli = resolve("dist/cli.js");
 const roots: string[] = [];
 const serverDescription = "Typed records that agents file and retrieve, kept as JSON files in a folder the user owns.";
@@ -26,29 +28,88 @@ async function temp(): Promise<string> {
   return root;
 }
 
-function environment(root: string, autofileHome: string): Record<string, string> {
+function environment(
+  root: string,
+  autofileHome: string,
+  overrides: Record<string, string> = {},
+): Record<string, string> {
   return {
     AUTOFILE_HOME: autofileHome,
     HOME: root,
     LANG: "C",
     LC_ALL: "C",
     TZ: "UTC",
+    ...overrides,
   };
 }
 
-async function connectCommand(root: string, autofileHome: string, name: string): Promise<Client> {
+async function connectCommand(
+  root: string,
+  autofileHome: string,
+  name: string,
+  options: {
+    args?: string[];
+    command?: string;
+    environment?: Record<string, string>;
+    onStderr?: (text: string) => void;
+  } = {},
+): Promise<Client> {
   const client = new Client(
     { name, version: "1.0.0" },
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [cli],
-    env: environment(root, autofileHome),
+    command: options.command ?? process.execPath,
+    args: options.args ?? [cli],
+    env: environment(root, autofileHome, options.environment),
     stderr: "pipe",
   });
-  await client.connect(transport);
+  let stderr = "";
+  transport.stderr?.on("data", (chunk: unknown) => {
+    const text = String(chunk);
+    stderr += text;
+    options.onStderr?.(text);
+  });
+  try {
+    await client.connect(transport);
+  } catch (error) {
+    throw new Error(
+      `stdio connection failed${stderr === "" ? "" : `: ${stderr.trim()}`}`,
+      { cause: error },
+    );
+  }
   return client;
+}
+
+interface TextLog {
+  listeners: Set<() => void>;
+  text: string;
+}
+
+function appendText(log: TextLog, text: string): void {
+  log.text += text;
+  for (const listener of log.listeners) listener();
+}
+
+async function waitForText(log: TextLog, expected: string, message: string): Promise<void> {
+  const hasExpectedText = (): boolean => log.text.includes(expected);
+  if (hasExpectedText()) return;
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${message}; received ${JSON.stringify(log.text)}`));
+    }, 10_000);
+    const listener = () => {
+      if (!hasExpectedText()) return;
+      cleanup();
+      resolve();
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      log.listeners.delete(listener);
+    };
+    log.listeners.add(listener);
+  });
 }
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -68,6 +129,77 @@ function assertToolJson(
   assert.deepEqual(JSON.parse(content.text) as unknown, expected);
   if (options.isError === true) assert.equal(result.isError, true);
   else assert.notEqual(result.isError, true);
+}
+
+interface ResourceNotices {
+  listChanged: number;
+  listeners: Set<() => void>;
+  updated: string[];
+}
+
+interface ResourceNoticeCheckpoint {
+  listChanged: number;
+  updated: number;
+}
+
+function collectResourceNotices(client: Client): ResourceNotices {
+  const notices: ResourceNotices = { listChanged: 0, listeners: new Set(), updated: [] };
+  client.setNotificationHandler("notifications/resources/updated", (notification) => {
+    notices.updated.push(notification.params.uri);
+    for (const listener of notices.listeners) listener();
+  });
+  client.setNotificationHandler("notifications/resources/list_changed", () => {
+    notices.listChanged += 1;
+    for (const listener of notices.listeners) listener();
+  });
+  return notices;
+}
+
+function resourceNoticeCheckpoint(notices: ResourceNotices): ResourceNoticeCheckpoint {
+  return { listChanged: notices.listChanged, updated: notices.updated.length };
+}
+
+async function waitForResourceNoticeCondition(
+  notices: ResourceNotices,
+  condition: () => boolean,
+  message: string,
+): Promise<void> {
+  if (condition()) return;
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(
+        `${message}; received ${JSON.stringify(notices.updated)} and ${String(notices.listChanged)} list changes`,
+      ));
+    }, 10_000);
+    const listener = () => {
+      if (!condition()) return;
+      cleanup();
+      resolve();
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      notices.listeners.delete(listener);
+    };
+    notices.listeners.add(listener);
+  });
+}
+
+async function expectResourceNotices(
+  notices: ResourceNotices,
+  start: ResourceNoticeCheckpoint,
+  expectedUpdated: string[],
+  expectsListChanged: boolean,
+  message: string,
+): Promise<void> {
+  await waitForResourceNoticeCondition(
+    notices,
+    () => (
+      expectedUpdated.every((uri) => notices.updated.slice(start.updated).includes(uri))
+      && (!expectsListChanged || notices.listChanged > start.listChanged)
+    ),
+    message,
+  );
 }
 
 after(async () => {
@@ -540,6 +672,434 @@ test("the built command refuses a path over 7 MiB with its size and limit", {
   }
 });
 
+test("the built command publishes watched resource and list changes over stdio", {
+  timeout: 30_000,
+}, async () => {
+  const root = await temp();
+  const autofileHome = join(root, "autofile-home");
+  const dataFolder = join(autofileHome, "data");
+  const store = await openStore({
+    dataFolder,
+    writeLockPath: join(autofileHome, "write.lock"),
+  });
+  await store.createType({
+    type: "tasks",
+    description: "Things to do.",
+    titleField: "title",
+    schema: {
+      type: "object",
+      required: ["title", "status"],
+      properties: {
+        title: { type: "string" },
+        status: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  });
+  await store.createRecord({
+    type: "tasks",
+    key: "watched",
+    record: { title: "Watched", status: "active" },
+  });
+
+  const client = await connectCommand(root, autofileHome, "autofile-stdio-watcher");
+  const other = await connectCommand(root, autofileHome, "autofile-stdio-other-writer");
+  const notices = collectResourceNotices(client);
+  const blobName = `${"c".repeat(64)}.txt`;
+  const blobUri = `autofile:///_blobs/${blobName}`;
+  const resourceSubscriptions = [
+    "autofile:///tasks/watched",
+    "autofile:///tasks/outside",
+    "autofile:///tasks/.ignored",
+    "autofile:///tasks/sentinel",
+    "autofile:///tasks",
+    "autofile:///_types/tasks",
+    "autofile:///_types/watched-type",
+    "autofile:///_types/reborn",
+    "autofile:///_types",
+    blobUri,
+    "autofile:///_blobs",
+    "autofile:///reborn/new",
+    "autofile:///reborn",
+    "autofile:///",
+  ];
+  const subscription = await client.listen({
+    resourceSubscriptions,
+    resourcesListChanged: true,
+  });
+  assert.deepEqual(subscription.honoredFilter, {
+    resourcesListChanged: true,
+    resourceSubscriptions,
+  });
+
+  try {
+    let checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await client.callTool({
+      name: "update_record",
+      arguments: { uri: "autofile:///tasks/watched", patch: { status: "complete" } },
+    }), { uri: "autofile:///tasks/watched" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///tasks/watched",
+      "autofile:///tasks",
+      "autofile:///",
+    ], false, "same-process change notices did not arrive");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "update_record",
+      arguments: { uri: "autofile:///tasks/watched", patch: { title: "Changed elsewhere" } },
+    }), { uri: "autofile:///tasks/watched" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///tasks/watched",
+      "autofile:///tasks",
+      "autofile:///",
+    ], true, "cross-process change notices did not arrive");
+
+    const timestamp = new Date().toISOString();
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await writeFile(join(dataFolder, "tasks", "outside.json"), `${JSON.stringify({
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      value: { title: "Outside", status: "active" },
+    }, null, 2)}\n`);
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///tasks/outside",
+      "autofile:///tasks",
+      "autofile:///",
+    ], true, "outside record notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await writeFile(join(dataFolder, "tasks", ".ignored.json"), "{}\n");
+    assertToolJson(await client.callTool({
+      name: "create_record",
+      arguments: {
+        type: "tasks",
+        key: "sentinel",
+        record: { title: "Sentinel", status: "active" },
+      },
+    }), { uri: "autofile:///tasks/sentinel" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///tasks/sentinel",
+      "autofile:///tasks",
+      "autofile:///",
+    ], true, "the sentinel change after an ignored file was not reported");
+    assert.equal(
+      notices.updated.slice(checkpoint.updated).includes("autofile:///tasks/.ignored"),
+      false,
+      "an ignored file produced a resource notice",
+    );
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "delete_record",
+      arguments: { uri: "autofile:///tasks/outside" },
+    }), { uri: "autofile:///tasks/outside" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///tasks/outside",
+      "autofile:///tasks",
+      "autofile:///",
+    ], true, "record deletion notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "create_type",
+      arguments: {
+        type: "watched-type",
+        description: "Watched declarations.",
+        schema: { type: "object" },
+      },
+    }), { uri: "autofile:///_types/watched-type" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/watched-type",
+      "autofile:///_types",
+      "autofile:///",
+    ], true, "declaration creation notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "update_type",
+      arguments: { type: "watched-type", description: "Changed declarations." },
+    }), { uri: "autofile:///_types/watched-type", errors: [] });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/watched-type",
+      "autofile:///_types",
+      "autofile:///",
+    ], true, "declaration change notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "delete_type",
+      arguments: { type: "watched-type" },
+    }), { uri: "autofile:///_types/watched-type" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/watched-type",
+      "autofile:///_types",
+      "autofile:///",
+    ], true, "declaration deletion notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await mkdir(join(dataFolder, "_blobs"), { recursive: true });
+    await writeFile(join(dataFolder, "_blobs", blobName), "watched blob");
+    await expectResourceNotices(notices, checkpoint, [
+      blobUri,
+      "autofile:///_blobs",
+      "autofile:///",
+    ], true, "blob creation notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await writeFile(join(dataFolder, "_blobs", blobName), "changed watched blob");
+    await expectResourceNotices(notices, checkpoint, [
+      blobUri,
+      "autofile:///_blobs",
+      "autofile:///",
+    ], false, "blob change notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await unlink(join(dataFolder, "_blobs", blobName));
+    await expectResourceNotices(notices, checkpoint, [
+      blobUri,
+      "autofile:///_blobs",
+      "autofile:///",
+    ], true, "blob deletion notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await rm(dataFolder, { recursive: true });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/tasks",
+      "autofile:///_types",
+      "autofile:///",
+      "autofile:///tasks/watched",
+      "autofile:///tasks",
+      "autofile:///",
+    ], true, "data-folder deletion notices did not arrive");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "create_type",
+      arguments: {
+        type: "reborn",
+        description: "Recreated data.",
+        titleField: "title",
+        schema: {
+          type: "object",
+          required: ["title", "status"],
+          properties: {
+            title: { type: "string" },
+            status: { type: "string" },
+          },
+          additionalProperties: false,
+        },
+      },
+    }), { uri: "autofile:///_types/reborn" });
+    assertToolJson(await other.callTool({
+      name: "create_record",
+      arguments: {
+        type: "reborn",
+        key: "new",
+        record: { title: "New", status: "active" },
+      },
+    }), { uri: "autofile:///reborn/new" });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/reborn",
+      "autofile:///_types",
+      "autofile:///",
+      "autofile:///reborn/new",
+      "autofile:///reborn",
+      "autofile:///",
+    ], true, "stdio notices stopped after data-folder recreation");
+  } finally {
+    await subscription.close();
+    await Promise.all([client.close(), other.close()]);
+  }
+});
+
+test("declaration listing changes notify an exact record subscription over stdio", {
+  timeout: 30_000,
+}, async () => {
+  const root = await temp();
+  const autofileHome = join(root, "autofile-home");
+  const dataFolder = join(autofileHome, "data");
+  const declarationPath = join(dataFolder, "_types", "tasks.json");
+  const recordUri = "autofile:///tasks/lifecycle";
+  const declaration = `${JSON.stringify({
+    description: "Things to do.",
+    titleField: "title",
+    schema: {
+      type: "object",
+      required: ["title", "status"],
+      properties: {
+        title: { type: "string" },
+        status: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  }, null, 2)}\n`;
+  await mkdir(join(dataFolder, "tasks"), { recursive: true });
+  await writeFile(join(dataFolder, "tasks", "lifecycle.json"), `${JSON.stringify({
+    createdAt: "2026-10-08T12:00:00.000Z",
+    updatedAt: "2026-10-08T12:00:00.000Z",
+    value: { title: "Lifecycle", status: "active" },
+  }, null, 2)}\n`);
+
+  const client = await connectCommand(root, autofileHome, "autofile-stdio-derived-records");
+  const notices = collectResourceNotices(client);
+  const resourceSubscriptions = [
+    recordUri,
+    "autofile:///tasks",
+    "autofile:///_types/tasks",
+    "autofile:///_types",
+    "autofile:///",
+  ];
+  const subscription = await client.listen({
+    resourceSubscriptions,
+    resourcesListChanged: true,
+  });
+  const expectedUris = [
+    "autofile:///_types/tasks",
+    "autofile:///_types",
+    "autofile:///",
+    recordUri,
+    "autofile:///tasks",
+  ];
+  try {
+    let checkpoint = resourceNoticeCheckpoint(notices);
+    await mkdir(join(dataFolder, "_types"));
+    await writeFile(declarationPath, declaration);
+    await expectResourceNotices(
+      notices,
+      checkpoint,
+      expectedUris,
+      true,
+      "declaration creation did not notify the record that became listable",
+    );
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await unlink(declarationPath);
+    await expectResourceNotices(
+      notices,
+      checkpoint,
+      expectedUris,
+      true,
+      "declaration deletion did not notify the record that stopped being listable",
+    );
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await writeFile(declarationPath, declaration);
+    await expectResourceNotices(
+      notices,
+      checkpoint,
+      expectedUris,
+      true,
+      "declaration restoration did not notify the record that became listable",
+    );
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await writeFile(declarationPath, "{\n");
+    await expectResourceNotices(
+      notices,
+      checkpoint,
+      expectedUris,
+      true,
+      "an invalid declaration did not notify the record that stopped being listable",
+    );
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    await writeFile(declarationPath, declaration);
+    await expectResourceNotices(
+      notices,
+      checkpoint,
+      expectedUris,
+      true,
+      "a repaired declaration did not notify the record that became listable",
+    );
+  } finally {
+    await subscription.close();
+    await client.close();
+  }
+});
+
+test("a watcher read error is reported without closing its stdio connection", {
+  timeout: 30_000,
+}, async () => {
+  const root = await temp();
+  const autofileHome = join(root, "autofile-home");
+  const dataFolder = join(autofileHome, "data");
+  const recordPath = join(dataFolder, "tasks", "flaky.json");
+  const store = await openStore({
+    dataFolder,
+    writeLockPath: join(autofileHome, "write.lock"),
+  });
+  await store.createType({
+    type: "tasks",
+    description: "Things to do.",
+    titleField: "title",
+    schema: {
+      type: "object",
+      required: ["title", "status"],
+      properties: {
+        title: { type: "string" },
+        status: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  });
+  await store.createRecord({
+    type: "tasks",
+    key: "flaky",
+    record: { title: "Before", status: "active" },
+  });
+  const stderr: TextLog = { listeners: new Set(), text: "" };
+  const client = await connectCommand(root, autofileHome, "autofile-stdio-read-error", {
+    command: "/usr/bin/setpriv",
+    args: [
+      "--securebits", "+noroot,+noroot_locked",
+      "--bounding-set=-dac_override,-dac_read_search",
+      "--inh-caps=-all",
+      "--ambient-caps=-all",
+      process.execPath,
+      cli,
+    ],
+    onStderr: (text) => appendText(stderr, text),
+  });
+  try {
+    assertToolJson(await client.callTool({ name: "list_types", arguments: {} }), {
+      types: [{
+        uri: "autofile:///_types/tasks",
+        type: "tasks",
+        description: "Things to do.",
+      }],
+    });
+    await chmod(recordPath, 0o000);
+    await writeFile(recordPath, `${JSON.stringify({
+      createdAt: "2026-10-08T12:00:00.000Z",
+      updatedAt: "2026-10-08T12:01:00.000Z",
+      value: { title: "After", status: "active" },
+    }, null, 2)}\n`);
+    await waitForText(
+      stderr,
+      "EACCES: permission denied",
+      "the watcher read error was not written to stderr",
+    );
+
+    try {
+      assertToolJson(await client.callTool({ name: "list_types", arguments: {} }), {
+        types: [{
+          uri: "autofile:///_types/tasks",
+          type: "tasks",
+          description: "Things to do.",
+        }],
+      });
+    } catch (error) {
+      throw new Error(`request after watcher error failed; stderr: ${stderr.text.trim()}`, {
+        cause: error,
+      });
+    }
+  } finally {
+    await chmod(recordPath, 0o600);
+    await client.close();
+  }
+});
+
 test("an agent can complete the full record, link, search, blob, type, and resource lifecycle over stdio", {
   timeout: 60_000,
 }, async () => {
@@ -602,7 +1162,10 @@ test("an agent can complete the full record, link, search, blob, type, and resou
   try {
     bootstrap = await connectCommand(root, autofileHome, "autofile-stdio-scenario-bootstrap");
     assert.equal(bootstrap.getServerVersion()?.description, serverDescription);
-    assert.deepEqual(bootstrap.getServerCapabilities()?.resources, {});
+    assert.deepEqual(bootstrap.getServerCapabilities()?.resources, {
+      subscribe: true,
+      listChanged: true,
+    });
     assert.equal(
       bootstrap.getInstructions(),
       `${baseInstructions}\n\nTypes: none yet. This list was taken when the session began; call \`list_types\` for types created since.`,
