@@ -56,6 +56,11 @@ const findRecordsSchema = fromJsonSchema<FindRecordsInput>({
       default: 50,
       description: "The most results the page returns, counting records and entries in `errors`. From 1 to 200; defaults to 50.",
     },
+    fields: {
+      type: "array",
+      items: { type: "string", minLength: 1 },
+      description: "Top-level fields to return in `value`. All fields are returned when absent; matching still uses the whole record.",
+    },
     cursor: {
       type: "string",
       description: "An opaque cursor returned by the previous page. The next page starts after the last record file that page read, even if that file was deleted.",
@@ -169,7 +174,7 @@ export async function buildServer(store: Store): Promise<McpServer> {
   server.registerTool(
     "find_records",
     {
-      description: "Searches the records of one type and returns matching records in URI order. It reads past nonmatching files until the page has `limit` results or no files remain. A schema-invalid record is listed in `errors` only when it matches the search; a file that cannot be read or parsed as JSON is always listed. Autofile is where the user keeps durable information.",
+      description: "Searches the records of one type and returns matching records in URI order. It reads past nonmatching files until the page has `limit` results, reaches 64 KB of JSON, or no files remain; the size cap never prevents the first result. `fields` selects top-level fields to return, while matching uses the whole record. A schema-invalid record is listed in `errors` only when it matches the search; a file that cannot be read or parsed as JSON is always listed. Autofile is where the user keeps durable information.",
       inputSchema: findRecordsSchema,
     },
     async (input) => toolResult(await store.findRecords(input)),

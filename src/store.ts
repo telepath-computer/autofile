@@ -38,6 +38,7 @@ const blobNamePattern = /^[a-f0-9]{64}(?:\.[a-z0-9]+)?$/u;
 const blobUriPattern = /^autofile:\/\/\/_blobs\/([a-f0-9]{64}(?:\.[a-z0-9]+)?)$/u;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
 const MAX_BLOB_BYTES = 7_340_032;
+const MAX_FIND_RECORDS_PAGE_BYTES = 64 * 1024;
 const tidAlphabet = "234567abcdefghijklmnopqrstuvwxyz";
 const invalidTypeMessage = "type: must use lowercase letters, digits, and hyphens and start with a letter";
 const invalidKeyMessage = "key: must use lowercase letters, digits, and hyphens and start with a letter or digit";
@@ -79,6 +80,7 @@ export interface FindRecordsInput {
   q?: string;
   where?: JsonObject;
   limit?: number;
+  fields?: string[];
   cursor?: string;
 }
 export interface GetRecordInput { uri: string }
@@ -214,6 +216,14 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
       return refuse("limit: must be an integer from 1 to 200");
     }
+    if (
+      input.fields !== undefined
+      && (!Array.isArray(input.fields) || input.fields.some((field) => (
+        typeof field !== "string" || field.length === 0
+      )))
+    ) {
+      return refuse("fields: must be an array of non-empty strings");
+    }
     if (input.cursor !== undefined && typeof input.cursor !== "string") {
       return refuse("cursor: must be a string");
     }
@@ -246,6 +256,7 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
     const firstPageIndex = start < 0 ? entries.length : start;
     const words = input.q?.trim().toLowerCase().split(/\s+/u).filter(Boolean) ?? [];
     const query = new Query<JsonObject>(input.where ?? {}, { scriptEnabled: false });
+    const fields = input.fields === undefined ? undefined : new Set(input.fields);
     const records: RecordResult[] = [];
     const errors: StoreError[] = [];
     let nextIndex = firstPageIndex;
@@ -256,34 +267,63 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       if (current === undefined) break;
       nextIndex += 1;
       const { entry, uri } = current;
-      lastReadUri = uri;
-      let stored: ReadResult<StoredRecord>;
+      let stored: ReadResult<StoredRecord> | undefined;
+      let record: RecordResult | undefined;
+      let resultError: StoreError | undefined;
       try {
         stored = await readStoredRecord(join(dataFolder, input.type, entry.name));
       } catch (error) {
-        errors.push({ uri, message: recordFileReadError(error) });
+        resultError = { uri, message: recordFileReadError(error) };
+      }
+      if (stored !== undefined) {
+        if (stored.status !== "found") {
+          resultError = {
+            uri,
+            message: stored.status === "invalid" ? stored.message : "record does not exist",
+          };
+        } else if (
+          stringValuesContainWords(stored.value.value, words)
+          && query.test(stored.value.value)
+        ) {
+          const validationErrors = await schema.validate(stored.value.value);
+          if (validationErrors.length > 0) {
+            resultError = { uri, message: validationErrors.join("; ") };
+          } else {
+            record = {
+              uri,
+              createdAt: stored.value.createdAt,
+              updatedAt: stored.value.updatedAt,
+              value: fields === undefined
+                ? stored.value.value
+                : Object.fromEntries(
+                  Object.entries(stored.value.value).filter(([field]) => fields.has(field)),
+                ),
+            };
+          }
+        }
+      }
+
+      if (record === undefined && resultError === undefined) {
+        lastReadUri = uri;
         continue;
       }
-      if (stored.status !== "found") {
-        errors.push({
-          uri,
-          message: stored.status === "invalid" ? stored.message : "record does not exist",
-        });
-        continue;
+      const nextRecords = record === undefined ? records : [...records, record];
+      const nextErrors = resultError === undefined ? errors : [...errors, resultError];
+      const nextPageBytes = Buffer.byteLength(JSON.stringify({
+        records: nextRecords,
+        errors: nextErrors,
+      }), "utf8");
+      if (records.length + errors.length > 0 && nextPageBytes > MAX_FIND_RECORDS_PAGE_BYTES) {
+        // Reading the candidate is necessary to know its serialized size, but it belongs to the
+        // next page. Leave its index unconsumed so the cursor resumes before it instead of dropping
+        // it; only a page's first result may exceed the cap.
+        nextIndex -= 1;
+        break;
       }
-      if (!stringValuesContainWords(stored.value.value, words)) continue;
-      if (!query.test(stored.value.value)) continue;
-      const validationErrors = await schema.validate(stored.value.value);
-      if (validationErrors.length > 0) {
-        errors.push({ uri, message: validationErrors.join("; ") });
-        continue;
-      }
-      records.push({
-        uri,
-        createdAt: stored.value.createdAt,
-        updatedAt: stored.value.updatedAt,
-        value: stored.value.value,
-      });
+      if (record !== undefined) records.push(record);
+      if (resultError !== undefined) errors.push(resultError);
+      lastReadUri = uri;
+      if (nextPageBytes >= MAX_FIND_RECORDS_PAGE_BYTES) break;
     }
 
     return {

@@ -1203,6 +1203,38 @@ test("find_records combines recursive word search with MongoDB field matching", 
   }
 });
 
+test("find_records projects top-level fields after matching the whole record", async () => {
+  const { store } = await makeStore();
+  await createTasksType(store);
+  await store.createRecord({
+    type: "tasks",
+    key: "matching",
+    record: {
+      title: "Projected title",
+      status: "active",
+      details: { summary: "Needle in an omitted field" },
+      labels: ["private"],
+    },
+  });
+
+  const projected = await store.findRecords({
+    type: "tasks",
+    q: "needle",
+    where: { status: "active" },
+    fields: ["title", "unknown"],
+  });
+  assert.ok("records" in projected);
+  assert.deepEqual(projected.records.map(({ uri, value }) => ({ uri, value })), [{
+    uri: "autofile:///tasks/matching",
+    value: { title: "Projected title" },
+  }]);
+  assert.deepEqual(projected.errors, []);
+
+  const unknownOnly = await store.findRecords({ type: "tasks", fields: ["unknown"] });
+  assert.ok("records" in unknownOnly);
+  assert.deepEqual(unknownOnly.records.map(({ value }) => value), [{}]);
+});
+
 test("find_records reports only schema-invalid records that match the search", async () => {
   const { dataFolder, store } = await makeStore();
   await createTasksType(store);
@@ -1235,11 +1267,12 @@ test("find_records reports only schema-invalid records that match the search", a
     type: "tasks",
     q: "needle",
     where: { status: "complete" },
+    fields: ["title"],
   });
   assert.ok("records" in result);
   assert.deepEqual(result.records.map(({ uri, value }) => ({ uri, value })), [{
     uri: "autofile:///tasks/matching",
-    value: { title: "Needle", status: "complete" },
+    value: { title: "Needle" },
   }]);
   assert.deepEqual(result.errors.map(({ uri }) => uri), [
     "autofile:///tasks/invalid-matching",
@@ -1247,6 +1280,82 @@ test("find_records reports only schema-invalid records that match the search", a
   ]);
   assert.match(result.errors[0]?.message ?? "", /unexpected|additional/u);
   assert.match(result.errors[1]?.message ?? "", /JSON/u);
+});
+
+test("find_records caps pages by UTF-8 JSON bytes and pages across every result", async () => {
+  const { store } = await makeStore();
+  await store.createType({
+    type: "entries",
+    description: "Long entries.",
+    schema: {
+      type: "object",
+      required: ["body"],
+      properties: { body: { type: "string" } },
+      additionalProperties: false,
+    },
+  });
+  for (const key of ["a", "b", "c", "d", "e"]) {
+    await store.createRecord({
+      type: "entries",
+      key,
+      record: { body: `${key}${"🙂".repeat(9_000)}` },
+    });
+  }
+
+  const uris: string[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  do {
+    const page = await store.findRecords({ type: "entries", limit: 200, cursor });
+    assert.ok("records" in page);
+    assert.equal(page.records.length, 1);
+    assert.deepEqual(page.errors, []);
+    assert.ok(Buffer.byteLength(JSON.stringify({
+      records: page.records,
+      errors: page.errors,
+    }), "utf8") <= 64 * 1024);
+    uris.push(...page.records.map(({ uri }) => uri));
+    cursor = page.cursor;
+    pages += 1;
+  } while (cursor !== undefined);
+
+  assert.equal(pages, 5);
+  assert.deepEqual(uris, [
+    "autofile:///entries/a",
+    "autofile:///entries/b",
+    "autofile:///entries/c",
+    "autofile:///entries/d",
+    "autofile:///entries/e",
+  ]);
+});
+
+test("find_records returns a first result larger than the page size cap", async () => {
+  const { store } = await makeStore();
+  await store.createType({
+    type: "entries",
+    description: "Long entries.",
+    schema: {
+      type: "object",
+      required: ["body"],
+      properties: { body: { type: "string" } },
+      additionalProperties: false,
+    },
+  });
+  await store.createRecord({
+    type: "entries",
+    key: "oversized",
+    record: { body: "x".repeat(70_000) },
+  });
+
+  const page = await store.findRecords({ type: "entries" });
+  assert.ok("records" in page);
+  assert.equal(page.records.length, 1);
+  assert.deepEqual(page.errors, []);
+  assert.ok(Buffer.byteLength(JSON.stringify({
+    records: page.records,
+    errors: page.errors,
+  }), "utf8") > 64 * 1024);
+  assert.equal("cursor" in page, false);
 });
 
 test("find_records reads past nonmatches until it fills the result page", async () => {
@@ -1380,6 +1489,14 @@ test("find_records refuses invalid arguments, operators at any depth, and invali
   for (const limit of [0, 1.5, 201]) {
     assert.deepEqual(await store.findRecords({ type: "tasks", limit }), {
       errors: [{ message: "limit: must be an integer from 1 to 200" }],
+    });
+  }
+  for (const fields of ["title", [""], ["title", 42]]) {
+    assert.deepEqual(await store.findRecords({
+      type: "tasks",
+      fields: fields as unknown as string[],
+    }), {
+      errors: [{ message: "fields: must be an array of non-empty strings" }],
     });
   }
   assert.deepEqual(await store.findRecords({

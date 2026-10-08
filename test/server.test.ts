@@ -149,7 +149,7 @@ test("tools are listed in spec order with exact descriptions and described close
   assert.deepEqual(tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), [
     {
       name: "find_records",
-      description: "Searches the records of one type and returns matching records in URI order. It reads past nonmatching files until the page has `limit` results or no files remain. A schema-invalid record is listed in `errors` only when it matches the search; a file that cannot be read or parsed as JSON is always listed. Autofile is where the user keeps durable information.",
+      description: "Searches the records of one type and returns matching records in URI order. It reads past nonmatching files until the page has `limit` results, reaches 64 KB of JSON, or no files remain; the size cap never prevents the first result. `fields` selects top-level fields to return, while matching uses the whole record. A schema-invalid record is listed in `errors` only when it matches the search; a file that cannot be read or parsed as JSON is always listed. Autofile is where the user keeps durable information.",
       inputSchema: {
         type: "object",
         properties: {
@@ -168,6 +168,11 @@ test("tools are listed in spec order with exact descriptions and described close
             maximum: 200,
             default: 50,
             description: "The most results the page returns, counting records and entries in `errors`. From 1 to 200; defaults to 50.",
+          },
+          fields: {
+            type: "array",
+            items: { type: "string", minLength: 1 },
+            description: "Top-level fields to return in `value`. All fields are returned when absent; matching still uses the whole record.",
           },
           cursor: {
             type: "string",
@@ -356,12 +361,18 @@ test("all ten tools map store results to matching structured and text JSON", asy
 
   const foundRecords = await client.callTool({
     name: "find_records",
-    arguments: { type: "tasks", q: "dentist", where: { status: "active" } },
+    arguments: {
+      type: "tasks",
+      q: "active",
+      where: { status: "active" },
+      fields: ["title", "unknown"],
+    },
   });
   const found = asObject(foundRecords.structuredContent);
   assert.ok(Array.isArray(found.records));
   assert.equal(found.records.length, 1);
   assert.equal(asObject(found.records[0]).uri, "autofile:///tasks/book-dentist");
+  assert.deepEqual(asObject(found.records[0]).value, { title: "Book dentist" });
   assert.deepEqual(found.errors, []);
   assertToolJson(foundRecords, found);
 
@@ -460,6 +471,54 @@ test("find_records returns complete records and error-only pages as successful r
     const refusal = await client.callTool({ name: "find_records", arguments: argumentsValue });
     assertToolJson(refusal, expected, { isError: true });
   }
+});
+
+test("find_records enforces byte-capped paging through MCP", async () => {
+  const { store } = await makeStore();
+  await store.createType({
+    type: "entries",
+    description: "Long entries.",
+    schema: {
+      type: "object",
+      required: ["body"],
+      properties: { body: { type: "string" } },
+      additionalProperties: false,
+    },
+  });
+  for (const key of ["a", "b", "c"]) {
+    await store.createRecord({
+      type: "entries",
+      key,
+      record: { body: `${key}${"🙂".repeat(9_000)}` },
+    });
+  }
+  const client = await connect(store);
+
+  const uris: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const result = await client.callTool({
+      name: "find_records",
+      arguments: { type: "entries", limit: 200, ...(cursor === undefined ? {} : { cursor }) },
+    });
+    const page = asObject(result.structuredContent);
+    assert.ok(Array.isArray(page.records));
+    assert.ok(Array.isArray(page.errors));
+    assert.equal(page.records.length, 1);
+    assert.ok(Buffer.byteLength(JSON.stringify({
+      records: page.records,
+      errors: page.errors,
+    }), "utf8") <= 64 * 1024);
+    uris.push(...page.records.map((record) => String(asObject(record).uri)));
+    cursor = typeof page.cursor === "string" ? page.cursor : undefined;
+    assertToolJson(result, page);
+  } while (cursor !== undefined);
+
+  assert.deepEqual(uris, [
+    "autofile:///entries/a",
+    "autofile:///entries/b",
+    "autofile:///entries/c",
+  ]);
 });
 
 test("tool refusals are errors, accepted type changes with record errors are not", async () => {
