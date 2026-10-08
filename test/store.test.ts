@@ -421,20 +421,39 @@ test("create_record writes the exact envelope and get_record returns it with its
     record: { title: "Book dentist", status: "active" },
   }), { uri: "autofile:///tasks/book-dentist" });
   const record = await store.getRecord({ uri: "autofile:///tasks/book-dentist" });
-  assert.ok("created" in record);
-  assert.match(record.created, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u);
-  assert.equal(record.updated, record.created);
+  assert.ok("createdAt" in record);
+  assert.match(record.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u);
+  assert.equal(record.updatedAt, record.createdAt);
   assert.deepEqual(record.value, { title: "Book dentist", status: "active" });
   assert.equal(
     await readFile(join(dataFolder, "tasks", "book-dentist.json"), "utf8"),
-    `${JSON.stringify({ created: record.created, updated: record.updated, value: record.value }, null, 2)}\n`,
+    `${JSON.stringify({ createdAt: record.createdAt, updatedAt: record.updatedAt, value: record.value }, null, 2)}\n`,
   );
   assert.deepEqual(record, {
     uri: "autofile:///tasks/book-dentist",
-    created: record.created,
-    updated: record.updated,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
     value: { title: "Book dentist", status: "active" },
   });
+});
+
+test("record files with legacy created and updated fields are invalid", async () => {
+  const { dataFolder, store } = await makeStore();
+  await createTasksType(store);
+  const uri = "autofile:///tasks/legacy-times";
+  await writeFile(join(dataFolder, "tasks", "legacy-times.json"), `${JSON.stringify({
+    created: "2026-10-07T09:14:00Z",
+    updated: "2026-10-07T09:14:00Z",
+    value: { title: "Legacy times", status: "active" },
+  }, null, 2)}\n`);
+
+  assert.match(errorMessages(await store.getRecord({ uri }))[0] ?? "", /valid record/u);
+  assert.deepEqual(await store.findRecords({ type: "tasks" }), {
+    records: [],
+    errors: [{ uri, message: "record file does not contain a valid record" }],
+  });
+  assert.equal((await store.listResources()).some((resource) => resource.uri === uri), false);
+  assert.equal(await store.readResource(uri), undefined);
 });
 
 test("find_records combines recursive word search with MongoDB field matching", async () => {
@@ -542,18 +561,18 @@ test("find_records reports only schema-invalid records that match the search", a
   const timestamp = "2026-10-07T09:14:00Z";
   await Promise.all([
     writeFile(join(dataFolder, "tasks", "invalid-filtered-by-q.json"), `${JSON.stringify({
-      created: timestamp,
-      updated: timestamp,
+      createdAt: timestamp,
+      updatedAt: timestamp,
       value: { title: "Haystack", status: "complete", unexpected: true },
     }, null, 2)}\n`),
     writeFile(join(dataFolder, "tasks", "invalid-filtered-by-where.json"), `${JSON.stringify({
-      created: timestamp,
-      updated: timestamp,
+      createdAt: timestamp,
+      updatedAt: timestamp,
       value: { title: "Needle with the wrong status", status: "unknown" },
     }, null, 2)}\n`),
     writeFile(join(dataFolder, "tasks", "invalid-matching.json"), `${JSON.stringify({
-      created: timestamp,
-      updated: timestamp,
+      createdAt: timestamp,
+      updatedAt: timestamp,
       value: { title: "Needle in an invalid record", status: "complete", unexpected: true },
     }, null, 2)}\n`),
     writeFile(join(dataFolder, "tasks", "unreadable.json"), "{\n"),
@@ -609,8 +628,8 @@ test("find_records pages record files in URI order and advances after a deleted 
   await createTasksType(store);
   const timestamp = "2026-10-07T09:14:00Z";
   const storedRecord = (title: string, status = "active") => `${JSON.stringify({
-    created: timestamp,
-    updated: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
     value: { title, status },
   }, null, 2)}\n`;
   await Promise.all([
@@ -652,8 +671,8 @@ test("find_records returns at most 50 results by default", async () => {
   await Promise.all(Array.from({ length: 51 }, async (_, index) => {
     const key = `item-${String(index).padStart(2, "0")}`;
     await writeFile(join(dataFolder, "tasks", `${key}.json`), `${JSON.stringify({
-      created: timestamp,
-      updated: timestamp,
+      createdAt: timestamp,
+      updatedAt: timestamp,
       value: { title: key, status: "active" },
     }, null, 2)}\n`);
   }));
@@ -776,8 +795,8 @@ test("find_records reports an operating-system read refusal and continues", asyn
     assert.deepEqual(result, {
       records: [{
         uri: kept.uri,
-        created: kept.created,
-        updated: kept.updated,
+        createdAt: kept.createdAt,
+        updatedAt: kept.updatedAt,
         value: kept.value,
       }],
       errors: [{
@@ -888,7 +907,7 @@ test("record writes are refused without changing files unless the complete value
   }))[0] ?? "", /type.*does not exist/u);
 });
 
-test("update_record applies JSON Merge Patch and preserves created while changing updated", async () => {
+test("update_record applies JSON Merge Patch and preserves createdAt while changing updatedAt", async () => {
   const { dataFolder, store } = await makeStore();
   await createTasksType(store);
   await store.createRecord({
@@ -902,7 +921,7 @@ test("update_record applies JSON Merge Patch and preserves created while changin
     },
   });
   const before = await store.getRecord({ uri: "autofile:///tasks/merge" });
-  assert.ok("created" in before);
+  assert.ok("createdAt" in before);
   await delay(5);
 
   assert.deepEqual(await store.updateRecord({
@@ -914,9 +933,9 @@ test("update_record applies JSON Merge Patch and preserves created while changin
     },
   }), { uri: "autofile:///tasks/merge" });
   const afterRecord = await store.getRecord({ uri: "autofile:///tasks/merge" });
-  assert.ok("created" in afterRecord);
-  assert.equal(afterRecord.created, before.created);
-  assert.notEqual(afterRecord.updated, before.updated);
+  assert.ok("createdAt" in afterRecord);
+  assert.equal(afterRecord.createdAt, before.createdAt);
+  assert.notEqual(afterRecord.updatedAt, before.updatedAt);
   assert.deepEqual(afterRecord.value, {
     title: "Merge me",
     status: "complete",
@@ -926,8 +945,8 @@ test("update_record applies JSON Merge Patch and preserves created while changin
   assert.equal(
     await readFile(join(dataFolder, "tasks", "merge.json"), "utf8"),
     `${JSON.stringify({
-      created: afterRecord.created,
-      updated: afterRecord.updated,
+      createdAt: afterRecord.createdAt,
+      updatedAt: afterRecord.updatedAt,
       value: afterRecord.value,
     }, null, 2)}\n`,
   );
@@ -1044,8 +1063,8 @@ test("refused updates and unreadable record files return errors without overwrit
   }))[0] ?? "", /JSON/u);
 
   await writeFile(join(dataFolder, "tasks", "spoofed.json"), `${JSON.stringify({
-    created: "2026-10-07T09:14:00Z",
-    updated: "2026-10-07T09:14:00Z",
+    createdAt: "2026-10-07T09:14:00Z",
+    updatedAt: "2026-10-07T09:14:00Z",
     value: { title: "Spoofed", status: "active" },
     uri: "https://example.com/spoofed",
     error: "fake",
@@ -1055,8 +1074,8 @@ test("refused updates and unreadable record files return errors without overwrit
   }))[0] ?? "", /valid record/u);
 
   await writeFile(join(dataFolder, "tasks", "bad-time.json"), `${JSON.stringify({
-    created: "2026-02-31T00:00:00Z",
-    updated: "2026-10-07T24:00:00Z",
+    createdAt: "2026-02-31T00:00:00Z",
+    updatedAt: "2026-10-07T24:00:00Z",
     value: { title: "Impossible time", status: "active" },
   }, null, 2)}\n`);
   assert.match(errorMessages(await store.getRecord({
@@ -1070,7 +1089,7 @@ test("invalid UTF-8 and BOM-prefixed declarations and records are not exposed", 
   const recordUri = "autofile:///tasks/malformed-utf8";
   const recordPath = join(dataFolder, "tasks", "malformed-utf8.json");
   await writeFile(recordPath, Buffer.concat([
-    Buffer.from('{"created":"2026-10-07T09:14:00Z","updated":"2026-10-07T09:14:00Z","value":{"title":"'),
+    Buffer.from('{"createdAt":"2026-10-07T09:14:00Z","updatedAt":"2026-10-07T09:14:00Z","value":{"title":"'),
     Buffer.from([0xff]),
     Buffer.from('","status":"active"}}\n'),
   ]));
@@ -1083,7 +1102,7 @@ test("invalid UTF-8 and BOM-prefixed declarations and records are not exposed", 
   const bomRecordUri = "autofile:///tasks/bom-prefixed";
   await writeFile(join(dataFolder, "tasks", "bom-prefixed.json"), Buffer.concat([
     bom,
-    Buffer.from('{"created":"2026-10-07T09:14:00Z","updated":"2026-10-07T09:14:00Z","value":{"title":"BOM","status":"active"}}\n'),
+    Buffer.from('{"createdAt":"2026-10-07T09:14:00Z","updatedAt":"2026-10-07T09:14:00Z","value":{"title":"BOM","status":"active"}}\n'),
   ]));
   await writeFile(join(dataFolder, "_types", "bom-type.json"), Buffer.concat([
     bom,
@@ -1116,8 +1135,8 @@ test("resource reads reject symlinked storage directories and final files", asyn
     schema: { type: "object" },
   }, null, 2)}\n`;
   const recordText = `${JSON.stringify({
-    created: timestamp,
-    updated: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
     value: { title: "Outside the store" },
   }, null, 2)}\n`;
   const blobName = `${"a".repeat(64)}.pdf`;
@@ -1313,8 +1332,8 @@ test("resources enforce recognized files but keep schema-invalid stored envelope
   const timestamp = "2026-10-07T09:14:00Z";
   const blobDirectoryName = `${"d".repeat(64)}.pdf`;
   const validEnvelope = `${JSON.stringify({
-    created: timestamp,
-    updated: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
     value: { status: "complete" },
   }, null, 2)}\n`;
   await mkdir(join(dataFolder, "_blobs"), { recursive: true });
@@ -1366,8 +1385,8 @@ test("record readers ignore names and locations Autofile could not have written"
   const { dataFolder, store } = await makeStore();
   await createTasksType(store);
   const invalidRecord = `${JSON.stringify({
-    created: "2026-10-07T09:14:00Z",
-    updated: "2026-10-07T09:14:00Z",
+    createdAt: "2026-10-07T09:14:00Z",
+    updatedAt: "2026-10-07T09:14:00Z",
     value: { title: "Invalid", status: "unknown" },
   }, null, 2)}\n`;
   await writeFile(join(dataFolder, "tasks", ".temporary.json"), invalidRecord);

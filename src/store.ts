@@ -107,8 +107,8 @@ export interface FindRecordsResult {
   cursor?: string;
 }
 export interface RecordResult extends UriResult {
-  created: string;
-  updated: string;
+  createdAt: string;
+  updatedAt: string;
   value: JsonObject;
   error?: string;
 }
@@ -146,8 +146,8 @@ interface TypeDeclaration {
 }
 
 interface StoredRecord {
-  created: string;
-  updated: string;
+  createdAt: string;
+  updatedAt: string;
   value: JsonObject;
 }
 
@@ -280,8 +280,8 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       }
       records.push({
         uri,
-        created: stored.value.created,
-        updated: stored.value.updated,
+        createdAt: stored.value.createdAt,
+        updatedAt: stored.value.updatedAt,
         value: stored.value.value,
       });
     }
@@ -308,8 +308,8 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
     const validationErrors = await schema.validate(stored.value.value);
     const result: RecordResult = {
       uri: input.uri,
-      created: stored.value.created,
-      updated: stored.value.updated,
+      createdAt: stored.value.createdAt,
+      updatedAt: stored.value.updatedAt,
       value: stored.value.value,
     };
     if (validationErrors.length > 0) result.error = validationErrors.join("; ");
@@ -346,8 +346,8 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       const uri = recordUri(input.type, key);
       const now = new Date().toISOString();
       await writeJsonAtomically(recordPath(dataFolder, input.type, key), {
-        created: now,
-        updated: now,
+        createdAt: now,
+        updatedAt: now,
         value: input.record,
       });
       return { uri };
@@ -374,8 +374,8 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       }
 
       await writeJsonAtomically(path, {
-        created: stored.value.created,
-        updated: new Date().toISOString(),
+        createdAt: stored.value.createdAt,
+        updatedAt: new Date().toISOString(),
         value,
       });
       return { uri: input.uri };
@@ -540,7 +540,7 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
           name: `${type}/${key}`,
           ...(typeof title === "string" ? { title } : {}),
           mimeType: "application/json",
-          lastModified: stored.value.updated,
+          lastModified: stored.value.updatedAt,
         });
       }
     }
@@ -1005,8 +1005,8 @@ function isTypeDeclaration(value: unknown): value is TypeDeclaration {
 function isStoredRecord(value: unknown): value is StoredRecord {
   if (!isJsonObject(value)) return false;
   if (Object.keys(value).length !== 3) return false;
-  if (!["created", "updated", "value"].every((key) => Object.hasOwn(value, key))) return false;
-  return isTimestamp(value.created) && isTimestamp(value.updated) && isJsonObject(value.value);
+  if (!["createdAt", "updatedAt", "value"].every((key) => Object.hasOwn(value, key))) return false;
+  return isTimestamp(value.createdAt) && isTimestamp(value.updatedAt) && isJsonObject(value.value);
 }
 
 function isTimestamp(value: JsonValue | undefined): value is string {

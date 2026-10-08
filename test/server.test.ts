@@ -180,7 +180,7 @@ test("tools are listed in spec order with exact descriptions and described close
     },
     {
       name: "get_record",
-      description: "Returns one record by URI: its `uri`, `created` and `updated` times, and `value`. A record that does not match its type is still returned, with what must change in `error`.",
+      description: "Returns one record by URI: its `uri`, `createdAt` and `updatedAt` times, and `value`. A record that does not match its type is still returned, with what must change in `error`.",
       inputSchema: {
         type: "object",
         properties: { uri: { type: "string", description: "The URI of the record." } },
@@ -372,8 +372,8 @@ test("all ten tools map store results to matching structured and text JSON", asy
   const record = asObject(gotRecord.structuredContent);
   assert.equal(record.uri, "autofile:///tasks/book-dentist");
   assert.deepEqual(record.value, { title: "Book dentist", status: "active" });
-  assert.equal(typeof record.created, "string");
-  assert.equal(record.updated, record.created);
+  assert.equal(typeof record.createdAt, "string");
+  assert.equal(record.updatedAt, record.createdAt);
   assertToolJson(gotRecord, record);
 
   const updatedRecord = await client.callTool({
@@ -436,8 +436,8 @@ test("find_records returns complete records and error-only pages as successful r
   assertToolJson(recordPage, {
     records: [{
       uri: stored.uri,
-      created: stored.created,
-      updated: stored.updated,
+      createdAt: stored.createdAt,
+      updatedAt: stored.updatedAt,
       value: stored.value,
     }],
     errors: [],
@@ -528,7 +528,7 @@ test("resources list every stored kind in URI order with their exact metadata", 
     record: { title: "Book dentist", status: "active" },
   });
   const storedRecord = await store.getRecord({ uri: "autofile:///tasks/book-dentist" });
-  assert.ok("updated" in storedRecord);
+  assert.ok("updatedAt" in storedRecord);
   const blobName = `${"a".repeat(64)}.pdf`;
   const blob = Buffer.from("%PDF-1.7\nAutofile test\n", "utf8");
   const unknownBlobName = `${"c".repeat(64)}.madeup`;
@@ -567,7 +567,7 @@ test("resources list every stored kind in URI order with their exact metadata", 
       name: "tasks/book-dentist",
       title: "Book dentist",
       mimeType: "application/json",
-      annotations: { lastModified: storedRecord.updated },
+      annotations: { lastModified: storedRecord.updatedAt },
     },
   ]);
 });
@@ -589,8 +589,8 @@ test("resources/list pages after a deleted cursor URI and rejects a malformed cu
   await Promise.all(Array.from({ length: 205 }, async (_, index) => {
     const key = `item-${String(index).padStart(3, "0")}`;
     await writeFile(join(dataFolder, "items", `${key}.json`), `${JSON.stringify({
-      created: timestamp,
-      updated: timestamp,
+      createdAt: timestamp,
+      updatedAt: timestamp,
       value: { name: `Item ${String(index)}` },
     }, null, 2)}\n`);
   }));

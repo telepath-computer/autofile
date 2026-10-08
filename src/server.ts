@@ -176,7 +176,7 @@ export async function buildServer(store: Store): Promise<McpServer> {
   server.registerTool(
     "get_record",
     {
-      description: "Returns one record by URI: its `uri`, `created` and `updated` times, and `value`. A record that does not match its type is still returned, with what must change in `error`.",
+      description: "Returns one record by URI: its `uri`, `createdAt` and `updatedAt` times, and `value`. A record that does not match its type is still returned, with what must change in `error`.",
       inputSchema: getRecordSchema,
     },
     async (input) => toolResult(await store.getRecord(input)),

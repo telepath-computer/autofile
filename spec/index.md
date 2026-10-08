@@ -12,8 +12,8 @@ A record is stored in the file `<type>/<key>.json`, in the folder for its type. 
 
 ```json
 {
-  "created": "2026-10-07T09:14:00Z",
-  "updated": "2026-10-07T09:20:00Z",
+  "createdAt": "2026-10-07T09:14:00Z",
+  "updatedAt": "2026-10-07T09:20:00Z",
   "value": {
     "name": "Priya Narayan",
     "employer": "autofile:///organizations/acme",
@@ -22,7 +22,7 @@ A record is stored in the file `<type>/<key>.json`, in the folder for its type. 
 }
 ```
 
-Autofile sets `created` when it creates the record and `updated` whenever the record changes, as UTC times in the [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) format. The times are kept in the file because the times kept by the file system change when a file is copied. The tools that write records change only `value`.
+Autofile sets `createdAt` when it creates the record and `updatedAt` whenever the record changes, as UTC times in the [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) format. The times are kept in the file because the times kept by the file system change when a file is copied. The tools that write records change only `value`.
 
 ### URIs
 
@@ -140,7 +140,7 @@ Every record, type declaration and blob is an MCP resource at its URI:
 | Type declaration | `autofile:///_types/<type>` | `_types/<type>` | `application/json` | The file as stored, in `text` |
 | Blob | `autofile:///_blobs/<hash>.<ext>` | `_blobs/<hash>.<ext>` | Given by the extension, or `application/octet-stream` when the extension is unknown | The bytes, base64-encoded, in `blob` |
 
-MCP requires a `name` for every resource and leaves `title` optional, and clients show the `name` when there is no `title`. The `name` is the part of the URI after `autofile:///`, which is unique. A record is listed with the time it last changed, its `updated` time, in `annotations.lastModified`, and, when its type has a `titleField`, with its title in `title`. A type declaration is listed with the description of the type in `description`, and a blob with its size in bytes in `size`. Entries in `resources/list` look like this:
+MCP requires a `name` for every resource and leaves `title` optional, and clients show the `name` when there is no `title`. The `name` is the part of the URI after `autofile:///`, which is unique. A record is listed with the time it last changed, its `updatedAt` time, in `annotations.lastModified`, and, when its type has a `titleField`, with its title in `title`. A type declaration is listed with the description of the type in `description`, and a blob with its size in bytes in `size`. Entries in `resources/list` look like this:
 
 ```json
 { "uri": "autofile:///contacts/priya-narayan", "name": "contacts/priya-narayan", "title": "Priya Narayan", "mimeType": "application/json", "annotations": { "lastModified": "2026-10-07T09:20:00Z" } }
@@ -210,8 +210,8 @@ Results are ordered by URI. A page reads record files in that order until it has
   "records": [
     {
       "uri": "autofile:///tasks/3jzfcijpj2z2a",
-      "created": "2026-10-07T09:14:00Z",
-      "updated": "2026-10-07T09:14:00Z",
+      "createdAt": "2026-10-07T09:14:00Z",
+      "updatedAt": "2026-10-07T09:14:00Z",
       "value": { "title": "Book the dentist", "status": "active" }
     }
   ],
@@ -233,8 +233,8 @@ Returns one record, in the same shape as an item of `records` from [`find_record
 ```json
 {
   "uri": "autofile:///tasks/3jzfcijpj2z2b",
-  "created": "2026-10-07T09:14:00Z",
-  "updated": "2026-10-07T09:14:00Z",
+  "createdAt": "2026-10-07T09:14:00Z",
+  "updatedAt": "2026-10-07T09:14:00Z",
   "value": { "title": "Call the bank", "status": "waiting" },
   "error": "status: must be one of the allowed values"
 }
