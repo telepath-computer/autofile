@@ -1,110 +1,75 @@
 # Autofile
 
-> ⚠️ **Experimental.** Early-stage software; the config format and CLI may
-> change without notice. Pin exact versions if you depend on it.
-
-Predictable filing for agents.
-
-Autofile is a place for agents to file durable information, optimized for
-hands-off input and retrieval. Data is stored in a *vault*: a folder of
-markdown notes and other files, governed by an `autofile.yml` that says what
-each folder holds and what its notes must satisfy. Its categories and
-conventions are customized per user.
-
-The config can govern a whole folder or one corner of a folder you already
-have, so an existing Obsidian vault adopts it a path at a time — nothing
-you have not declared is Autofile's business.
+Autofile makes it easy for agents to store information in a structured, unambiguous way, and makes that information available to the services and interfaces that want to use it and show it.
 
 Autofile is designed for:
 
-- **No ambiguity on input.** What you declare has a specific, well-defined
-  place and clear instructions for how it is filed.
-- **Efficient retrieval.** What you have typed is searchable by the
-  methods agents already use well: keyword search, property matching,
-  filenames, links, and normal filesystem traversal.
-- **Plain files, no lock-in.** A vault is an ordinary folder: Obsidian
-  opens it, Dropbox syncs it, git diffs it, any file server serves it.
+- **No ambiguity on input.** Every kind of information has one defined place and type, with clear instructions for how it is filed.
+- **Efficient retrieval.** Agents find what they need by keyword search, by matching on typed properties, and by following links between records.
+- **Plain files, no lock-in.** Records are JSON files you own, and any agent, MCP server or interface can read, use and show them.
 
-## Get started
+Autofile is an [MCP](https://modelcontextprotocol.io) server. Agents use it through the tools and resources it serves.
 
-Install the CLI, then write a config in a folder of your choice and check
-it:
+## Install
+
+Autofile needs Node.js 24 or later.
 
 ```sh
 npm install -g @telepath-computer/autofile
-
-cd my-vault
-autofile init
-autofile check
 ```
 
-`init` writes an `autofile.yml` that declares nothing and documents the
-format in comments, so the first `check` passes whether the folder is
-empty or holds twenty thousand notes. `check` validates the vault —
-findings one per line, non-zero exit on violations.
+This installs the `autofile` command.
 
-Then install the skill, so an agent can file and retrieve on your behalf:
+## Connect an agent
+
+An MCP client starts Autofile itself by running `autofile`, and talks to it over stdio. For Claude Code:
 
 ```sh
-npx skills add telepath-computer/autofile
+claude mcp add autofile --scope user -- autofile
 ```
 
-Shape the vault with your agent: the paths and their descriptions are the
-filing system, so decide them together.
+For another client, add an MCP server whose command is `autofile`, with no arguments.
 
-## The config
+Autofile starts with no types. Ask your agent to file something: it proposes a type, such as `contact` with the fields a contact needs, and creates it once you agree. It then files records of that type, and finds them again by search, by field value, or by following links between records.
 
-Declare the folders you want governed. Each says what belongs there, and
-may add rules the notes must satisfy:
+## Where records are kept
 
-```yaml
-version: 1
+Autofile keeps records in `~/.autofile/data`, as one JSON file per record in a folder for each type:
 
-folders:
-  - path: contacts
-    description: |
-      People and organizations. One note per person or organization.
-    schema:
-      required: [title, kind]
-      properties:
-        title: { type: string }
-        kind: { enum: [person, organization] }
-    body: none
-
-  - path: daily-notes
-    description: |
-      One note per day.
-    filename_pattern: '^\d{4}-\d{2}-\d{2}$'
+```
+~/.autofile/data/
+  _types/contact.json          the declaration of the type contact
+  contact/priya-narayan.json   a record of that type
+  _blobs/9f86d081…0a08.pdf     a file stored with a record
 ```
 
-Descriptions are filing instructions, not documentation — they are what an
-agent reads to decide where something goes. Rules are optional. A folder entry
-governs its subtree; a more specific entry replaces it wholesale, with no
-settings inherited or merged.
+The files are plain JSON, so you can read them, back them up, or edit them by hand. To keep them in another folder:
 
-Add `strict: true` when the config completely describes the vault, and any
-file outside a declared path becomes a violation.
+```sh
+autofile set storage ~/Documents/Autofile
+```
 
-### Property types
+Setting `storage` moves no files. Clients use the new folder the next time they start Autofile, and `autofile serve` once it is restarted. [Commands](spec/index.md#commands) lists the other settings.
 
-Obsidian's property types map onto ordinary JSON Schema, with two formats
-Autofile adds:
+## Serve over HTTP
 
-| Property | Schema |
-| --- | --- |
-| Text | `type: string` |
-| List | `type: array`, `items: { type: string }` |
-| Number | `type: number` |
-| Checkbox | `type: boolean` |
-| Date | `type: string, format: date` |
-| Date & time | `type: string, format: datetime` |
-| A link | `type: string, format: internal-link` |
+For clients that connect over HTTP, such as a web page, run:
 
-`datetime` exists because JSON Schema's own `date-time` demands a timezone
-offset that Obsidian does not write; `internal-link` types a link, and
-`check` separately reports the ones pointing at nothing.
+```sh
+autofile serve
+```
 
-## Spec
+This serves the same tools and resources at `http://127.0.0.1:7319/mcp` until stopped. Autofile does not authenticate HTTP clients: anything that can reach the address can read and change every record. It therefore listens only on this machine by default, and accepts requests from web pages only when they are served from this machine. [Serving over HTTP](spec/index.md#serving-over-http) explains how to change the address, the port, and the web pages it accepts.
 
-[`spec/index.md`](https://github.com/telepath-computer/autofile/blob/main/spec/index.md)
-is authoritative: the vault format, the CLI, and what the skill must cover.
+## Specification
+
+[spec/index.md](spec/index.md) describes Autofile in full: records, types, links, stored files, the MCP tools and resources, and the commands.
+
+## Development
+
+```sh
+npm install
+npm test
+```
+
+`npm test` builds Autofile and runs the tests.

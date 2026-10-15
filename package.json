@@ -1,6 +1,6 @@
 {
   "name": "@telepath-computer/autofile",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Predictable filing for agents.",
   "license": "MIT",
   "repository": {
@@ -13,9 +13,6 @@
   "type": "module",
   "bin": {
     "autofile": "./dist/cli.js"
-  },
-  "exports": {
-    ".": "./dist/index.js"
   },
   "files": [
     "dist"
@@ -31,16 +28,21 @@
   "engines": {
     "node": ">=24"
   },
-  "dependencies": {
-    "@telepath-computer/vault-server": "^0.4.0",
-    "ajv": "^8.17.1",
-    "ajv-formats": "^3.0.1",
-    "js-yaml": "^4.1.0",
-    "picocolors": "^1.1.1"
-  },
   "devDependencies": {
-    "@types/js-yaml": "^4.0.9",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@types/mime-types": "3.0.1",
     "@types/node": "^24.0.0",
+    "@types/proper-lockfile": "4.1.4",
     "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@hyperjump/json-schema": "1.18.0",
+    "@hyperjump/json-schema-errors": "1.0.0",
+    "@modelcontextprotocol/node": "2.1.1",
+    "@modelcontextprotocol/server": "2.3.1",
+    "chokidar": "5.0.0",
+    "mime-types": "3.0.1",
+    "mingo": "7.2.4",
+    "proper-lockfile": "4.1.2"
   }
 }

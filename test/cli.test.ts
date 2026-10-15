@@ -1,23 +1,35 @@
+/** Exercises the built command through its process, filesystem, and stream boundaries. */
+
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
-import { createServer, type Server as NetServer } from "node:net";
-import { mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 
-import { parseConfig } from "../dist/config.js";
-import { starterConfig } from "../dist/starter.js";
-
 const cli = resolve("dist/cli.js");
-const fixture = resolve("test/fixtures/vault");
-const golden = resolve("test/fixtures/expected-report.txt");
-const initSpec = resolve("spec/init.yml");
-const env: NodeJS.ProcessEnv = { LANG: "C", LC_ALL: "C", TZ: "UTC" };
+const roots: string[] = [];
+const usage = `Usage:
+  autofile
+  autofile serve [--host <host>] [--port <port>]
+  autofile set <setting> <value> [<value>...]
+  autofile get <setting>
+  autofile unset <setting>
+`;
 
-interface Run { stdout: string; stderr: string; code: number }
+interface RunOptions {
+  autofileHome?: string;
+  cwd?: string;
+  home: string;
+}
 
-async function run(args: string[], cwd?: string): Promise<Run> {
+interface RunResult {
+  stdout: string;
+  stderr: string;
+  code: number;
+}
+
+async function run(args: string[], options: RunOptions): Promise<RunResult> {
   // This managed test environment discards nested child-process pipes, so
   // capture through ordinary files. The CLI still sees non-TTY streams and
   // the byte assertions remain exact.
@@ -27,9 +39,17 @@ async function run(args: string[], cwd?: string): Promise<Run> {
   const stderrPath = join(capture, "stderr");
   const stdoutFile = await open(stdoutPath, "w");
   const stderrFile = await open(stderrPath, "w");
+  const env: NodeJS.ProcessEnv = {
+    HOME: options.home,
+    LANG: "C",
+    LC_ALL: "C",
+    TZ: "UTC",
+  };
+  if (options.autofileHome !== undefined) env.AUTOFILE_HOME = options.autofileHome;
+
   const code = await new Promise<number>((done, reject) => {
     const child = spawn(process.execPath, [cli, ...args], {
-      cwd,
+      cwd: options.cwd,
       env,
       stdio: ["ignore", stdoutFile.fd, stderrFile.fd],
     });
@@ -47,286 +67,491 @@ async function run(args: string[], cwd?: string): Promise<Run> {
   return { stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8"), code };
 }
 
-const roots: string[] = [];
-after(async () => {
-  for (const root of roots) await rm(root, { recursive: true, force: true });
-});
-
 async function temp(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "autofile-cli-"));
   roots.push(root);
   return root;
 }
 
-const usage = "Usage: autofile <command> [path]\n\nPredictable filing for agents — initialize, check, and serve Autofile vaults.\n\n  init         create an empty Autofile configuration\n  check        validate the vault and report findings\n  serve        serve the vault over HTTP\n  path         vault folder (default: current directory)\n  --host HOST  host to bind (serve only)\n  --port PORT  port to bind (serve only)\n  --help       show this help\n  --version    print the version\n";
-const initReport = "Initialized an Autofile vault.\n\n  autofile.yml\n";
-
-test("init writes spec/init.yml byte-for-byte and a fresh vault checks clean", async () => {
-  const root = await temp();
-  assert.deepEqual(await run(["init"], root), { stdout: initReport, stderr: "", code: 0 });
-  const normative = await readFile(initSpec, "utf8");
-  assert.equal(starterConfig, normative);
-  assert.equal(await readFile(join(root, "autofile.yml"), "utf8"), normative);
-  const parsed = parseConfig(starterConfig);
-  assert.ok(parsed.ok);
-  assert.equal(parsed.config.version, 1);
-  assert.equal(parsed.config.strict, false);
-  assert.equal(parsed.config.linkFormat, "wikilink");
-  assert.equal(parsed.config.filenamePattern, undefined);
-  assert.deepEqual(parsed.config.folders, []);
-  assert.deepEqual(await run(["check"], root), { stdout: "✓ 0 files\n", stderr: "", code: 0 });
+after(async () => {
+  for (const root of roots) await rm(root, { recursive: true, force: true });
 });
 
-test("init among existing files makes no claims and checks clean", async () => {
+test("get storage prints the default data folder", async () => {
   const root = await temp();
-  await writeFile(join(root, "loose.txt"), "existing\n");
-  await mkdir(join(root, ".obsidian"));
-  await writeFile(join(root, ".obsidian", "workspace.json"), "{}\n");
-  assert.equal((await run(["init"], root)).code, 0);
-  assert.deepEqual(await run(["check"], root), { stdout: "✓ 0 files\n", stderr: "", code: 0 });
-});
+  const autofileHome = join(root, "autofile-home");
 
-test("init refuses to overwrite and leaves the existing config byte-identical", async () => {
-  const root = await temp();
-  await writeFile(join(root, "autofile.yml"), "version: 1\n");
-  const before = await readFile(join(root, "autofile.yml"));
-  assert.deepEqual(await run(["init"], root), {
-    stdout: "",
-    stderr: "✗ autofile.yml already exists; init never overwrites.\n",
-    code: 1,
-  });
-  assert.deepEqual(await readFile(join(root, "autofile.yml")), before);
-});
-
-test("check reports folder rules, counts governed and strict-coverage files, and warnings do not affect exit status", async () => {
-  const root = await temp();
-  await mkdir(join(root, "contacts"));
-  await writeFile(join(root, "autofile.yml"), `version: 1
-strict: true
-folders:
-  - path: contacts
-    description: Contacts.
-    extensions: [md]
-    schema:
-      type: object
-      required: [title]
-      properties:
-        title: { type: string }
-`);
-  await writeFile(join(root, "contacts", "bad.md"), "---\ntitle: 7\nfriend: '[[contacts/missing]]'\n---\n[Missing](missing)\n");
-  await writeFile(join(root, "contacts", "attachment.txt"), "wrong extension\n");
-  await writeFile(join(root, "outside.txt"), "strict coverage\n");
-  assert.deepEqual(await run(["check"], root), {
-    stdout: "✗ contacts/attachment.txt  extensions: txt is not among the extensions this folder accepts\n✗ contacts/bad.md          link_format: [Missing](missing) must use wikilink format\n✗ contacts/bad.md          schema: title must be a string\n✗ outside.txt              coverage: no folder entry accounts for this file\n! contacts/bad.md          resolve: [Missing](missing) does not exist\n! contacts/bad.md          resolve: [[contacts/missing]] does not exist\n\n4 violations · 2 warnings · 3 files\n",
+  assert.deepEqual(await run(["get", "storage"], { autofileHome, home: root }), {
+    stdout: `${join(autofileHome, "data")}\n`,
     stderr: "",
-    code: 1,
+    code: 0,
   });
-
-  await rm(join(root, "contacts", "attachment.txt"));
-  await rm(join(root, "outside.txt"));
-  await writeFile(join(root, "contacts", "missing.md"), "---\ntitle: Found\n---\n");
-  await writeFile(join(root, "contacts", "bad.md"), "---\ntitle: Repaired\nfriend: '[[contacts/missing]]'\n---\n[[contacts/missing]]\n");
-  assert.deepEqual(await run(["check"], root), { stdout: "✓ 2 files\n", stderr: "", code: 0 });
 });
 
-test("a config finding names a folder entry by its path", async () => {
-  const root = await temp();
-  await writeFile(join(root, "autofile.yml"), "version: 1\nfolders:\n  - path: contacts\n    shema: {}\n");
-  assert.deepEqual(await run(["check"], root), {
-    stdout: "✗ autofile.yml  config: folders contacts has an unknown key \"shema\"\n\n1 violation · 0 files\n",
+test("the default Autofile folder is ~/.autofile", async () => {
+  const home = await temp();
+
+  assert.deepEqual(await run(["get", "storage"], { home }), {
+    stdout: `${join(home, ".autofile", "data")}\n`,
     stderr: "",
-    code: 1,
+    code: 0,
   });
 });
 
-test("the committed golden fixture is exact and deterministic", async () => {
-  const expected = await readFile(golden, "utf8");
-  const first = await run(["check", fixture]);
-  const second = await run(["check", fixture]);
-  assert.deepEqual(first, { stdout: expected, stderr: "", code: 1 });
-  assert.deepEqual(second, first);
-  assert.doesNotMatch(first.stdout, /[\x1b\r]/u);
-});
-
-test("help, version, empty argv, and unknown argv use exact streams", async () => {
-  assert.deepEqual(await run(["--help"]), { stdout: usage, stderr: "", code: 0 });
-  assert.deepEqual(await run([]), { stdout: "", stderr: usage, code: 1 });
-  assert.deepEqual(await run(["unknown"]), { stdout: "", stderr: usage, code: 1 });
-  const pkg = JSON.parse(await readFile(resolve("package.json"), "utf8")) as { version: string };
-  assert.deepEqual(await run(["--version"]), { stdout: `${pkg.version}\n`, stderr: "", code: 0 });
-});
-
-test("missing config stops on stderr, and init does not create its path", async () => {
+test("invalid config JSON reports its path without a stack trace", async () => {
   const root = await temp();
-  assert.deepEqual(await run(["check"], root), {
+  const autofileHome = join(root, "autofile-home");
+  const configPath = join(autofileHome, "config.json");
+  await mkdir(autofileHome);
+  await writeFile(configPath, "{\n");
+
+  assert.deepEqual(await run(["get", "storage"], { autofileHome, home: root }), {
     stdout: "",
-    stderr: "✗ autofile.yml not found; this folder is not an Autofile vault.\n",
+    stderr: `autofile: ${configPath}: invalid JSON\n`,
     code: 1,
   });
-  const result = await run(["init", "absent/vault"], root);
-  assert.equal(result.stdout, "");
-  assert.equal(result.code, 1);
-  assert.match(result.stderr, /^✗ ENOENT: .+\n$/u);
-  await assert.rejects(stat(join(root, "absent")));
 });
 
-test("large reports survive an early-closing stdout consumer", async () => {
+test("a non-string storage setting reports its config path without a stack trace", async () => {
   const root = await temp();
-  await writeFile(join(root, "autofile.yml"), "version: 1\nstrict: true\n");
-  await Promise.all(Array.from({ length: 2500 }, (_, index) => writeFile(join(root, `${index}.txt`), "x")));
-  const result = await new Promise<{ code: number; stderr: string }>((done) => {
-    const child = spawn(process.execPath, [cli, "check"], { cwd: root, env });
-    let stderr = "";
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => stderr += chunk);
-    child.stdout.once("data", () => child.stdout.destroy());
-    child.on("close", (code) => done({ code: code ?? -1, stderr }));
-  });
-  assert.deepEqual(result, { code: 1, stderr: "" });
-});
+  const autofileHome = join(root, "autofile-home");
+  const configPath = join(autofileHome, "config.json");
+  await mkdir(autofileHome);
+  await writeFile(configPath, "{\n  \"storage\": 42\n}\n");
 
-test("serve stops before binding when the config is missing or invalid", async () => {
-  const root = await temp();
-  assert.deepEqual(await run(["serve"], root), {
+  assert.deepEqual(await run(["get", "storage"], { autofileHome, home: root }), {
     stdout: "",
-    stderr: "✗ autofile.yml not found; this folder is not an Autofile vault.\n",
+    stderr: `autofile: ${configPath}: storage must be a string\n`,
     code: 1,
   });
-  await writeFile(join(root, "autofile.yml"), "version: 1\nfolders:\n  - path: notes\n    shema: {}\n");
-  assert.deepEqual(await run(["serve"], root), {
+});
+
+test("set storage creates the Autofile folder and writes an absolute path exactly", async () => {
+  const root = await temp();
+  const autofileHome = join(root, "missing", "autofile-home");
+  const storage = join(root, "missing", "records");
+
+  assert.deepEqual(await run(["set", "storage", storage], { autofileHome, home: root }), {
     stdout: "",
-    stderr: "✗ autofile.yml: folders notes has an unknown key \"shema\"\n",
-    code: 1,
+    stderr: "",
+    code: 0,
   });
-});
-
-interface RunningServe {
-  child: ChildProcess;
-  stdoutPath: string;
-  stderrPath: string;
-  startup: string;
-  stop(): Promise<void>;
-}
-
-async function startServe(args: string[], cwd?: string): Promise<RunningServe> {
-  const capture = await mkdtemp(join(tmpdir(), "autofile-serve-capture-"));
-  roots.push(capture);
-  const stdoutPath = join(capture, "stdout");
-  const stderrPath = join(capture, "stderr");
-  const stdoutFile = await open(stdoutPath, "w");
-  const stderrFile = await open(stderrPath, "w");
-  const child = spawn(process.execPath, [cli, ...args], {
-    cwd,
-    env,
-    stdio: ["ignore", stdoutFile.fd, stderrFile.fd],
-  });
-  await Promise.all([stdoutFile.close(), stderrFile.close()]);
-  const closed = new Promise<void>((resolveClose, reject) => {
-    child.once("error", reject);
-    child.once("close", () => resolveClose());
-  });
-  const startup = await waitForOutput(stdoutPath, /^url:    http:\/\/[^\n]+$/mu, closed, stderrPath);
-  return {
-    child,
-    stdoutPath,
-    stderrPath,
-    startup,
-    async stop() {
-      child.kill("SIGINT");
-      await closed;
-    },
-  };
-}
-
-async function waitForOutput(
-  path: string,
-  pattern: RegExp,
-  closed: Promise<void>,
-  stderrPath?: string,
-): Promise<string> {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    const output = await readFile(path, "utf8");
-    if (pattern.test(output)) return output;
-    const ended = await Promise.race([closed.then(() => true), new Promise<false>((resolveWait) => {
-      setTimeout(() => resolveWait(false), 20);
-    })]);
-    if (ended) {
-      const stderr = stderrPath === undefined ? "" : await readFile(stderrPath, "utf8");
-      assert.fail(`serve exited before expected output: ${stderr}`);
-    }
-  }
-  assert.fail(`timed out waiting for ${String(pattern)}`);
-}
-
-async function reservePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolveListen, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolveListen);
-  });
-  const address = server.address();
-  assert.ok(address !== null && typeof address === "object");
-  const port = address.port;
-  await new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
-  return port;
-}
-
-async function occupyDefaultPort(): Promise<NetServer | undefined> {
-  const server = createServer();
-  return new Promise((resolveListen, reject) => {
-    server.once("error", (error: NodeJS.ErrnoException) => {
-      if (error.code === "EADDRINUSE") resolveListen(undefined);
-      else reject(error);
-    });
-    server.listen(4747, "127.0.0.1", () => resolveListen(server));
-  });
-}
-
-test("serve omits an absent port, forwards an explicit one, and prints resolved startup details", async (t) => {
-  const root = await temp();
-  await mkdir(join(root, "notes"));
-  await writeFile(join(root, "autofile.yml"), "version: 1\nfolders:\n  - path: notes\n    description: Notes.\n");
-  await writeFile(join(root, "notes", "one.md"), "One.\n");
-  const pkg = JSON.parse(await readFile(resolve("package.json"), "utf8")) as { version: string };
-  const blocker = await occupyDefaultPort();
-  if (blocker !== undefined) t.after(() => new Promise<void>((done) => blocker.close(() => done())));
-
-  const automatic = await startServe(["serve", root, "--host", "127.0.0.1"]);
-  const automaticPort = Number(/url:    http:\/\/127\.0\.0\.1:(\d+)/u.exec(automatic.startup)?.[1]);
-  assert.notEqual(automaticPort, 4747);
-  assert.equal(automatic.startup, [
-    `autofile ${pkg.version}`,
-    `vault:  ${await realpath(root)} (1 note)`,
-    `url:    http://127.0.0.1:${automaticPort}`,
-    "",
-  ].join("\n"));
-  await automatic.stop();
-
-  const explicitPort = await reservePort();
-  const explicit = await startServe(["serve", root, "--port", String(explicitPort)]);
-  assert.match(explicit.startup, new RegExp(`^url:    http://127\\.0\\.0\\.1:${explicitPort}$`, "mu"));
-  await explicit.stop();
-});
-
-test("serve reports an invalid reload and keeps the previous config serving", async () => {
-  const root = await temp();
-  await mkdir(join(root, "notes"));
-  await writeFile(join(root, "autofile.yml"), "version: 1\nfolders:\n  - path: notes\n    description: Notes.\n");
-  await writeFile(join(root, "notes", "one.md"), "One.\n");
-  const running = await startServe(["serve", root]);
-  const url = /^url:    (http:\/\/[^\n]+)$/mu.exec(running.startup)?.[1];
-  assert.ok(url);
-
-  const temporary = join(root, ".autofile.yml.replacement");
-  await writeFile(temporary, "version: 1\nfolders:\n  - path: notes\n    description: Notes.\n    shema: {}\n");
-  await rename(temporary, join(root, "autofile.yml"));
-  const stderr = await waitForOutput(
-    running.stderrPath,
-    /autofile\.yml was not reloaded/u,
-    new Promise<void>((resolveClose) => running.child.once("close", () => resolveClose())),
+  assert.equal(
+    await readFile(join(autofileHome, "config.json"), "utf8"),
+    `{\n  "storage": ${JSON.stringify(storage)}\n}\n`,
   );
-  assert.equal(stderr, "✗ autofile.yml was not reloaded: folders notes has an unknown key \"shema\"\n");
-  assert.equal((await fetch(`${url}/notes/one`, { headers: { connection: "close" } })).status, 200);
-  await running.stop();
+  await assert.rejects(stat(storage));
+  assert.deepEqual(await run(["get", "storage"], { autofileHome, home: root }), {
+    stdout: `${storage}\n`,
+    stderr: "",
+    code: 0,
+  });
 });
+
+test("set storage resolves a relative folder against the current directory", async () => {
+  const root = await temp();
+  const autofileHome = join(root, "autofile-home");
+  const workingDirectory = join(root, "working");
+  await mkdir(workingDirectory);
+
+  assert.deepEqual(
+    await run(["set", "storage", "records"], {
+      autofileHome,
+      cwd: workingDirectory,
+      home: root,
+    }),
+    { stdout: "", stderr: "", code: 0 },
+  );
+  assert.equal(
+    await readFile(join(autofileHome, "config.json"), "utf8"),
+    `{\n  "storage": ${JSON.stringify(join(workingDirectory, "records"))}\n}\n`,
+  );
+});
+
+test("set storage expands a leading tilde to the home directory", async () => {
+  const root = await temp();
+  const home = join(root, "person");
+  const autofileHome = join(root, "autofile-home");
+
+  assert.deepEqual(
+    await run(["set", "storage", "~/Documents/Autofile"], { autofileHome, home }),
+    { stdout: "", stderr: "", code: 0 },
+  );
+  assert.equal(
+    await readFile(join(autofileHome, "config.json"), "utf8"),
+    `{\n  "storage": ${JSON.stringify(join(home, "Documents", "Autofile"))}\n}\n`,
+  );
+});
+
+test("set storage moves no files", async () => {
+  const root = await temp();
+  const autofileHome = join(root, "autofile-home");
+  const defaultData = join(autofileHome, "data");
+  const storage = join(root, "new-data");
+  await mkdir(defaultData, { recursive: true });
+  await writeFile(join(defaultData, "kept.txt"), "kept\n");
+
+  assert.equal((await run(["set", "storage", storage], { autofileHome, home: root })).code, 0);
+  assert.equal(await readFile(join(defaultData, "kept.txt"), "utf8"), "kept\n");
+  await assert.rejects(stat(storage));
+});
+
+test("unset storage removes the setting and restores the default", async () => {
+  const root = await temp();
+  const autofileHome = join(root, "autofile-home");
+  const storage = join(root, "records");
+  assert.equal((await run(["set", "storage", storage], { autofileHome, home: root })).code, 0);
+
+  assert.deepEqual(await run(["unset", "storage"], { autofileHome, home: root }), {
+    stdout: "",
+    stderr: "",
+    code: 0,
+  });
+  assert.equal(await readFile(join(autofileHome, "config.json"), "utf8"), "{}\n");
+  assert.deepEqual(await run(["get", "storage"], { autofileHome, home: root }), {
+    stdout: `${join(autofileHome, "data")}\n`,
+    stderr: "",
+    code: 0,
+  });
+});
+
+test("HTTP settings print their defaults", async () => {
+  const root = await temp();
+  const options = { autofileHome: join(root, "autofile-home"), home: root };
+
+  assert.deepEqual(await run(["get", "http.host"], options), {
+    stdout: "127.0.0.1\n",
+    stderr: "",
+    code: 0,
+  });
+  assert.deepEqual(await run(["get", "http.port"], options), {
+    stdout: "7319\n",
+    stderr: "",
+    code: 0,
+  });
+  assert.deepEqual(await run(["get", "http.origins"], options), {
+    stdout: "",
+    stderr: "",
+    code: 0,
+  });
+});
+
+test("every setting completes a set, get, unset, and default lifecycle", async () => {
+  const root = await temp();
+  const cases = [
+    {
+      setting: "storage",
+      values: [join(root, "records")],
+      configured: `${join(root, "records")}\n`,
+      defaultValue: (autofileHome: string) => `${join(autofileHome, "data")}\n`,
+    },
+    {
+      setting: "http.host",
+      values: ["0.0.0.0"],
+      configured: "0.0.0.0\n",
+      defaultValue: () => "127.0.0.1\n",
+    },
+    {
+      setting: "http.port",
+      values: ["8080"],
+      configured: "8080\n",
+      defaultValue: () => "7319\n",
+    },
+    {
+      setting: "http.origins",
+      values: ["https://app.example", "http://app.example.com:8080"],
+      configured: "https://app.example\nhttp://app.example.com:8080\n",
+      defaultValue: () => "",
+    },
+  ];
+
+  await Promise.all(cases.map(async ({
+    setting,
+    values,
+    configured,
+    defaultValue,
+  }, index) => {
+    const autofileHome = join(root, `autofile-home-${String(index)}`);
+    const options = { autofileHome, home: root };
+    assert.deepEqual(await run(["set", setting, ...values], options), {
+      stdout: "",
+      stderr: "",
+      code: 0,
+    });
+    assert.deepEqual(await run(["get", setting], options), {
+      stdout: configured,
+      stderr: "",
+      code: 0,
+    });
+    assert.deepEqual(await run(["unset", setting], options), {
+      stdout: "",
+      stderr: "",
+      code: 0,
+    });
+    assert.deepEqual(await run(["get", setting], options), {
+      stdout: defaultValue(autofileHome),
+      stderr: "",
+      code: 0,
+    });
+    assert.deepEqual(await run(["unset", setting], options), {
+      stdout: "",
+      stderr: "",
+      code: 0,
+    });
+  }));
+});
+
+test("set preserves sibling settings and writes the nested HTTP settings", async () => {
+  const root = await temp();
+  const autofileHome = join(root, "autofile-home");
+  const options = { autofileHome, home: root };
+  const storage = join(root, "records");
+
+  for (const args of [
+    ["set", "http.host", "0.0.0.0"],
+    ["set", "http.port", "8080"],
+    ["set", "http.origins", "https://example.com", "http://app.example.com:8080"],
+    ["set", "storage", storage],
+  ]) {
+    assert.deepEqual(await run(args, options), { stdout: "", stderr: "", code: 0 });
+  }
+
+  assert.equal(
+    await readFile(join(autofileHome, "config.json"), "utf8"),
+    `${JSON.stringify({
+      storage,
+      http: {
+        host: "0.0.0.0",
+        port: 8080,
+        origins: ["https://example.com", "http://app.example.com:8080"],
+      },
+    }, null, 2)}\n`,
+  );
+  assert.deepEqual(await run(["get", "http.origins"], options), {
+    stdout: "https://example.com\nhttp://app.example.com:8080\n",
+    stderr: "",
+    code: 0,
+  });
+});
+
+test("set and get normalize HTTP origins", async () => {
+  const root = await temp();
+  const autofileHome = join(root, "autofile-home");
+  const options = { autofileHome, home: root };
+
+  assert.deepEqual(
+    await run([
+      "set",
+      "http.origins",
+      "HTTPS://Example.COM:443",
+      "http://[0:0:0:0:0:0:0:1]:80",
+    ], options),
+    { stdout: "", stderr: "", code: 0 },
+  );
+  assert.equal(
+    await readFile(join(autofileHome, "config.json"), "utf8"),
+    `{
+  "http": {
+    "origins": [
+      "https://example.com",
+      "http://[::1]"
+    ]
+  }
+}\n`,
+  );
+  assert.deepEqual(await run(["get", "http.origins"], options), {
+    stdout: "https://example.com\nhttp://[::1]\n",
+    stderr: "",
+    code: 0,
+  });
+});
+
+test("get normalizes HTTP origins read from config", async () => {
+  const root = await temp();
+  const autofileHome = join(root, "autofile-home");
+  await mkdir(autofileHome);
+  await writeFile(
+    join(autofileHome, "config.json"),
+    `{ "http": { "origins": ["HTTP://LOCALHOST:80"] } }\n`,
+  );
+
+  assert.deepEqual(await run(["get", "http.origins"], { autofileHome, home: root }), {
+    stdout: "http://localhost\n",
+    stderr: "",
+    code: 0,
+  });
+});
+
+test("unset removes one setting, preserves its siblings, and prunes an empty HTTP object", async () => {
+  const root = await temp();
+  const autofileHome = join(root, "autofile-home");
+  const options = { autofileHome, home: root };
+  await mkdir(autofileHome);
+  await writeFile(
+    join(autofileHome, "config.json"),
+    `${JSON.stringify({ http: { host: "0.0.0.0", port: 8080 } }, null, 2)}\n`,
+  );
+
+  assert.deepEqual(await run(["unset", "http.host"], options), {
+    stdout: "",
+    stderr: "",
+    code: 0,
+  });
+  assert.equal(
+    await readFile(join(autofileHome, "config.json"), "utf8"),
+    `{
+  "http": {
+    "port": 8080
+  }
+}\n`,
+  );
+  assert.deepEqual(await run(["unset", "http.port"], options), {
+    stdout: "",
+    stderr: "",
+    code: 0,
+  });
+  assert.equal(await readFile(join(autofileHome, "config.json"), "utf8"), "{}\n");
+});
+
+for (const port of ["0", "65536", "1.5", "12x", "+12"]) {
+  test(`set http.port refuses ${JSON.stringify(port)}`, async () => {
+    const root = await temp();
+    assert.deepEqual(
+      await run(["set", "http.port", port], {
+        autofileHome: join(root, "autofile-home"),
+        home: root,
+      }),
+      {
+        stdout: "",
+        stderr: "autofile: http.port must be an integer from 1 to 65535\n",
+        code: 1,
+      },
+    );
+  });
+}
+
+for (const origin of [
+  "example.com",
+  "ftp://example.com",
+  "https://example.com/path",
+  "https://example.com?query",
+  "https://user@example.com",
+  "https://example.com/",
+  "https://example.com\\path",
+  "https://example.com:",
+]) {
+  test(`set http.origins refuses ${JSON.stringify(origin)}`, async () => {
+    const root = await temp();
+    assert.deepEqual(
+      await run(["set", "http.origins", origin], {
+        autofileHome: join(root, "autofile-home"),
+        home: root,
+      }),
+      {
+        stdout: "",
+        stderr: "autofile: http.origins must contain only http or https origins without paths\n",
+        code: 1,
+      },
+    );
+  });
+}
+
+for (const [setting, message] of [
+  ["storage", "storage must be a non-empty folder"],
+  ["http.host", "http.host must be a non-empty string"],
+  ["http.port", "http.port must be an integer from 1 to 65535"],
+] as const) {
+  test(`set ${setting} delegates an empty value to setting validation`, async () => {
+    const root = await temp();
+    assert.deepEqual(
+      await run(["set", setting, ""], {
+        autofileHome: join(root, "autofile-home"),
+        home: root,
+      }),
+      { stdout: "", stderr: `autofile: ${message}\n`, code: 1 },
+    );
+  });
+}
+
+test("invalid stored HTTP settings report the config path", async () => {
+  const root = await temp();
+  const autofileHome = join(root, "autofile-home");
+  const configPath = join(autofileHome, "config.json");
+  await mkdir(autofileHome);
+  await writeFile(configPath, `{ "http": { "port": 0 } }\n`);
+
+  assert.deepEqual(await run(["get", "http.port"], { autofileHome, home: root }), {
+    stdout: "",
+    stderr: `autofile: ${configPath}: http.port must be an integer from 1 to 65535\n`,
+    code: 1,
+  });
+});
+
+test("all invalid stored config shapes are refused through the command", async () => {
+  const root = await temp();
+  const cases: Array<[unknown, string]> = [
+    [[], "must contain a JSON object"],
+    [{ http: [] }, "http must be a JSON object"],
+    [{ http: { host: "" } }, "http.host must be a non-empty string"],
+    [
+      { http: { origins: ["ftp://example.com"] } },
+      "http.origins must contain only http or https origins without paths",
+    ],
+  ];
+
+  await Promise.all(cases.map(async ([config, message], index) => {
+    const autofileHome = join(root, `invalid-config-${String(index)}`);
+    const configPath = join(autofileHome, "config.json");
+    await mkdir(autofileHome);
+    await writeFile(configPath, `${JSON.stringify(config)}\n`);
+    assert.deepEqual(await run(["get", "storage"], { autofileHome, home: root }), {
+      stdout: "",
+      stderr: `autofile: ${configPath}: ${message}\n`,
+      code: 1,
+    });
+  }));
+});
+
+test("serve refuses an invalid port override with one line", async () => {
+  const root = await temp();
+  assert.deepEqual(
+    await run(["serve", "--port", "0"], {
+      autofileHome: join(root, "autofile-home"),
+      home: root,
+    }),
+    {
+      stdout: "",
+      stderr: "autofile: http.port must be an integer from 1 to 65535\n",
+      code: 1,
+    },
+  );
+});
+
+const invalidCommands: Array<[string, string[]]> = [
+  ["an unknown command", ["unknown"]],
+  ["serve with a missing option value", ["serve", "--host"]],
+  ["serve with an unknown option", ["serve", "--other", "value"]],
+  ["serve with a repeated option", ["serve", "--port", "7319", "--port", "7320"]],
+  ["set without a setting", ["set"]],
+  ["set without a folder", ["set", "storage"]],
+  ["set with another setting", ["set", "other", "folder"]],
+  ["set with an extra argument", ["set", "storage", "folder", "extra"]],
+  ["set origins without a value", ["set", "http.origins"]],
+  ["get without a setting", ["get"]],
+  ["get with another setting", ["get", "other"]],
+  ["get with an extra argument", ["get", "storage", "extra"]],
+  ["unset without a setting", ["unset"]],
+  ["unset with another setting", ["unset", "other"]],
+  ["unset with an extra argument", ["unset", "storage", "extra"]],
+];
+
+for (const [name, args] of invalidCommands) {
+  test(`${name} prints usage to stderr and fails`, async () => {
+    const root = await temp();
+    assert.deepEqual(await run(args, { autofileHome: join(root, "autofile-home"), home: root }), {
+      stdout: "",
+      stderr: usage,
+      code: 1,
+    });
+  });
+}
