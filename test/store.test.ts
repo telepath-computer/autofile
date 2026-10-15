@@ -190,7 +190,6 @@ test("type operations persist exact declarations and list recognized files in na
     type: "tasks",
     description: "Things to do.",
     titleField: "title",
-    view: { body: "details", panel: ["status"] },
     schema: taskSchema,
   }), { uri: "autofile:///_types/tasks" });
   assert.deepEqual(await store.createType({
@@ -204,7 +203,6 @@ test("type operations persist exact declarations and list recognized files in na
     `${JSON.stringify({
       description: "Things to do.",
       titleField: "title",
-      view: { body: "details", panel: ["status"] },
       schema: taskSchema,
     }, null, 2)}\n`,
   );
@@ -212,7 +210,6 @@ test("type operations persist exact declarations and list recognized files in na
     uri: "autofile:///_types/tasks",
     description: "Things to do.",
     titleField: "title",
-    view: { body: "details", panel: ["status"] },
     schema: taskSchema,
   });
   assert.deepEqual(await store.listTypes({}), {
@@ -309,73 +306,6 @@ test("argument refusals name the argument that must be corrected", async () => {
     schema: [] as unknown as JsonObject,
   }), { errors: [{ message: "schema: must be a JSON object" }] });
 
-  const invalidViews = [
-    [null, "view: must be an object", "null"],
-    [[], "view: must be an object", "array"],
-    [{ card: "details" }, "view.card: is not allowed", "extra-field"],
-    [{ body: 42 }, "view.body: must be a string", "body"],
-    [{ panel: "status" }, "view.panel: must be an array of strings", "panel"],
-    [{ panel: ["status", 42] }, "view.panel: must be an array of strings", "panel-item"],
-  ] as const;
-  for (const [view, message, suffix] of invalidViews) {
-    assert.deepEqual(await store.createType({
-      type: `bad-view-${suffix}`,
-      description: "Invalid view.",
-      view: view as never,
-      schema: { type: "object" },
-    }), { errors: [{ message }] });
-    if (view !== null) {
-      assert.deepEqual(await store.updateType({
-        type: "tasks",
-        view: view as never,
-      }), { errors: [{ message: message.replace("must be an object", "must be an object or null") }] });
-    }
-  }
-});
-
-test("type views are preserved, replaced, and removed without inspecting the record schema", async () => {
-  const { dataFolder, store } = await makeStore();
-  const schema = { type: "object", additionalProperties: false };
-  assert.deepEqual(await store.createType({
-    type: "notes",
-    description: "Notes.",
-    view: { body: "missing-body", panel: ["missing-panel"] },
-    schema,
-  }), { uri: "autofile:///_types/notes" });
-
-  assert.deepEqual(await store.updateType({
-    type: "notes",
-    description: "Long-lived notes.",
-  }), { uri: "autofile:///_types/notes", errors: [] });
-  assert.deepEqual(await store.getType({ type: "notes" }), {
-    uri: "autofile:///_types/notes",
-    description: "Long-lived notes.",
-    view: { body: "missing-body", panel: ["missing-panel"] },
-    schema,
-  });
-
-  assert.deepEqual(await store.updateType({
-    type: "notes",
-    view: { panel: [] },
-  }), { uri: "autofile:///_types/notes", errors: [] });
-  assert.deepEqual(await store.getType({ type: "notes" }), {
-    uri: "autofile:///_types/notes",
-    description: "Long-lived notes.",
-    view: { panel: [] },
-    schema,
-  });
-
-  assert.deepEqual(await store.updateType({ type: "notes", view: null }), {
-    uri: "autofile:///_types/notes",
-    errors: [],
-  });
-  assert.deepEqual(await store.getType({ type: "notes" }), {
-    uri: "autofile:///_types/notes",
-    description: "Long-lived notes.",
-    schema,
-  });
-  assert.ok(!await readFile(join(dataFolder, "_types", "notes.json"), "utf8")
-    .then((text) => text.includes('"view"')));
 });
 
 test("schemas use draft 2020-12, internal refs, known formats, and readable validation errors", async () => {
@@ -2502,7 +2432,7 @@ test("record keys and canonical record URIs are enforced", async () => {
   ]) {
     const refusal = {
       errors: [{
-        message: "uri: must be a record URI, such as autofile:///tasks/book-the-dentist",
+        message: "uri: must be a record URI, such as autofile:///task/book-the-dentist",
       }],
     };
     assert.deepEqual(await store.getRecord({ uri }), refusal);
@@ -2575,7 +2505,7 @@ test("update_record applies JSON Merge Patch and preserves createdAt while chang
     record: {
       title: "Merge me",
       status: "active",
-      details: { owner: "Rupert", remove: true },
+      details: { owner: "Alex", remove: true },
       labels: ["old"],
     },
   });
@@ -2598,7 +2528,7 @@ test("update_record applies JSON Merge Patch and preserves createdAt while chang
   assert.deepEqual(afterRecord.value, {
     title: "Merge me",
     status: "complete",
-    details: { owner: "Rupert", note: "done" },
+    details: { owner: "Alex", note: "done" },
     labels: ["new"],
   });
   assert.equal(

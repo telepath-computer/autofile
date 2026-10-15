@@ -174,12 +174,12 @@ test("set storage expands a leading tilde to the home directory", async () => {
   const autofileHome = join(root, "autofile-home");
 
   assert.deepEqual(
-    await run(["set", "storage", "~/Dropbox/Autofile"], { autofileHome, home }),
+    await run(["set", "storage", "~/Documents/Autofile"], { autofileHome, home }),
     { stdout: "", stderr: "", code: 0 },
   );
   assert.equal(
     await readFile(join(autofileHome, "config.json"), "utf8"),
-    `{\n  "storage": ${JSON.stringify(join(home, "Dropbox", "Autofile"))}\n}\n`,
+    `{\n  "storage": ${JSON.stringify(join(home, "Documents", "Autofile"))}\n}\n`,
   );
 });
 
@@ -253,14 +253,14 @@ test("every setting completes a set, get, unset, and default lifecycle", async (
     },
     {
       setting: "http.port",
-      values: ["2366"],
-      configured: "2366\n",
+      values: ["8080"],
+      configured: "8080\n",
       defaultValue: () => "7319\n",
     },
     {
       setting: "http.origins",
-      values: ["https://app.example", "http://rubot:8080"],
-      configured: "https://app.example\nhttp://rubot:8080\n",
+      values: ["https://app.example", "http://app.example.com:8080"],
+      configured: "https://app.example\nhttp://app.example.com:8080\n",
       defaultValue: () => "",
     },
   ];
@@ -309,8 +309,8 @@ test("set preserves sibling settings and writes the nested HTTP settings", async
 
   for (const args of [
     ["set", "http.host", "0.0.0.0"],
-    ["set", "http.port", "2366"],
-    ["set", "http.origins", "https://example.com", "http://rubot:8080"],
+    ["set", "http.port", "8080"],
+    ["set", "http.origins", "https://example.com", "http://app.example.com:8080"],
     ["set", "storage", storage],
   ]) {
     assert.deepEqual(await run(args, options), { stdout: "", stderr: "", code: 0 });
@@ -322,13 +322,13 @@ test("set preserves sibling settings and writes the nested HTTP settings", async
       storage,
       http: {
         host: "0.0.0.0",
-        port: 2366,
-        origins: ["https://example.com", "http://rubot:8080"],
+        port: 8080,
+        origins: ["https://example.com", "http://app.example.com:8080"],
       },
     }, null, 2)}\n`,
   );
   assert.deepEqual(await run(["get", "http.origins"], options), {
-    stdout: "https://example.com\nhttp://rubot:8080\n",
+    stdout: "https://example.com\nhttp://app.example.com:8080\n",
     stderr: "",
     code: 0,
   });
@@ -389,7 +389,7 @@ test("unset removes one setting, preserves its siblings, and prunes an empty HTT
   await mkdir(autofileHome);
   await writeFile(
     join(autofileHome, "config.json"),
-    `${JSON.stringify({ http: { host: "0.0.0.0", port: 2366 } }, null, 2)}\n`,
+    `${JSON.stringify({ http: { host: "0.0.0.0", port: 8080 } }, null, 2)}\n`,
   );
 
   assert.deepEqual(await run(["unset", "http.host"], options), {
@@ -401,7 +401,7 @@ test("unset removes one setting, preserves its siblings, and prunes an empty HTT
     await readFile(join(autofileHome, "config.json"), "utf8"),
     `{
   "http": {
-    "port": 2366
+    "port": 8080
   }
 }\n`,
   );

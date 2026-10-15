@@ -272,22 +272,6 @@ test("tools are listed in spec order with exact descriptions and described close
             type: "string",
             description: "A top-level field of the record whose string value is shown as its title.",
           },
-          view: {
-            type: "object",
-            properties: {
-              body: {
-                type: "string",
-                description: "The top-level field containing the main prose in Markdown.",
-              },
-              panel: {
-                type: "array",
-                items: { type: "string" },
-                description: "The top-level fields shown in the panel, in order.",
-              },
-            },
-            additionalProperties: false,
-            description: "How clients lay out a record: `body` names the top-level prose field and `panel` lists top-level panel fields in order.",
-          },
         },
         required: ["type", "description", "schema"],
         additionalProperties: false,
@@ -295,7 +279,7 @@ test("tools are listed in spec order with exact descriptions and described close
     },
     {
       name: "update_type",
-      description: "Replaces the description, schema, title field or view of a type, or any of them.",
+      description: "Replaces the description, schema or title field of a type, or any of them.",
       inputSchema: {
         type: "object",
         properties: {
@@ -305,22 +289,6 @@ test("tools are listed in spec order with exact descriptions and described close
           titleField: {
             type: ["string", "null"],
             description: "The new title field; `null` removes it.",
-          },
-          view: {
-            type: ["object", "null"],
-            properties: {
-              body: {
-                type: "string",
-                description: "The top-level field containing the main prose in Markdown.",
-              },
-              panel: {
-                type: "array",
-                items: { type: "string" },
-                description: "The top-level fields shown in the panel, in order.",
-              },
-            },
-            additionalProperties: false,
-            description: "The new view; `null` removes it.",
           },
         },
         required: ["type"],
@@ -360,7 +328,6 @@ test("all ten tools map store results to matching structured and text JSON", asy
       type: "tasks",
       description: "Things to do.",
       titleField: "title",
-      view: { body: "details", panel: ["status"] },
       schema: taskSchema,
     },
   });
@@ -380,7 +347,6 @@ test("all ten tools map store results to matching structured and text JSON", asy
     uri: "autofile:///_types/tasks",
     description: "Things to do.",
     titleField: "title",
-    view: { body: "details", panel: ["status"] },
     schema: taskSchema,
   });
 
@@ -436,7 +402,6 @@ test("all ten tools map store results to matching structured and text JSON", asy
     arguments: {
       type: "tasks",
       description: "Completed and active tasks.",
-      view: { panel: ["status"] },
     },
   });
   assertToolJson(updatedType, { uri: "autofile:///_types/tasks", errors: [] });
@@ -449,7 +414,6 @@ test("all ten tools map store results to matching structured and text JSON", asy
     uri: "autofile:///_types/tasks",
     description: "Completed and active tasks.",
     titleField: "title",
-    view: { panel: ["status"] },
     schema: taskSchema,
   });
 

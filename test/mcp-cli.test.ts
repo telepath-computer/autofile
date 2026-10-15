@@ -253,131 +253,6 @@ test("the built command serves a pinned 2026 client and creates configured stora
   }
 });
 
-test("the built command creates, serves, updates, and removes a type view", {
-  timeout: 30_000,
-}, async () => {
-  const root = await temp();
-  const autofileHome = join(root, "autofile-home");
-  const dataFolder = join(root, "configured", "records");
-  const typeUri = "autofile:///_types/notes";
-  const schema = {
-    type: "object",
-    required: ["title"],
-    properties: {
-      title: { type: "string" },
-      details: { type: "string" },
-      status: { type: "string" },
-      owner: { type: "string" },
-    },
-    additionalProperties: false,
-  };
-  await mkdir(autofileHome, { recursive: true });
-  await writeFile(
-    join(autofileHome, "config.json"),
-    `${JSON.stringify({ storage: dataFolder }, null, 2)}\n`,
-  );
-  const client = new Client(
-    { name: "autofile-stdio-view-test", version: "1.0.0" },
-    { versionNegotiation: { mode: { pin: "2026-07-28" } } },
-  );
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [cli],
-    env: environment(root, autofileHome),
-    stderr: "pipe",
-  });
-
-  try {
-    await client.connect(transport);
-    const initialView = { body: "details", panel: ["status", "owner"] };
-    assert.deepEqual((await client.callTool({
-      name: "create_type",
-      arguments: {
-        type: "notes",
-        description: "Notes with prose.",
-        titleField: "title",
-        view: initialView,
-        schema,
-      },
-    })).structuredContent, { uri: typeUri });
-
-    assert.deepEqual((await client.callTool({
-      name: "get_type",
-      arguments: { type: "notes" },
-    })).structuredContent, {
-      uri: typeUri,
-      description: "Notes with prose.",
-      titleField: "title",
-      view: initialView,
-      schema,
-    });
-    const initialResource = await client.readResource({ uri: typeUri });
-    assert.deepEqual({
-      contents: initialResource.contents,
-      ttlMs: initialResource.ttlMs,
-      cacheScope: initialResource.cacheScope,
-    }, {
-      contents: [{
-        uri: typeUri,
-        mimeType: "application/json",
-        text: `${JSON.stringify({
-          description: "Notes with prose.",
-          titleField: "title",
-          view: initialView,
-          schema,
-        }, null, 2)}\n`,
-      }],
-      ttlMs: 0,
-      cacheScope: "private",
-    });
-
-    assert.deepEqual((await client.callTool({
-      name: "update_type",
-      arguments: { type: "notes", view: { panel: ["status"] } },
-    })).structuredContent, { uri: typeUri, errors: [] });
-    assert.deepEqual((await client.callTool({
-      name: "get_type",
-      arguments: { type: "notes" },
-    })).structuredContent, {
-      uri: typeUri,
-      description: "Notes with prose.",
-      titleField: "title",
-      view: { panel: ["status"] },
-      schema,
-    });
-
-    assert.deepEqual((await client.callTool({
-      name: "update_type",
-      arguments: { type: "notes", view: null },
-    })).structuredContent, { uri: typeUri, errors: [] });
-    const declarationWithoutView = {
-      description: "Notes with prose.",
-      titleField: "title",
-      schema,
-    };
-    assert.deepEqual((await client.callTool({
-      name: "get_type",
-      arguments: { type: "notes" },
-    })).structuredContent, { uri: typeUri, ...declarationWithoutView });
-    const finalResource = await client.readResource({ uri: typeUri });
-    assert.deepEqual({
-      contents: finalResource.contents,
-      ttlMs: finalResource.ttlMs,
-      cacheScope: finalResource.cacheScope,
-    }, {
-      contents: [{
-        uri: typeUri,
-        mimeType: "application/json",
-        text: `${JSON.stringify(declarationWithoutView, null, 2)}\n`,
-      }],
-      ttlMs: 0,
-      cacheScope: "private",
-    });
-  } finally {
-    await client.close();
-  }
-});
-
 test("the built command serves an exact 7 MiB blob through a default-limit client", {
   timeout: 30_000,
 }, async () => {
@@ -1221,12 +1096,12 @@ test("an agent can complete the full record, link, search, blob, type, and resou
         additionalProperties: false,
       },
       create_type: {
-        properties: ["type", "description", "schema", "titleField", "view"],
+        properties: ["type", "description", "schema", "titleField"],
         required: ["type", "description", "schema"],
         additionalProperties: false,
       },
       update_type: {
-        properties: ["type", "description", "schema", "titleField", "view"],
+        properties: ["type", "description", "schema", "titleField"],
         required: ["type"],
         additionalProperties: false,
       },
@@ -1243,21 +1118,18 @@ test("an agent can complete the full record, link, search, blob, type, and resou
         type: "contacts",
         description: "People and their organizations.",
         titleField: "name",
-        view: { body: "notes", panel: ["employer", "tags"] },
         schema: contactSchema,
       },
       {
         type: "entries",
         description: "Searchable entries.",
         titleField: "title",
-        view: { body: "body", panel: ["status", "labels"] },
         schema: entrySchema,
       },
       {
         type: "organizations",
         description: "Organizations with their logos.",
         titleField: "name",
-        view: { panel: ["logo"] },
         schema: organizationSchema,
       },
       {
@@ -1324,7 +1196,6 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       uri: "autofile:///_types/contacts",
       description: "People and their organizations.",
       titleField: "name",
-      view: { body: "notes", panel: ["employer", "tags"] },
       schema: contactSchema,
     });
     const missingType = await bootstrap.callTool({
@@ -1451,7 +1322,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
             title: `Archive note ${suffix}`,
             status: "active",
             body: `Needle in a field omitted from search results; unique-${suffix}.`,
-            details: { owner: "Rupert", remove: true },
+            details: { owner: "Alex", remove: true },
             labels: ["batch", "private"],
           },
         },
@@ -1487,7 +1358,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       title: "Archive note 000",
       status: "complete",
       body: "Needle in a field omitted from search results; unique-000.",
-      details: { owner: "Rupert", note: "done" },
+      details: { owner: "Alex", note: "done" },
       labels: ["finished"],
     });
     assertToolJson(afterMergeResult, afterMerge);
@@ -1679,7 +1550,6 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     assert.deepEqual(JSON.parse(declarationContent.text) as unknown, {
       description: "People and their organizations.",
       titleField: "name",
-      view: { body: "notes", panel: ["employer", "tags"] },
       schema: contactSchema,
     });
     assert.ok(declarationContent.text.endsWith("\n"));

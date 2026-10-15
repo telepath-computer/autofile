@@ -16,7 +16,7 @@ A record is stored in the file `<type>/<key>.json`, in the folder for its type. 
   "updatedAt": "2026-10-07T09:20:00Z",
   "value": {
     "name": "Priya Narayan",
-    "employer": "autofile:///organizations/acme",
+    "employer": "autofile:///organization/acme",
     "photo": "autofile:///_blobs/9f86d081…0a08.jpg"
   }
 }
@@ -26,13 +26,13 @@ Autofile sets `createdAt` when it creates the record and `updatedAt` whenever th
 
 ### URIs
 
-The URI of a record is `autofile:///<type>/<key>`: the path of its file within the [data folder](#folders), without the `.json` extension, under the scheme `autofile:`. The file `contacts/priya-narayan.json` has the URI `autofile:///contacts/priya-narayan`. Autofile serves each record as an MCP resource at that URI.
+The URI of a record is `autofile:///<type>/<key>`: the path of its file within the [data folder](#folders), without the `.json` extension, under the scheme `autofile:`. The file `contact/priya-narayan.json` has the URI `autofile:///contact/priya-narayan`. Autofile serves each record as an MCP resource at that URI.
 
 The URI has three slashes because the authority is empty. The authority is the part between `//` and the next `/`, which names a host in an `https:` URI. Autofile keeps one data folder, so there is nothing to name.
 
 ### Keys
 
-The key of a record is the last part of its URI and the name of its file without `.json`: `priya-narayan` in `autofile:///contacts/priya-narayan`. The key is not a field in the record.
+The key of a record is the last part of its URI and the name of its file without `.json`: `priya-narayan` in `autofile:///contact/priya-narayan`. The key is not a field in the record.
 
 [`create_record`](#create_record) takes an optional key:
 
@@ -46,7 +46,7 @@ A key cannot be changed, because changing it would change the URI of the record.
 A link is a field whose value is a full URI. The schema of a type marks each link field with `"format": "uri"`, the JSON Schema format for a full URI, and a link field holds only links. A `pattern` limits a field to links into one folder:
 
 ```json
-"employer": { "type": "string", "format": "uri", "pattern": "^autofile:///organizations/" }
+"employer": { "type": "string", "format": "uri", "pattern": "^autofile:///organization/" }
 ```
 
 A link to an `autofile:` URI always points to a record that exists, as a foreign key does in a database:
@@ -81,27 +81,24 @@ After each update or delete, Autofile deletes every blob that the previous versi
 
 ## Types
 
-A type is declared by one JSON file in the `_types` folder. The name of the file without `.json` is the name of the type and of the folder that holds its records: `_types/contacts.json` declares the type `contacts`, whose records are in `contacts/`. Autofile serves each declaration as an MCP resource, such as `autofile:///_types/contacts`.
+A type is declared by one JSON file in the `_types` folder. The name of the file without `.json` is the name of the type and of the folder that holds its records: `_types/contact.json` declares the type `contact`, whose records are in `contact/`. Autofile serves each declaration as an MCP resource, such as `autofile:///_types/contact`.
 
 A declaration has these fields:
 
 - `description` says what belongs in the folder. Agents read it to choose where to file.
 - `schema` is the JSON Schema that every record of the type must match. Guidance about a single field goes in the standard `description` keyword of that field.
-- `titleField`, which is optional, names a top-level field of the record that holds its title, such as `name` for contacts. Clients show the title in place of the key; see [Resources](#resources). A record whose value for that field is not a string has no title.
-- `view`, which is optional, tells clients how to lay out a record of the type: `body` names the top-level field holding the main prose, in Markdown, shown below the title, and `panel` lists, in order, the top-level fields shown beside or above it. Without a `view`, or without `panel`, a client shows every field other than the title in the panel; without `body`, it shows no body. Autofile stores `view` and serves it but does not use it.
+- `titleField`, which is optional, names a top-level field of the record that holds its title, such as `name` for a contact. Clients show the title in place of the key; see [Resources](#resources). A record whose value for that field is not a string has no title.
 
 ```json
 {
   "description": "People the user knows or deals with, one record per person.",
   "titleField": "name",
-  "view": { "body": "details", "panel": ["employer"] },
   "schema": {
     "type": "object",
     "required": ["name"],
     "properties": {
       "name": { "type": "string", "description": "Full name as the person uses it." },
-      "employer": { "type": "string", "format": "uri", "pattern": "^autofile:///organizations/" },
-      "details": { "type": "string", "description": "Who they are and how the user knows them, in Markdown." }
+      "employer": { "type": "string", "format": "uri", "pattern": "^autofile:///organization/" }
     }
   }
 }
@@ -129,7 +126,7 @@ Autofile describes itself to clients with the description "Typed records that ag
 
 > Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree.
 >
-> Types: contacts, organizations, tasks. This list was taken when the session began; call `list_types` for types created since.
+> Types: contact, organization, task. This list was taken when the session began; call `list_types` for types created since.
 
 The last line names the types that exist when the client connects, without their descriptions, so the instructions stay short however many types there are. Before any type exists, it begins "Types: none yet." Not every client shows instructions to the model, so the descriptions of `find_records` and `create_record` also say that Autofile is where durable information is kept.
 
@@ -146,8 +143,8 @@ Every record, type declaration and blob is an MCP resource at its URI:
 MCP requires a `name` for every resource and leaves `title` optional, and clients show the `name` when there is no `title`. The `name` is the part of the URI after `autofile:///`, which is unique. A record is listed with the time it last changed, its `updatedAt` time, in `annotations.lastModified`, and, when its type has a `titleField`, with its title in `title`. A type declaration is listed with the description of the type in `description`, and a blob with its size in bytes in `size`. Entries in `resources/list` look like this:
 
 ```json
-{ "uri": "autofile:///contacts/priya-narayan", "name": "contacts/priya-narayan", "title": "Priya Narayan", "mimeType": "application/json", "annotations": { "lastModified": "2026-10-07T09:20:00Z" } }
-{ "uri": "autofile:///_types/contacts", "name": "_types/contacts", "mimeType": "application/json", "description": "People the user knows or deals with, one record per person." }
+{ "uri": "autofile:///contact/priya-narayan", "name": "contact/priya-narayan", "title": "Priya Narayan", "mimeType": "application/json", "annotations": { "lastModified": "2026-10-07T09:20:00Z" } }
+{ "uri": "autofile:///_types/contact", "name": "_types/contact", "mimeType": "application/json", "description": "People the user knows or deals with, one record per person." }
 { "uri": "autofile:///_blobs/9f86d081…0a08.pdf", "name": "_blobs/9f86d081…0a08.pdf", "mimeType": "application/pdf", "size": 482113 }
 ```
 
@@ -169,10 +166,10 @@ Reading a record or a type declaration returns the same shape, with the file as 
 
 Results from `resources/list` and `resources/read` carry `ttlMs: 0` and `cacheScope: "private"`, as above: a record can change at any time and belongs to the user, so a client that needs to know of changes subscribes to them.
 
-A client subscribes by sending `subscriptions/listen` with URIs in `resourceSubscriptions`. When a resource is created, changed or deleted, Autofile sends `notifications/resources/updated` naming the resource, the folder that holds it, such as `autofile:///tasks`, and the root, `autofile:///`. Each notice goes to the clients subscribed to exactly the URI it names. A client can therefore subscribe to a record to be told when that record changes, or to a folder or the root to be told that something in it changed, and then look again. A change to any task sends a client subscribed to the tasks folder:
+A client subscribes by sending `subscriptions/listen` with URIs in `resourceSubscriptions`. When a resource is created, changed or deleted, Autofile sends `notifications/resources/updated` naming the resource, the folder that holds it, such as `autofile:///task`, and the root, `autofile:///`. Each notice goes to the clients subscribed to exactly the URI it names. A client can therefore subscribe to a record to be told when that record changes, or to a folder or the root to be told that something in it changed, and then look again. A change to any task sends a client subscribed to the `task` folder:
 
 ```json
-{ "method": "notifications/resources/updated", "params": { "uri": "autofile:///tasks" } }
+{ "method": "notifications/resources/updated", "params": { "uri": "autofile:///task" } }
 ```
 
 When what `resources/list` returns changes, because a resource is created or deleted or the `title` or `description` of a resource changes, Autofile sends `notifications/resources/list_changed` to every client listening with `resourcesListChanged`.
@@ -184,7 +181,7 @@ Each tool takes its arguments as one JSON object and returns its result as `stru
 ```json
 {
   "errors": [
-    { "uri": "autofile:///tasks/3jzfcijpj2z2b", "message": "status: must be one of the allowed values" },
+    { "uri": "autofile:///task/3jzfcijpj2z2b", "message": "status: must be one of the allowed values" },
     { "message": "where: the operator $lt is not supported" }
   ]
 }
@@ -200,27 +197,27 @@ Searches the records of one type.
 | `q` | string | Words that must all appear in the string values of a record, at any depth, ignoring case. |
 | `where` | object | Fields matched by value, in the [MongoDB query syntax](https://www.mongodb.com/docs/manual/tutorial/query-documents/) and with its matching rules: for an array field, a record matches if any item equals the value, and `null` matches a field that is missing. MongoDB operators such as `$lt` and `$in` are not supported yet, and a `where` that uses one is refused. They can be added later without changing this form. |
 | `limit` | integer | The most results a page returns, counting records and those listed in `errors`: 50 by default, from 1 to 200. |
-| `fields` | array of strings | Top-level fields to return in `value`, such as `["title", "summary"]`, so a list does not carry every field of every record. All fields when absent. `q` and `where` still apply to the whole record. |
+| `fields` | array of strings | Top-level fields to return in `value`, such as `["title", "status"]`, so a list does not carry every field of every record. All fields when absent. `q` and `where` still apply to the whole record. |
 | `cursor` | string | The `cursor` from the previous page. |
 
 ```json
-{ "type": "tasks", "q": "dentist", "where": { "status": "active" }, "limit": 50 }
+{ "type": "task", "q": "dentist", "where": { "status": "active" }, "limit": 50 }
 ```
 
-Results are ordered by URI. A page reads record files in that order until it has `limit` results, its result reaches 64 KB of JSON, or no files remain, and it always holds at least one result; the size cap keeps a page of long records, such as topics, to a reasonable share of the context of an agent, which can pass `fields` for a compact list. `cursor` is present when files remain, and the next page starts after the last file the current page read. Each record is returned as the contents of its file with its URI added in `uri`. The names `uri` and `value` follow AT Protocol. A record that does not match its type is left out of `records`, and listed in `errors` with its URI and a message when it matches `q` and `where`. A file that cannot be read as JSON is always listed in `errors`, since it cannot be searched. Code that relies on the schema therefore receives only matching records, and no record the search would find is dropped without notice.
+Results are ordered by URI. A page reads record files in that order until it has `limit` results, its result reaches 64 KB of JSON, or no files remain, and it always holds at least one result; the size cap keeps a page of long records to a reasonable share of the context of an agent, which can pass `fields` for a compact list. `cursor` is present when files remain, and the next page starts after the last file the current page read. Each record is returned as the contents of its file with its URI added in `uri`. The names `uri` and `value` follow AT Protocol. A record that does not match its type is left out of `records`, and listed in `errors` with its URI and a message when it matches `q` and `where`. A file that cannot be read as JSON is always listed in `errors`, since it cannot be searched. Code that relies on the schema therefore receives only matching records, and no record the search would find is dropped without notice.
 
 ```json
 {
   "records": [
     {
-      "uri": "autofile:///tasks/3jzfcijpj2z2a",
+      "uri": "autofile:///task/3jzfcijpj2z2a",
       "createdAt": "2026-10-07T09:14:00Z",
       "updatedAt": "2026-10-07T09:14:00Z",
       "value": { "title": "Book the dentist", "status": "active" }
     }
   ],
   "errors": [
-    { "uri": "autofile:///tasks/3jzfcijpj2z2b", "message": "status: must be one of the allowed values" }
+    { "uri": "autofile:///task/3jzfcijpj2z2b", "message": "status: must be one of the allowed values" }
   ],
   "cursor": "…"
 }
@@ -236,7 +233,7 @@ Returns one record, in the same shape as an item of `records` from [`find_record
 
 ```json
 {
-  "uri": "autofile:///tasks/3jzfcijpj2z2b",
+  "uri": "autofile:///task/3jzfcijpj2z2b",
   "createdAt": "2026-10-07T09:14:00Z",
   "updatedAt": "2026-10-07T09:14:00Z",
   "value": { "title": "Call the bank", "status": "waiting" },
@@ -255,7 +252,7 @@ Creates a record and returns `{ "uri": "…" }`. Refused if the record does not 
 | `record` | object, required | The full record. A blob field may hold a local path or a `data:` URI, as described in [Blobs](#blobs). |
 
 ```json
-{ "type": "tasks", "key": "book-the-dentist", "record": { "title": "Book the dentist", "status": "active" } }
+{ "type": "task", "key": "book-the-dentist", "record": { "title": "Book the dentist", "status": "active" } }
 ```
 
 #### update_record
@@ -268,7 +265,7 @@ Changes a record and returns `{ "uri": "…" }`. Refused if the result does not 
 | `patch` | object, required | A [JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396): fields in the patch are set, a field set to `null` is removed, nested objects are merged, and arrays are replaced whole. A blob field may hold a local path or a `data:` URI, as described in [Blobs](#blobs). |
 
 ```json
-{ "uri": "autofile:///tasks/book-the-dentist", "patch": { "status": "complete" } }
+{ "uri": "autofile:///task/book-the-dentist", "patch": { "status": "complete" } }
 ```
 
 #### delete_record
@@ -288,7 +285,7 @@ Returns every type, ordered by name, with the URI of its declaration and its des
 ```json
 {
   "types": [
-    { "uri": "autofile:///_types/contacts", "type": "contacts", "description": "People the user knows or deals with, one record per person." }
+    { "uri": "autofile:///_types/contact", "type": "contact", "description": "People the user knows or deals with, one record per person." }
   ]
 }
 ```
@@ -303,7 +300,7 @@ Returns the declaration of a type with its URI added. Refused if the type does n
 
 ```json
 {
-  "uri": "autofile:///_types/contacts",
+  "uri": "autofile:///_types/contact",
   "description": "People the user knows or deals with, one record per person.",
   "titleField": "name",
   "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } }
@@ -320,11 +317,10 @@ Declares a type and returns `{ "uri": "autofile:///_types/<type>" }`. Refused if
 | `description` | string, required | What belongs in the folder. |
 | `schema` | object, required | The JSON Schema for records of the type. |
 | `titleField` | string | The field that holds the title of a record, as described in [Types](#types). |
-| `view` | object | How clients lay out a record: `body` and `panel`, as described in [Types](#types). |
 
 ```json
 {
-  "type": "contacts",
+  "type": "contact",
   "description": "People the user knows or deals with, one record per person.",
   "titleField": "name",
   "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } }
@@ -333,13 +329,13 @@ Declares a type and returns `{ "uri": "autofile:///_types/<type>" }`. Refused if
 
 #### update_type
 
-Replaces the description, schema, title field or view of a type, or any of them. A valid change is always accepted, as described in [Changing types](#changing-types); the call is refused if the type does not exist or the schema is not one Autofile accepts, as for `create_type`. Returns the URI of the declaration, and in `errors` each record that no longer matches:
+Replaces the description, schema or title field of a type, or any of them. A valid change is always accepted, as described in [Changing types](#changing-types); the call is refused if the type does not exist or the schema is not one Autofile accepts, as for `create_type`. Returns the URI of the declaration, and in `errors` each record that no longer matches:
 
 ```json
 {
-  "uri": "autofile:///_types/contacts",
+  "uri": "autofile:///_types/contact",
   "errors": [
-    { "uri": "autofile:///contacts/priya-narayan", "message": "employer: must be a full URI" }
+    { "uri": "autofile:///contact/priya-narayan", "message": "employer: must be a full URI" }
   ]
 }
 ```
@@ -350,7 +346,6 @@ Replaces the description, schema, title field or view of a type, or any of them.
 | `description` | string | The new description. |
 | `schema` | object | The new JSON Schema. |
 | `titleField` | string or null | The new title field; `null` removes it. |
-| `view` | object or null | The new view; `null` removes it. |
 
 #### delete_type
 
@@ -394,12 +389,12 @@ The settings:
 | `storage` | The data folder. `set` stores its absolute path. | `~/.autofile/data` |
 | `http.host` | The address `autofile serve` listens on. | `127.0.0.1` |
 | `http.port` | The port `autofile serve` listens on. | `7319` |
-| `http.origins` | Browser origins `autofile serve` accepts besides those on localhost, given to `set` as one or more arguments, such as `autofile set http.origins http://rubot`. | none |
+| `http.origins` | Browser origins `autofile serve` accepts besides those on localhost, given to `set` as one or more arguments, such as `autofile set http.origins https://app.example.com`. | none |
 
 `config.json` holds the settings that are set:
 
 ```json
-{ "storage": "/Users/rupert/Dropbox/Autofile", "http": { "port": 2366, "origins": ["http://rubot"] } }
+{ "storage": "/Users/alex/Documents/Autofile", "http": { "port": 8080, "origins": ["https://app.example.com"] } }
 ```
 
 Setting `storage` moves no files, so it can name a folder that already holds records. A running `autofile` process keeps the settings it started with, so a change applies to each client once it restarts Autofile, and to `autofile serve` once it is restarted.

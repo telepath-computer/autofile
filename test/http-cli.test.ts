@@ -831,7 +831,6 @@ test("an HTTP agent can search, patch, invalidate, read resources, and clean lin
       type: "organizations",
       description: "Organizations reached over HTTP.",
       titleField: "name",
-      view: { panel: ["logo"] },
       schema: organizationSchema,
     },
   }), { uri: "autofile:///_types/organizations" });
@@ -841,7 +840,6 @@ test("an HTTP agent can search, patch, invalidate, read resources, and clean lin
       type: "contacts",
       description: "Contacts reached over HTTP.",
       titleField: "name",
-      view: { body: "notes", panel: ["employer", "status"] },
       schema: contactSchema,
     },
   }), { uri: "autofile:///_types/contacts" });
@@ -1031,7 +1029,6 @@ test("an HTTP agent can search, patch, invalidate, read resources, and clean lin
   assert.deepEqual(JSON.parse(declarationContent.text) as unknown, {
     description: "Contacts reached over HTTP.",
     titleField: "name",
-    view: { body: "notes", panel: ["employer", "status"] },
     schema: completeOnlySchema,
   });
   const blob = await client.readResource({ uri: blobUri });
@@ -1125,12 +1122,12 @@ test("serve checks normalized localhost, configured, null, and foreign Origins",
 test("serve checks Host against localhost and configured origin hosts", {
   timeout: 30_000,
 }, async () => {
-  const server = await startServer({ config: { http: { origins: ["http://RUBOT"] } } });
+  const server = await startServer({ config: { http: { origins: ["http://app.example.com"] } } });
   const cases = [
     { host: `LOCALHOST:${server.endpoint.port}`, accepted: true },
     { host: "127.0.0.1:1", accepted: true },
     { host: "[0:0:0:0:0:0:0:1]:7319", accepted: true },
-    { host: "RUBOT:443", accepted: true },
+    { host: "app.example.com:443", accepted: true },
     { host: "foreign.example", accepted: false },
   ];
 
