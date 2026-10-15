@@ -109,12 +109,16 @@ export interface CreateTypeInput {
   description: string;
   schema: JsonObject;
   titleField?: string;
+  title?: string;
+  titlePlural?: string;
 }
 export interface UpdateTypeInput {
   type: string;
   description?: string;
   schema?: JsonObject;
   titleField?: string | null;
+  title?: string | null;
+  titlePlural?: string | null;
 }
 export interface DeleteTypeInput { type: string }
 
@@ -133,12 +137,16 @@ export interface RecordResult extends UriResult {
 export interface TypeSummary extends UriResult {
   type: string;
   description: string;
+  title?: string;
+  titlePlural?: string;
 }
 export interface ListTypesResult { types: TypeSummary[] }
 export interface TypeResult extends UriResult {
   description: string;
   schema: JsonObject;
   titleField?: string;
+  title?: string;
+  titlePlural?: string;
 }
 export interface UpdateTypeResult extends UriResult { errors: StoreError[] }
 
@@ -161,6 +169,8 @@ interface TypeDeclaration {
   description: string;
   schema: JsonObject;
   titleField?: string;
+  title?: string;
+  titlePlural?: string;
 }
 
 interface StoredRecord {
@@ -619,7 +629,15 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       if (!typeNamePattern.test(type)) continue;
       const declaration = await readValidDeclaration(typeFolder, type);
       if (declaration === undefined) continue;
-      types.push({ uri: typeUri(type), type, description: declaration.description });
+      types.push({
+        uri: typeUri(type),
+        type,
+        description: declaration.description,
+        ...(declaration.title === undefined ? {} : { title: declaration.title }),
+        ...(declaration.titlePlural === undefined
+          ? {}
+          : { titlePlural: declaration.titlePlural }),
+      });
     }
     types.sort((left, right) => left.type.localeCompare(right.type));
     return { types };
@@ -634,6 +652,10 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
     return {
       uri: typeUri(input.type),
       description: declaration.value.description,
+      ...(declaration.value.title === undefined ? {} : { title: declaration.value.title }),
+      ...(declaration.value.titlePlural === undefined
+        ? {}
+        : { titlePlural: declaration.value.titlePlural }),
       ...(declaration.value.titleField === undefined
         ? {}
         : { titleField: declaration.value.titleField }),
@@ -647,6 +669,15 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       if (typeof input.description !== "string") return refuse("description: must be a string");
       if (input.titleField !== undefined && typeof input.titleField !== "string") {
         return refuse("titleField: must be a string");
+      }
+      if (input.title !== undefined && (typeof input.title !== "string" || input.title.length === 0)) {
+        return refuse("title: must be a non-empty string");
+      }
+      if (
+        input.titlePlural !== undefined
+        && (typeof input.titlePlural !== "string" || input.titlePlural.length === 0)
+      ) {
+        return refuse("titlePlural: must be a non-empty string");
       }
       if (!isJsonObject(input.schema)) return refuse("schema: must be a JSON object");
       const declarationPath = join(typeFolder, `${input.type}.json`);
@@ -662,6 +693,8 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       ]);
       await writeJsonAtomically(declarationPath, {
         description: input.description,
+        ...(input.title === undefined ? {} : { title: input.title }),
+        ...(input.titlePlural === undefined ? {} : { titlePlural: input.titlePlural }),
         ...(input.titleField === undefined ? {} : { titleField: input.titleField }),
         schema: input.schema,
       });
@@ -684,6 +717,20 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       ) {
         return refuse("titleField: must be a string or null");
       }
+      if (
+        input.title !== undefined
+        && input.title !== null
+        && (typeof input.title !== "string" || input.title.length === 0)
+      ) {
+        return refuse("title: must be a non-empty string or null");
+      }
+      if (
+        input.titlePlural !== undefined
+        && input.titlePlural !== null
+        && (typeof input.titlePlural !== "string" || input.titlePlural.length === 0)
+      ) {
+        return refuse("titlePlural: must be a non-empty string or null");
+      }
       if (input.schema !== undefined && !isJsonObject(input.schema)) {
         return refuse("schema: must be a JSON object");
       }
@@ -691,8 +738,14 @@ function createStore(dataFolder: string, writeLockPath: string): Store {
       const titleField = input.titleField === null
         ? undefined
         : input.titleField ?? current.value.titleField;
+      const title = input.title === null ? undefined : input.title ?? current.value.title;
+      const titlePlural = input.titlePlural === null
+        ? undefined
+        : input.titlePlural ?? current.value.titlePlural;
       const declaration: TypeDeclaration = {
         description: input.description ?? current.value.description,
+        ...(title === undefined ? {} : { title }),
+        ...(titlePlural === undefined ? {} : { titlePlural }),
         ...(titleField === undefined ? {} : { titleField }),
         schema: input.schema ?? current.value.schema,
       };
@@ -855,6 +908,7 @@ function declarationResource(type: string, declaration: TypeDeclaration): StoreR
   return {
     uri: typeUri(type),
     name: `_types/${type}`,
+    ...(declaration.title === undefined ? {} : { title: declaration.title }),
     mimeType: "application/json",
     description: declaration.description,
   };
@@ -1556,10 +1610,23 @@ async function pathExists(path: string): Promise<boolean> {
 
 function isTypeDeclaration(value: unknown): value is TypeDeclaration {
   if (!isJsonObject(value)) return false;
-  if (Object.keys(value).some((key) => !["description", "titleField", "schema"].includes(key))) {
+  if (
+    Object.keys(value).some((key) => (
+      !["description", "title", "titlePlural", "titleField", "schema"].includes(key)
+    ))
+  ) {
     return false;
   }
   if (typeof value.description !== "string" || !isJsonObject(value.schema)) return false;
+  if (value.title !== undefined && (typeof value.title !== "string" || value.title.length === 0)) {
+    return false;
+  }
+  if (
+    value.titlePlural !== undefined
+    && (typeof value.titlePlural !== "string" || value.titlePlural.length === 0)
+  ) {
+    return false;
+  }
   return value.titleField === undefined || typeof value.titleField === "string";
 }
 
