@@ -227,6 +227,14 @@ test("the watcher maps record, declaration, and blob create, change, and delete 
     }], "declaration description change did not change the resource list");
 
     start = changes.changes.length;
+    await store.updateType({ type: "notes", title: "Note" });
+    await waitForChanges(changes, start, [{
+      uri: "autofile:///_types/notes",
+      kind: "changed",
+      listChanged: true,
+    }], "declaration title change did not change the resource list");
+
+    start = changes.changes.length;
     await store.deleteType({ type: "notes" });
     await waitForChanges(changes, start, [{
       uri: "autofile:///_types/notes",

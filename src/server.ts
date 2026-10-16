@@ -130,6 +130,14 @@ const createTypeSchema = fromJsonSchema<CreateTypeInput>({
       type: "string",
       description: "A top-level field of the record whose string value is shown as its title.",
     },
+    title: {
+      type: "string",
+      description: "The name of the type in words, in the singular, such as \"Journal entry\", shown to people in place of the type name.",
+    },
+    titlePlural: {
+      type: "string",
+      description: "The plural of title, such as \"Journal entries\", shown where records of the type are named together. Clients add \"s\" to title when it is absent.",
+    },
   },
   required: ["type", "description", "schema"],
   additionalProperties: false,
@@ -143,6 +151,14 @@ const updateTypeSchema = fromJsonSchema<UpdateTypeInput>({
     titleField: {
       type: ["string", "null"],
       description: "The new title field; `null` removes it.",
+    },
+    title: {
+      type: ["string", "null"],
+      description: "The new title; `null` removes it.",
+    },
+    titlePlural: {
+      type: ["string", "null"],
+      description: "The new plural title; `null` removes it.",
     },
   },
   required: ["type"],
@@ -215,7 +231,7 @@ export async function buildServer(store: Store): Promise<McpServer> {
   server.registerTool(
     "list_types",
     {
-      description: "Returns every type, ordered by name, with the URI of its declaration and its description.",
+      description: "Returns every type, ordered by name, with the URI of its declaration, its description, and its `title` and `titlePlural` when it has them.",
       inputSchema: listTypesSchema,
     },
     async (input) => toolResult(await store.listTypes(input)),
@@ -233,7 +249,7 @@ export async function buildServer(store: Store): Promise<McpServer> {
   server.registerTool(
     "update_type",
     {
-      description: "Replaces the description, schema or title field of a type, or any of them.",
+      description: "Replaces the description, schema, title field, title or plural title of a type, or any of them.",
       inputSchema: updateTypeSchema,
     },
     async (input) => toolResult(await store.updateType(input)),
