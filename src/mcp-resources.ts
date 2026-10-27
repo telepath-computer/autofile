@@ -100,6 +100,7 @@ function declarationResource(declaration: TypeDeclaration): StoreResource {
     name: `Type: ${declaration.type}`,
     mimeType: "application/json",
     description: declaration.description,
+    ...(declaration.title === undefined ? {} : { title: declaration.title }),
   };
 }
 

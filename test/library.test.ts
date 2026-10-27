@@ -15,6 +15,9 @@ import {
   type ChangeEvent,
   type JsonObject,
   type RecordQuery,
+  type TypeChanges,
+  type TypeDeclaration,
+  type TypeDefinition,
 } from "@telepath-computer/autofile";
 
 const roots: string[] = [];
@@ -161,6 +164,74 @@ test("types and records complete their lifecycle through the exported class", as
   assert.equal(await store.records.get(created.uri), undefined);
   assert.equal(await store.types.delete("tasks"), undefined);
   assert.equal(await store.types.get("tasks"), undefined);
+});
+
+test("type titles round-trip through the library and partial updates preserve, replace, and remove them", async () => {
+  const { root, store } = await fixture();
+  const definition: TypeDefinition = { description: "Journal entries.", title: "Journal entry", schema: { type: "object" } };
+  const created: TypeDeclaration = await store.types.create("journal-entries", definition);
+  assert.deepEqual(created, { uri: "autofile:///_types/journal-entries", type: "journal-entries", ...definition });
+  assert.deepEqual(await store.types.get("journal-entries"), created);
+  const untitled = await store.types.create("notes", { description: "Notes.", schema: { type: "object" } });
+  assert.equal(Object.hasOwn(untitled, "title"), false);
+  assert.deepEqual(await store.types.list(), [created, untitled]);
+
+  const preserved = await store.types.update("journal-entries", { description: "Dated entries." });
+  assert.deepEqual(preserved, { ...created, description: "Dated entries." });
+  const replaced = await store.types.update("journal-entries", { title: "Diary entry" });
+  assert.deepEqual(replaced, { ...preserved, title: "Diary entry" });
+  assert.deepEqual(await store.types.get("journal-entries"), replaced);
+  assert.deepEqual(await store.types.list(), [replaced, untitled]);
+
+  const changes: TypeChanges = { title: null };
+  const removed = await store.types.update("journal-entries", changes);
+  assert.deepEqual(removed, {
+    uri: created.uri, type: "journal-entries", description: "Dated entries.", schema: definition.schema,
+  });
+  assert.deepEqual(await store.types.get("journal-entries"), removed);
+  assert.deepEqual(await store.types.list(), [removed, untitled]);
+  assert.deepEqual(JSON.parse(await readFile(join(root, "data", "_types", "journal-entries.json"), "utf8")), {
+    description: "Dated entries.", schema: definition.schema,
+  });
+});
+
+test("invalid type titles are refused without changing existing declarations", async () => {
+  const { root, store } = await fixture();
+  const original = await store.types.create("notes", { description: "Notes.", title: "Note", schema: { type: "object" } });
+  const path = join(root, "data", "_types", "notes.json");
+  const previous = await readFile(path, "utf8");
+  for (const [index, title] of ["", 42, false, {}, [], NaN, Infinity, -0, Symbol("title"), 1n, () => "Note"].entries()) {
+    await assert.rejects(store.types.create(`invalid-${index}`, {
+      description: "Invalid.", schema: { type: "object" }, title: title as string,
+    }), { name: "AutofileError", message: "title: must be a non-empty string" });
+    await assert.rejects(store.types.update("notes", { title: title as string }), {
+      name: "AutofileError", message: "title: must be a non-empty string or null",
+    });
+    assert.equal(await readFile(path, "utf8"), previous);
+    assert.deepEqual(await store.types.get("notes"), original);
+  }
+  await assert.rejects(store.types.create("null-title", {
+    description: "Invalid.", schema: { type: "object" }, title: null as unknown as string,
+  }), { name: "AutofileError", message: "title: must be a non-empty string" });
+  assert.deepEqual(await readdir(join(root, "data", "_types")), ["notes.json"]);
+});
+
+test("stored declarations with invalid titles are unavailable through the library", async () => {
+  const { root, store } = await fixture();
+  await store.types.create("notes", { description: "Notes.", schema: { type: "object" } });
+  const path = join(root, "data", "_types", "notes.json");
+  for (const title of ["", null, 42, false, {}, []]) {
+    const stored = JSON.stringify({ description: "Notes.", title, schema: { type: "object" } });
+    await writeFile(path, stored);
+    await assert.rejects(store.types.get("notes"), (error: unknown) => {
+      assert.ok(error instanceof AutofileError);
+      assert.deepEqual(error.problems, [{ uri: "autofile:///_types/notes", message: "type declaration is not valid" }]);
+      return true;
+    });
+    assert.deepEqual(await store.types.list(), []);
+    await assert.rejects(store.types.update("notes", { title: "Note" }), isRefusal);
+    assert.equal(await readFile(path, "utf8"), stored);
+  }
 });
 
 test("titles come from the complete value even when selected fields omit the title", async () => {

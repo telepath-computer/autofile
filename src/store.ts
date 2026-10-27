@@ -102,6 +102,7 @@ export interface TypeDefinition {
   description: string;
   schema: JsonObject;
   titleField?: string;
+  title?: string;
 }
 
 /** A type declaration together with its name and address. */
@@ -111,8 +112,11 @@ export interface TypeDeclaration extends TypeDefinition {
   problems?: AutofileProblem[];
 }
 
-/** Changes to a declaration; null removes the title field. */
-export type TypeChanges = Partial<Omit<TypeDefinition, "titleField">> & { titleField?: string | null };
+/** Changes to a declaration; null removes the title or title field. */
+export type TypeChanges = Partial<Omit<TypeDefinition, "titleField" | "title">> & {
+  titleField?: string | null;
+  title?: string | null;
+};
 
 /** A record or type was created, changed, or deleted. */
 export interface ChangeEvent { uri: string; kind: "created" | "changed" | "deleted" }
@@ -725,13 +729,18 @@ export class Autofile {
     if (typeof type !== "string" || !typeNamePattern.test(type)) return refuse(invalidTypeMessage);
     if (!isJsonObject(definition)) return refuse("declaration: must be an object");
     const { description, titleField } = definition;
+    const title = readTypeTitle(definition);
     if (typeof description !== "string") return refuse("description: must be a string");
     if (titleField !== undefined && typeof titleField !== "string") {
       return refuse("titleField: must be a string");
     }
+    if (title !== undefined && (typeof title !== "string" || title.length === 0)) {
+      return refuse("title: must be a non-empty string");
+    }
     // Validate and copy caller-owned data before acquiring the asynchronous lock.
     const declaration: TypeDefinition = {
       description,
+      ...(title === undefined ? {} : { title }),
       ...(titleField === undefined ? {} : { titleField }),
       schema: snapshotSchema(definition.schema),
     };
@@ -755,6 +764,7 @@ export class Autofile {
     if (typeof type !== "string" || !typeNamePattern.test(type)) return refuse(invalidTypeMessage);
     if (!isJsonObject(changes)) return refuse("changes: must be an object");
     const { description, titleField: changedTitleField, schema: changedSchema } = changes;
+    const changedTitle = readTypeTitle(changes);
     if (description !== undefined && typeof description !== "string") {
       return refuse("description: must be a string");
     }
@@ -765,6 +775,13 @@ export class Autofile {
     ) {
       return refuse("titleField: must be a string or null");
     }
+    if (
+      changedTitle !== undefined
+      && changedTitle !== null
+      && (typeof changedTitle !== "string" || changedTitle.length === 0)
+    ) {
+      return refuse("title: must be a non-empty string or null");
+    }
     const schemaSnapshot = changedSchema === undefined ? undefined : snapshotSchema(changedSchema);
     return this.#withWriteLock(async () => {
       const current = await readDeclaration(this.#typeFolder, type);
@@ -773,8 +790,10 @@ export class Autofile {
       const titleField = changedTitleField === null
         ? undefined
         : changedTitleField ?? current.value.titleField;
+      const title = changedTitle === null ? undefined : changedTitle ?? current.value.title;
       const declaration: TypeDefinition = {
         description: description ?? current.value.description,
+        ...(title === undefined ? {} : { title }),
         ...(titleField === undefined ? {} : { titleField }),
         schema: schemaSnapshot ?? snapshotSchema(current.value.schema),
       };
@@ -830,6 +849,17 @@ function typeResult(type: string, definition: TypeDefinition): TypeDeclaration {
 }
 
 function jsonText(value: unknown): string { return `${JSON.stringify(value, null, 2)}\n`; }
+
+function readTypeTitle(input: object): unknown {
+  // Read the descriptor so an accessor cannot run caller code or supply a value
+  // that JSON serialization would omit. Validation and snapshotting stay synchronous.
+  const descriptor = Object.getOwnPropertyDescriptor(input, "title");
+  if (descriptor === undefined) return undefined;
+  if (!("value" in descriptor) || !descriptor.enumerable) {
+    refuse("title: must be an enumerable data property");
+  }
+  return descriptor.value;
+}
 
 function snapshotSchema(schema: JsonObject): JsonObject {
   const problem = jsonObjectProblem(schema);
@@ -1416,10 +1446,13 @@ async function pathExists(path: string): Promise<boolean> {
 
 function isTypeDefinition(value: unknown): value is TypeDefinition {
   if (!isJsonObject(value)) return false;
-  if (Object.keys(value).some((key) => !["description", "titleField", "schema"].includes(key))) {
+  if (Object.keys(value).some((key) => !["description", "title", "titleField", "schema"].includes(key))) {
     return false;
   }
   if (typeof value.description !== "string" || !isJsonObject(value.schema)) return false;
+  if (value.title !== undefined && (typeof value.title !== "string" || value.title.length === 0)) {
+    return false;
+  }
   return value.titleField === undefined || typeof value.titleField === "string";
 }
 

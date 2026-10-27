@@ -40,17 +40,18 @@ after(async () => {
 test("type writes snapshot nested schemas, replacements, descriptions and titles before I/O", async () => {
   const { store } = await fixture();
   const definition = {
-    description: "Original notes.", titleField: "name",
+    description: "Original notes.", title: "Note", titleField: "name",
     schema: { type: "object", properties: { name: { type: "string" } } },
   };
   const creating = store.types.create("notes", definition);
   definition.schema.properties.name.type = "number";
   definition.schema = { type: "object", properties: { name: { type: "boolean" } } };
   definition.description = "Changed description.";
+  definition.title = "Changed title";
   definition.titleField = "changed";
   const created = await creating;
   assert.deepEqual(created, {
-    uri: "autofile:///_types/notes", type: "notes", description: "Original notes.", titleField: "name",
+    uri: "autofile:///_types/notes", type: "notes", description: "Original notes.", title: "Note", titleField: "name",
     schema: { type: "object", properties: { name: { type: "string" } } },
   });
   assert.deepEqual(await store.types.get("notes"), created);
@@ -58,17 +59,18 @@ test("type writes snapshot nested schemas, replacements, descriptions and titles
   await assert.rejects(store.records.create("notes", { name: 1 }), AutofileError);
 
   const changes = {
-    description: "Updated notes.", titleField: "title",
+    description: "Updated notes.", title: "Notebook entry", titleField: "title",
     schema: { type: "object", properties: { title: { type: "string" } } },
   };
   const updating = store.types.update("notes", changes);
   changes.schema.properties.title.type = "number";
   changes.schema = { type: "object", properties: { title: { type: "boolean" } } };
   changes.description = "Changed update.";
+  changes.title = "Changed title";
   changes.titleField = "changed";
   const updated = await updating;
   assert.deepEqual(updated, {
-    uri: "autofile:///_types/notes", type: "notes", description: "Updated notes.", titleField: "title",
+    uri: "autofile:///_types/notes", type: "notes", description: "Updated notes.", title: "Notebook entry", titleField: "title",
     schema: { type: "object", properties: { title: { type: "string" } } },
   });
   assert.deepEqual(await store.types.get("notes"), updated);
@@ -196,17 +198,42 @@ test("externally edited lossy schemas cannot validate record writes or appear as
 test("type snapshots preserve optional undefined metadata and partial update semantics", async () => {
   const { store } = await fixture();
   const original = await store.types.create("notes", {
-    description: "Notes.", schema: { type: "object" }, titleField: undefined,
+    description: "Notes.", schema: { type: "object" }, title: undefined, titleField: undefined,
   });
-  const changes: TypeChanges = { description: undefined, schema: undefined, titleField: undefined };
+  const changes: TypeChanges = { description: undefined, schema: undefined, title: undefined, titleField: undefined };
   const updating = store.types.update("notes", changes);
   changes.description = "Caller changed undefined.";
   changes.schema = { type: "object", required: ["changed"] };
   changes.titleField = "changed";
+  changes.title = "Changed title";
   assert.deepEqual(await updating, original);
-  await store.types.update("notes", { titleField: "name" });
+  await store.types.update("notes", { title: "Note", titleField: "name" });
+  assert.equal((await store.types.update("notes", { title: undefined })).title, "Note");
   assert.equal((await store.types.update("notes", { titleField: undefined })).titleField, "name");
   assert.equal(Object.hasOwn(await store.types.update("notes", { titleField: null }), "titleField"), false);
+  const removing: TypeChanges = { title: null };
+  const updatingTitle = store.types.update("notes", removing);
+  removing.title = "Changed removal";
+  assert.equal(Object.hasOwn(await updatingTitle, "title"), false);
+});
+
+test("type title validation never invokes accessors or serialization hooks and precedes initialization", async () => {
+  const { root, store } = await fixture();
+  let calls = 0;
+  const run = (): never => { calls += 1; throw new Error("Title input code must not run"); };
+  for (const descriptor of [
+    { enumerable: true, get: run },
+    { enumerable: false, value: "Note" },
+    { enumerable: true, value: { toJSON: run } },
+    { enumerable: true, value: Object.defineProperty({}, "toJSON", { get: run }) },
+  ]) {
+    const definition = Object.defineProperty({ description: "Notes.", schema: { type: "object" } }, "title", descriptor);
+    await assert.rejects(store.types.create("notes", definition), AutofileError);
+    const changes = Object.defineProperty({}, "title", descriptor);
+    await assert.rejects(store.types.update("notes", changes), AutofileError);
+  }
+  assert.equal(calls, 0);
+  assert.deepEqual(await readdir(root), []);
 });
 
 test("malformed schema roots still produce clear schema refusals", async () => {

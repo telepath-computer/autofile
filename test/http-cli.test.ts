@@ -663,11 +663,36 @@ test("serve publishes watched resource and list changes over HTTP", {
     checkpoint = resourceNoticeCheckpoint(notices);
     assertToolJson(await other.callTool({
       name: "update_type",
+      arguments: { type: "watched-type", title: "Watched type" },
+    }), { uri: "autofile:///_types/watched-type", errors: [] });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/watched-type",
+    ], true, "HTTP declaration title change notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "update_type",
       arguments: { type: "watched-type", description: "Changed declarations." },
     }), { uri: "autofile:///_types/watched-type", errors: [] });
     await expectResourceNotices(notices, checkpoint, [
       "autofile:///_types/watched-type",
-    ], true, "HTTP declaration change notices did not reach its exact subscriptions");
+    ], true, "HTTP declaration description change notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "update_type",
+      arguments: { type: "watched-type", title: null },
+    }), { uri: "autofile:///_types/watched-type", errors: [] });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/watched-type",
+    ], true, "HTTP declaration title removal notices did not reach its exact subscriptions");
+    const untitledResources = await other.listResources();
+    assert.deepEqual(untitledResources.resources.find(({ uri }) => uri === "autofile:///_types/watched-type"), {
+      uri: "autofile:///_types/watched-type",
+      name: "Type: watched-type",
+      mimeType: "application/json",
+      description: "Changed declarations.",
+    });
 
     checkpoint = resourceNoticeCheckpoint(notices);
     assertToolJson(await other.callTool({
@@ -781,6 +806,7 @@ test("an HTTP agent can search, patch, invalidate, read resources, and clean lin
     arguments: {
       type: "organizations",
       description: "Organizations reached over HTTP.",
+      title: "Organization",
       titleField: "name",
       schema: organizationSchema,
     },
@@ -790,6 +816,7 @@ test("an HTTP agent can search, patch, invalidate, read resources, and clean lin
     arguments: {
       type: "contacts",
       description: "Contacts reached over HTTP.",
+      title: "Contact",
       titleField: "name",
       schema: contactSchema,
     },
@@ -906,7 +933,11 @@ test("an HTTP agent can search, patch, invalidate, read resources, and clean lin
   };
   const changedType = await client.callTool({
     name: "update_type",
-    arguments: { type: "contacts", schema: completeOnlySchema },
+    arguments: {
+      type: "contacts",
+      title: "Person",
+      schema: completeOnlySchema,
+    },
   });
   const changedTypeBody = asObject(changedType.structuredContent);
   assert.equal(changedTypeBody.uri, "autofile:///_types/contacts");
@@ -951,6 +982,7 @@ test("an HTTP agent can search, patch, invalidate, read resources, and clean lin
   assert.deepEqual(resources.resources.find(({ uri }) => uri === "autofile:///_types/contacts"), {
     uri: "autofile:///_types/contacts",
     name: "Type: contacts",
+    title: "Person",
     mimeType: "application/json",
     description: "Contacts reached over HTTP.",
   });
@@ -969,6 +1001,7 @@ test("an HTTP agent can search, patch, invalidate, read resources, and clean lin
     uri: "autofile:///_types/contacts",
     type: "contacts",
     description: "Contacts reached over HTTP.",
+    title: "Person",
     titleField: "name",
     schema: completeOnlySchema,
   });

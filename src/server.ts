@@ -143,6 +143,10 @@ const createTypeSchema = fromJsonSchema<CreateTypeInput>({
       type: "string",
       description: "A top-level field of the record whose string value is shown as its title.",
     },
+    title: {
+      type: "string",
+      description: "The name of the type in words, in the singular, such as \"Journal entry\", shown to people in place of the type name.",
+    },
   },
   required: ["type", "description", "schema"],
   additionalProperties: false,
@@ -156,6 +160,10 @@ const updateTypeSchema = fromJsonSchema<UpdateTypeInput>({
     titleField: {
       type: ["string", "null"],
       description: "The new title field; `null` removes it.",
+    },
+    title: {
+      type: ["string", "null"],
+      description: "The new title; `null` removes it.",
     },
   },
   required: ["type"],
@@ -234,7 +242,7 @@ export async function buildServer(autofile: Autofile): Promise<McpServer> {
   server.registerTool(
     "list_types",
     {
-      description: "Returns every type, ordered by name, with the URI of its declaration and its description.",
+      description: "Returns every type, ordered by name, with the URI of its declaration, its description, and its `title` when it has one.",
       inputSchema: listTypesSchema,
     },
     async (input) => toolResult(await tools.listTypes(input)),
@@ -252,7 +260,7 @@ export async function buildServer(autofile: Autofile): Promise<McpServer> {
   server.registerTool(
     "update_type",
     {
-      description: "Replaces the description, schema or title field of a type, or any of them.",
+      description: "Replaces the description, schema, title field or title of a type, or any of them.",
       inputSchema: updateTypeSchema,
     },
     async (input) => toolResult(await tools.updateType(input)),

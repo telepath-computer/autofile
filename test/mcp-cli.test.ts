@@ -743,11 +743,36 @@ test("the built command publishes watched resource and list changes over stdio",
     checkpoint = resourceNoticeCheckpoint(notices);
     assertToolJson(await other.callTool({
       name: "update_type",
+      arguments: { type: "watched-type", title: "Watched type" },
+    }), { uri: "autofile:///_types/watched-type", errors: [] });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/watched-type",
+    ], true, "declaration title change notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "update_type",
       arguments: { type: "watched-type", description: "Changed declarations." },
     }), { uri: "autofile:///_types/watched-type", errors: [] });
     await expectResourceNotices(notices, checkpoint, [
       "autofile:///_types/watched-type",
-    ], true, "declaration change notices did not reach its exact subscriptions");
+    ], true, "declaration description change notices did not reach its exact subscriptions");
+
+    checkpoint = resourceNoticeCheckpoint(notices);
+    assertToolJson(await other.callTool({
+      name: "update_type",
+      arguments: { type: "watched-type", title: null },
+    }), { uri: "autofile:///_types/watched-type", errors: [] });
+    await expectResourceNotices(notices, checkpoint, [
+      "autofile:///_types/watched-type",
+    ], true, "declaration title removal notices did not reach its exact subscriptions");
+    const untitledResources = await other.listResources();
+    assert.deepEqual(untitledResources.resources.find(({ uri }) => uri === "autofile:///_types/watched-type"), {
+      uri: "autofile:///_types/watched-type",
+      name: "Type: watched-type",
+      mimeType: "application/json",
+      description: "Changed declarations.",
+    });
 
     checkpoint = resourceNoticeCheckpoint(notices);
     assertToolJson(await other.callTool({
@@ -1153,12 +1178,12 @@ test("an agent can complete the full record, link, search, blob, type, and resou
         additionalProperties: false,
       },
       create_type: {
-        properties: ["type", "description", "schema", "titleField"],
+        properties: ["type", "description", "schema", "titleField", "title"],
         required: ["type", "description", "schema"],
         additionalProperties: false,
       },
       update_type: {
-        properties: ["type", "description", "schema", "titleField"],
+        properties: ["type", "description", "schema", "titleField", "title"],
         required: ["type"],
         additionalProperties: false,
       },
@@ -1174,12 +1199,14 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       {
         type: "contacts",
         description: "People and their organizations.",
+        title: "Contact",
         titleField: "name",
         schema: contactSchema,
       },
       {
         type: "entries",
         description: "Searchable entries.",
+        title: "Entry",
         titleField: "title",
         schema: entrySchema,
       },
@@ -1226,6 +1253,18 @@ test("an agent can complete the full record, link, search, blob, type, and resou
         message: "type: must use lowercase letters, digits, and hyphens and start with a letter",
       }],
     }, { isError: true });
+    const emptyTypeTitle = await bootstrap.callTool({
+      name: "create_type",
+      arguments: {
+        type: "empty-title",
+        description: "Must be refused.",
+        title: "",
+        schema: { type: "object" },
+      },
+    });
+    assertToolJson(emptyTypeTitle, {
+      errors: [{ message: "title: must be a non-empty string" }],
+    }, { isError: true });
 
     assertToolJson(await bootstrap.callTool({ name: "list_types", arguments: {} }), {
       types: [
@@ -1233,11 +1272,13 @@ test("an agent can complete the full record, link, search, blob, type, and resou
           uri: "autofile:///_types/contacts",
           type: "contacts",
           description: "People and their organizations.",
+          title: "Contact",
         },
         {
           uri: "autofile:///_types/entries",
           type: "entries",
           description: "Searchable entries.",
+          title: "Entry",
         },
         {
           uri: "autofile:///_types/organizations",
@@ -1252,6 +1293,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     }), {
       uri: "autofile:///_types/contacts",
       description: "People and their organizations.",
+      title: "Contact",
       titleField: "name",
       schema: contactSchema,
     });
@@ -1582,6 +1624,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       {
         uri: "autofile:///_types/contacts",
         name: "Type: contacts",
+        title: "Contact",
         mimeType: "application/json",
         description: "People and their organizations.",
       },
@@ -1603,6 +1646,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       uri: "autofile:///_types/contacts",
       type: "contacts",
       description: "People and their organizations.",
+      title: "Contact",
       titleField: "name",
       schema: contactSchema,
     });
@@ -1664,9 +1708,20 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     assert.ok(Array.isArray(refusedTypeUpdateBody.errors));
     assert.match(String(asObject(refusedTypeUpdateBody.errors[0]).message), /unknown format/u);
     assertToolJson(refusedTypeUpdate, refusedTypeUpdateBody, { isError: true });
+    const emptyTypeTitleUpdate = await client.callTool({
+      name: "update_type",
+      arguments: { type: "entries", title: "" },
+    });
+    assertToolJson(emptyTypeTitleUpdate, {
+      errors: [{ message: "title: must be a non-empty string or null" }],
+    }, { isError: true });
     const changedType = await client.callTool({
       name: "update_type",
-      arguments: { type: "entries", schema: completeOnlySchema },
+      arguments: {
+        type: "entries",
+        title: "Journal entry",
+        schema: completeOnlySchema,
+      },
     });
     const changedTypeBody = asObject(changedType.structuredContent);
     assert.equal(changedTypeBody.uri, "autofile:///_types/entries");
@@ -1676,6 +1731,16 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       asObject(error).uri === "autofile:///entries/item-001"
     )));
     assertToolJson(changedType, changedTypeBody);
+    assertToolJson(await client.callTool({
+      name: "get_type",
+      arguments: { type: "entries" },
+    }), {
+      uri: "autofile:///_types/entries",
+      description: "Searchable entries.",
+      title: "Journal entry",
+      titleField: "title",
+      schema: completeOnlySchema,
+    });
 
     const invalidSearch = await client.callTool({
       name: "find_records",

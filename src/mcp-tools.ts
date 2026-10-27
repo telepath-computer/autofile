@@ -26,6 +26,7 @@ export interface CreateTypeInput {
   description: string;
   schema: JsonObject;
   titleField?: string;
+  title?: string;
 }
 /** Arguments to update_type. */
 export interface UpdateTypeInput {
@@ -33,6 +34,7 @@ export interface UpdateTypeInput {
   description?: string;
   schema?: JsonObject;
   titleField?: string | null;
+  title?: string | null;
 }
 /** Arguments to delete_type. */
 export interface DeleteTypeInput { type: string }
@@ -53,7 +55,7 @@ export interface RecordResult extends UriResult {
   error?: string;
 }
 /** A declaration summary returned by list_types. */
-export interface TypeSummary extends UriResult { type: string; description: string }
+export interface TypeSummary extends UriResult { type: string; description: string; title?: string }
 /** The list_types result body. */
 export interface ListTypesResult { types: TypeSummary[] }
 /** A full declaration returned by get_type. */
@@ -61,6 +63,7 @@ export interface TypeResult extends UriResult {
   description: string;
   schema: JsonObject;
   titleField?: string;
+  title?: string;
 }
 /** A successful type update also reports records invalid under its schema. */
 export interface UpdateTypeResult extends UriResult { errors: StoreError[] }
@@ -118,7 +121,12 @@ export function buildTools(autofile: Autofile): Tools {
     }),
     async listTypes() {
       const declarations = await autofile.types.list();
-      return { types: declarations.map(({ uri, type, description }) => ({ uri, type, description })) };
+      return {
+        types: declarations.map(({ uri, type, description, title }) => ({
+          uri, type, description,
+          ...(title === undefined ? {} : { title }),
+        })),
+      };
     },
     getType: ({ type }) => withRefusal(async () => {
       const declaration = await autofile.types.get(type);
