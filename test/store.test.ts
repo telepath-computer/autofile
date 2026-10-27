@@ -16,14 +16,13 @@ import fsPromises, {
   writeFile,
 } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { after, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { openStore, type JsonObject, type JsonValue, type Store } from "../dist/store.js";
+import { openStore, type JsonObject, type JsonValue, type Store } from "./helpers/store.ts";
 
 const roots: string[] = [];
 const taskSchema = {
@@ -152,14 +151,14 @@ after(async () => {
   for (const root of roots) await rm(root, { recursive: true, force: true });
 });
 
-test("openStore creates a missing data folder", async () => {
+test("the initialized fixture creates a missing data folder", async () => {
   const { dataFolder, store } = await makeStore();
 
   assert.equal((await stat(dataFolder)).isDirectory(), true);
   assert.deepEqual(await store.listTypes({}), { types: [] });
 });
 
-test("openStore uses the data and lock locations resolved from AUTOFILE_HOME", async () => {
+test("the fixture uses the data and lock locations resolved from AUTOFILE_HOME", async () => {
   const root = await mkdtemp(join(tmpdir(), "autofile-store-default-"));
   roots.push(root);
   const autofileHome = join(root, "home");
@@ -256,7 +255,7 @@ test("type names, duplicate types, and missing types are refused as JSON errors"
   assert.match(errorMessages(await store.deleteType({ type: "missing" }))[0] ?? "", /does not exist/u);
 
   await writeFile(join(dataFolder, "_types", "broken.json"), "{\n");
-  assert.match(errorMessages(await store.getType({ type: "broken" }))[0] ?? "", /type declaration.*JSON/u);
+  assert.match(errorMessages(await store.getType({ type: "broken" }))[0] ?? "", /type declaration is unavailable/u);
 });
 
 test("argument refusals name the argument that must be corrected", async () => {
@@ -440,28 +439,26 @@ test("URI and blob formats on the root report their string requirement without a
   }
 });
 
-test("blob writes materialize paths and data URIs through nested refs, arrays, and anyOf", async () => {
-  const { dataFolder, root, store } = await makeStore();
+test("record writes accept uploaded attachment URIs through nested refs, arrays, and anyOf", async () => {
+  const { dataFolder, store } = await makeStore();
   await createDocumentsType(store);
   const pdf = Buffer.from("%PDF-1.7\npath fixture\n", "utf8");
   const image = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]);
   const text = Buffer.from("data URI fixture\n", "utf8");
-  const pdfPath = join(root, "Original.PDF");
-  await writeFile(pdfPath, pdf);
 
   assert.deepEqual(await store.createRecord({
     type: "documents",
-    key: "materialized",
+    key: "uploaded",
     record: {
-      file: pdfPath,
+      file: await store.autofile.blobs.put(pdf, "application/pdf"),
       attachments: [
-        `data:image/png;base64,${image.toString("base64")}`,
-        { file: `data:text/plain;charset=utf-8;base64,${text.toString("base64")}` },
+        await store.autofile.blobs.put(image, "image/png"),
+        { file: await store.autofile.blobs.put(text, "text/plain") },
       ],
     },
-  }), { uri: "autofile:///documents/materialized" });
+  }), { uri: "autofile:///documents/uploaded" });
 
-  const record = await store.getRecord({ uri: "autofile:///documents/materialized" });
+  const record = await store.getRecord({ uri: "autofile:///documents/uploaded" });
   assert.ok("value" in record);
   assert.deepEqual(record.value, {
     file: expectedBlobUri(pdf, "pdf"),
@@ -480,27 +477,27 @@ test("blob writes materialize paths and data URIs through nested refs, arrays, a
   ), pdf);
 });
 
-test("blob writes accept existing blobs and refuse missing blobs and invalid candidates", async () => {
+test("record writes share attachment URI inputs and retain existing attachments on update", async () => {
   const { dataFolder, root, store } = await makeStore();
   await createDocumentsType(store);
   const bytes = Buffer.from("shared contents\n", "utf8");
-  const path = join(root, "shared.bin");
-  await writeFile(path, bytes);
   await store.createRecord({
     type: "documents",
     key: "source",
-    record: { file: path },
+    record: { file: await store.autofile.blobs.put(bytes, "application/octet-stream") },
   });
   const uri = expectedBlobUri(bytes, "bin");
   assert.deepEqual(await store.createRecord({
-    type: "documents",
-    key: "existing",
-    record: { file: uri },
+    type: "documents", key: "existing", record: { file: uri },
   }), { uri: "autofile:///documents/existing" });
+  assert.deepEqual(await store.updateRecord({
+    uri: "autofile:///documents/source",
+    patch: { file: uri, attachments: [uri] },
+  }), { uri: "autofile:///documents/source" });
 
   const invalid: Array<[string, JsonValue, RegExp]> = [
     ["relative", "relative/file.pdf", /file/u],
-    ["missing-path", join(root, "missing.pdf"), /does not exist/u],
+    ["missing-path", join(root, "missing.pdf"), /blob|file|attachments/u],
     ["missing-uri", `autofile:///_blobs/${"a".repeat(64)}.pdf`, /does not exist/u],
     ["short-uri", "autofile:///_blobs/abcd.pdf", /file|blob/u],
     ["uppercase-uri", `autofile:///_blobs/${"A".repeat(64)}.PDF`, /file|blob/u],
@@ -524,11 +521,11 @@ test("blob writes accept existing blobs and refuse missing blobs and invalid can
         join(root, "still-missing.pdf"),
       ],
     },
-  }))[0] ?? "", /does not exist/u);
+  }))[0] ?? "", /blob|file|attachments/u);
   assert.deepEqual(await storedBlobNames(dataFolder), [uri.split("/").at(-1)]);
 });
 
-test("blob paths can be disabled while data URIs remain accepted", async () => {
+test("record tools refuse local attachment paths and inline data URIs", async () => {
   const { root, store } = await makeStore();
   await createDocumentsType(store);
   const bytes = Buffer.from("transport boundary\n", "utf8");
@@ -539,12 +536,11 @@ test("blob paths can be disabled while data URIs remain accepted", async () => {
     type: "documents",
     key: "path-over-http",
     record: { file: path },
-  }, { allowLocalPaths: false }))[0] ?? "", /only.*stdio|local path/u);
-  assert.deepEqual(await store.createRecord({
-    type: "documents",
-    key: "data-over-http",
+  }))[0] ?? "", /blob|file|attachments/u);
+  assert.match(errorMessages(await store.createRecord({
+    type: "documents", key: "data-over-http",
     record: { file: `data:text/plain;base64,${bytes.toString("base64")}` },
-  }, { allowLocalPaths: false }), { uri: "autofile:///documents/data-over-http" });
+  }))[0] ?? "", /file|blob/u);
 });
 
 test("refused and duplicate record writes leave the blob folder unchanged", async () => {
@@ -555,22 +551,23 @@ test("refused and duplicate record writes leave the blob folder unchanged", asyn
   await store.createRecord({
     type: "documents",
     key: "taken",
-    record: { file: `data:text/plain;base64,${accepted.toString("base64")}` },
+    record: { file: await store.autofile.blobs.put(accepted, "text/plain") },
   });
+  const refusedUri = await store.autofile.blobs.put(refused, "text/plain");
   const before = await storedBlobNames(dataFolder);
 
   assert.match(errorMessages(await store.createRecord({
     type: "documents",
     key: "invalid-record",
     record: {
-      file: `data:text/plain;base64,${refused.toString("base64")}`,
+      file: refusedUri,
       unexpected: true,
     },
   }))[0] ?? "", /unexpected|additional/u);
   assert.match(errorMessages(await store.createRecord({
     type: "documents",
     key: "taken",
-    record: { file: `data:text/plain;base64,${refused.toString("base64")}` },
+    record: { file: refusedUri },
   }))[0] ?? "", /already exists/u);
   const recordPath = join(dataFolder, "documents", "taken.json");
   const recordBefore = await readFile(recordPath, "utf8");
@@ -578,242 +575,96 @@ test("refused and duplicate record writes leave the blob folder unchanged", asyn
     uri: "autofile:///documents/taken",
     patch: {
       attachments: [
-        `data:text/plain;base64,${refused.toString("base64")}`,
+        refusedUri,
         join(root, "missing.pdf"),
       ],
     },
-  }))[0] ?? "", /does not exist/u);
+  }))[0] ?? "", /blob|file|attachments/u);
   assert.deepEqual(await storedBlobNames(dataFolder), before);
   assert.equal(await readFile(recordPath, "utf8"), recordBefore);
 });
 
-test("blob writes validate the materialized record before storing anything", async () => {
+test("record writes enforce attachment constraints on the uploaded URI", async () => {
   const { dataFolder, store } = await makeStore();
   await store.createType({
-    type: "data-only",
-    description: "A deliberately incompatible post-materialization schema.",
-    schema: {
-      type: "object",
-      required: ["file"],
-      properties: { file: { type: "string", format: "blob", pattern: "^data:" } },
-      additionalProperties: false,
-    },
+    type: "data-only", description: "An incompatible attachment schema.",
+    schema: { type: "object", required: ["file"], properties: { file: { type: "string", format: "blob", pattern: "^data:" } } },
   });
-
-  const result = await store.createRecord({
-    type: "data-only",
-    key: "refused",
-    record: { file: "data:text/plain;base64,SGVsbG8=" },
-  });
+  const uri = await store.autofile.blobs.put(Buffer.from("Hello"), "text/plain");
+  const before = await storedBlobNames(dataFolder);
+  const result = await store.createRecord({ type: "data-only", key: "refused", record: { file: uri } });
   assert.match(errorMessages(result)[0] ?? "", /file/u);
-  assert.deepEqual(await storedBlobNames(dataFolder), []);
+  assert.deepEqual(await storedBlobNames(dataFolder), before);
 });
 
-test("blob writes recheck link annotations after materializing a data URI", async () => {
+test("record writes check links even when the same value is annotated as an attachment", async () => {
   const { dataFolder, store } = await makeStore();
   await store.createType({
-    type: "linked-files",
-    description: "Fields carrying both blob and URI annotations.",
-    schema: {
-      type: "object",
-      required: ["file"],
-      properties: {
-        file: {
-          type: "string",
-          allOf: [{ format: "blob" }, { format: "uri" }],
-        },
-      },
-      additionalProperties: false,
-    },
+    type: "linked-files", description: "Both attachment and record link annotations.",
+    schema: { type: "object", required: ["file"], properties: { file: { type: "string", allOf: [{ format: "blob" }, { format: "uri" }] } } },
   });
-
-  const result = await store.createRecord({
-    type: "linked-files",
-    key: "refused",
-    record: { file: "data:text/plain;base64,SGVsbG8=" },
-  });
+  const uri = await store.autofile.blobs.put(Buffer.from("Hello"), "text/plain");
+  const before = await storedBlobNames(dataFolder);
+  const result = await store.createRecord({ type: "linked-files", key: "refused", record: { file: uri } });
   assert.match(errorMessages(result)[0] ?? "", /links to a record that does not exist/u);
-  assert.deepEqual(await storedBlobNames(dataFolder), []);
+  assert.deepEqual(await storedBlobNames(dataFolder), before);
 });
 
-test("blob writes refuse non-URI fields exposed by a conditional after materialization", async () => {
-  const { dataFolder, store } = await makeStore();
+test("conditional attachment annotations check only the selected field and its bytes", async () => {
+  const { store } = await makeStore();
   await store.createType({
-    type: "conditional-blobs",
-    description: "The annotated blob field changes with the first field's representation.",
+    type: "conditional-blobs", description: "A conditional attachment.",
     schema: {
-      type: "object",
-      required: ["first", "second"],
-      properties: {
-        first: { type: "string" },
-        second: { type: "string" },
-      },
-      allOf: [{
-        if: {
-          properties: { first: { pattern: "^data:" } },
-          required: ["first"],
-        },
-        then: { properties: { first: { format: "blob" } } },
-        else: { properties: { second: { format: "blob" } } },
-      }],
-      additionalProperties: false,
+      type: "object", required: ["first", "second"],
+      properties: { first: { type: "string" }, second: { type: "string" } },
+      if: { properties: { first: { pattern: "^autofile:" } } },
+      then: { properties: { first: { format: "blob" } } },
+      else: { properties: { second: { format: "blob" } } },
     },
   });
-
-  const result = await store.createRecord({
-    type: "conditional-blobs",
-    key: "refused",
-    record: {
-      first: "data:text/plain;base64,Rmlyc3QK",
-      second: "data:text/plain;base64,U2Vjb25kCg==",
-    },
-  });
-
-  assert.match(errorMessages(result)[0] ?? "", /second.*blob URI/u);
-  assert.deepEqual(await storedBlobNames(dataFolder), []);
-});
-
-test("blob writes persist only prepared blobs still annotated in the final record", async () => {
-  const { dataFolder, store } = await makeStore();
-  await createDocumentsType(store);
-  const existingBytes = Buffer.from("already stored\n", "utf8");
-  const existingUri = expectedBlobUri(existingBytes, "txt");
-  await store.createRecord({
-    type: "documents",
-    key: "source",
-    record: { file: `data:text/plain;base64,${existingBytes.toString("base64")}` },
-  });
-  await store.createType({
-    type: "conditional-owners",
-    description: "Only the field selected after materialization owns a blob.",
-    schema: {
-      type: "object",
-      required: ["candidate", "owner"],
-      properties: {
-        candidate: { type: "string" },
-        owner: { type: "string" },
-      },
-      allOf: [{
-        if: {
-          properties: { candidate: { pattern: "^data:" } },
-          required: ["candidate"],
-        },
-        then: { properties: { candidate: { format: "blob" } } },
-        else: { properties: { owner: { format: "blob" } } },
-      }],
-      additionalProperties: false,
-    },
-  });
-  const unusedBytes = Buffer.from("prepared but not finally held\n", "utf8");
-  const unusedUri = expectedBlobUri(unusedBytes, "txt");
-
+  const uri = await store.autofile.blobs.put(Buffer.from("first"), "text/plain");
   assert.deepEqual(await store.createRecord({
-    type: "conditional-owners",
-    key: "accepted",
-    record: {
-      candidate: `data:text/plain;base64,${unusedBytes.toString("base64")}`,
-      owner: existingUri,
-    },
-  }), { uri: "autofile:///conditional-owners/accepted" });
-  assert.deepEqual(await storedBlobNames(dataFolder), [existingUri.split("/").at(-1)]);
-  assert.equal(await store.readResource(unusedUri), undefined);
+    type: "conditional-blobs", key: "accepted", record: { first: uri, second: "data:text/plain;base64,U2Vjb25kCg==" },
+  }), { uri: "autofile:///conditional-blobs/accepted" });
+  const refusal = await store.updateRecord({ uri: "autofile:///conditional-blobs/accepted", patch: { first: "ordinary text" } });
+  assert.match(errorMessages(refusal)[0] ?? "", /second/u);
 });
 
-test("blob size checks accept exactly 7 MiB and refuse larger paths before reading", async () => {
-  const { dataFolder, root, store } = await makeStore();
+test("blob size checks accept exactly 7 MiB", async () => {
+  const { dataFolder, store } = await makeStore();
   await createDocumentsType(store);
-  const limit = 7_340_032;
-  const exactPath = join(root, "exact.bin");
-  const oversizedPath = join(root, "oversized.bin");
-  await Promise.all([writeFile(exactPath, ""), writeFile(oversizedPath, "")]);
-  await Promise.all([truncate(exactPath, limit), truncate(oversizedPath, limit + 1)]);
-
+  const bytes = Buffer.alloc(7_340_032);
   assert.deepEqual(await store.createRecord({
     type: "documents",
     key: "exact",
-    record: { file: exactPath },
+    record: { file: await store.autofile.blobs.put(bytes, "application/octet-stream") },
   }), { uri: "autofile:///documents/exact" });
-
-  let readOversizedFile = false;
-  const originalOpen = fsPromises.open;
-  fsPromises.open = (async (...args: Parameters<typeof originalOpen>) => {
-    const handle = await originalOpen(...args);
-    if (args[0] !== oversizedPath) return handle;
-    return new Proxy(handle, {
-      get(target, property, receiver) {
-        if (property === "readFile") {
-          return (...readArgs: unknown[]) => {
-            readOversizedFile = true;
-            return Reflect.apply(target.readFile, target, readArgs);
-          };
-        }
-        if (property === "read") {
-          return (...readArgs: unknown[]) => {
-            readOversizedFile = true;
-            return Reflect.apply(target.read, target, readArgs);
-          };
-        }
-        const value = Reflect.get(target, property, receiver) as unknown;
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
-  }) as typeof fsPromises.open;
-  syncBuiltinESMExports();
-  try {
-    const refusal = await store.createRecord({
-      type: "documents",
-      key: "oversized",
-      record: { file: oversizedPath },
-    });
-    const message = errorMessages(refusal)[0] ?? "";
-    assert.match(message, new RegExp(String(limit + 1), "u"));
-    assert.match(message, new RegExp(String(limit), "u"));
-    assert.equal(readOversizedFile, false);
-  } finally {
-    fsPromises.open = originalOpen;
-    syncBuiltinESMExports();
-  }
+  const blob = await store.readResource(expectedBlobUri(bytes, "bin"));
+  assert.ok(blob !== undefined && "blob" in blob);
+  assert.deepEqual(Buffer.from(blob.blob, "base64"), bytes);
   assert.equal((await storedBlobNames(dataFolder)).length, 1);
 });
 
-test("blob path reads stop at one byte over the limit when stat underreports the source", async () => {
-  const { dataFolder, root, store } = await makeStore();
-  await createDocumentsType(store);
-  const limit = 7_340_032;
-  const growingPath = join(root, "growing.bin");
-  await writeFile(growingPath, Buffer.alloc(limit + 65_536));
-
-  let bytesRead = 0;
-  let readCalls = 0;
-  let maximumRequestedBytes = 0;
-  let readAfterLimit = false;
+test("stored attachment reads reject oversized contents even when stat underreports", async () => {
+  const { dataFolder, store } = await makeStore();
+  const name = `${"a".repeat(64)}.bin`;
+  const blobPath = join(dataFolder, "_blobs", name);
+  await mkdir(join(dataFolder, "_blobs"), { recursive: true });
+  await writeFile(blobPath, Buffer.alloc(7_340_033));
+  let contentsRead = false;
   const originalOpen = fsPromises.open;
   fsPromises.open = (async (...args: Parameters<typeof originalOpen>) => {
     const handle = await originalOpen(...args);
-    if (args[0] !== growingPath) return handle;
+    if (args[0] !== blobPath) return handle;
     return new Proxy(handle, {
       get(target, property, receiver) {
         if (property === "stat") {
-          return async (...statArgs: unknown[]) => {
-            const details = await Reflect.apply(target.stat, target, statArgs);
-            return new Proxy(details, {
-              get(statTarget, statProperty, statReceiver) {
-                if (statProperty === "size") return 0;
-                const value = Reflect.get(statTarget, statProperty, statReceiver) as unknown;
-                return typeof value === "function" ? value.bind(statTarget) : value;
-              },
-            });
-          };
+          return async () => Object.assign(await target.stat(), { size: 0 });
         }
-        if (property === "read") {
-          return async (...readArgs: unknown[]) => {
-            if (bytesRead > limit) readAfterLimit = true;
-            const requestedBytes = typeof readArgs[2] === "number" ? readArgs[2] : 0;
-            maximumRequestedBytes = Math.max(maximumRequestedBytes, requestedBytes);
-            readCalls += 1;
-            const result = await Reflect.apply(target.read, target, readArgs) as { bytesRead: number };
-            bytesRead += result.bytesRead;
-            return result;
+        if (property === "readFile") {
+          return async () => {
+            contentsRead = true;
+            return target.readFile();
           };
         }
         const value = Reflect.get(target, property, receiver) as unknown;
@@ -823,120 +674,18 @@ test("blob path reads stop at one byte over the limit when stat underreports the
   }) as typeof fsPromises.open;
   syncBuiltinESMExports();
   try {
-    const refusal = await store.createRecord({
-      type: "documents",
-      key: "growing",
-      record: { file: growingPath },
-    });
-    const message = errorMessages(refusal)[0] ?? "";
-    assert.match(message, new RegExp(String(limit + 1), "u"));
-    assert.match(message, new RegExp(String(limit), "u"));
-    assert.equal(bytesRead, limit + 1);
-    assert.equal(readAfterLimit, false);
-    assert.ok(readCalls > 1);
-    assert.ok(maximumRequestedBytes <= 64 * 1024);
+    assert.equal(await store.readResource(`autofile:///_blobs/${name}`), undefined);
+    assert.equal(contentsRead, true);
   } finally {
     fsPromises.open = originalOpen;
     syncBuiltinESMExports();
   }
-  assert.deepEqual(await storedBlobNames(dataFolder), []);
 });
 
-test("blob path inputs refuse directories", async () => {
-  const { dataFolder, root, store } = await makeStore();
-  await createDocumentsType(store);
-  const directoryPath = join(root, "directory.bin");
-  await mkdir(directoryPath);
-
-  const result = await store.createRecord({
-    type: "documents",
-    key: "directory",
-    record: { file: directoryPath },
-  });
-
-  assert.match(errorMessages(result)[0] ?? "", /not a file/u);
-  assert.deepEqual(await storedBlobNames(dataFolder), []);
-});
-
-test("blob path inputs refuse FIFOs without waiting for a writer", { timeout: 5_000 }, async (context) => {
-  const { dataFolder, root, store } = await makeStore();
-  await createDocumentsType(store);
-  const fifoPath = join(root, "source.fifo");
-  if (!await makeFifo(fifoPath)) {
-    context.skip("mkfifo is not available on this platform");
-    return;
-  }
-
-  const result = await store.createRecord({
-    type: "documents",
-    key: "fifo",
-    record: { file: fifoPath },
-  });
-
-  assert.match(errorMessages(result)[0] ?? "", /not a file/u);
-  assert.deepEqual(await storedBlobNames(dataFolder), []);
-});
-
-test("blob path inputs refuse sockets", async () => {
-  const { dataFolder, root, store } = await makeStore();
-  await createDocumentsType(store);
-  const socketPath = join(root, "source.socket");
-  const server = createServer();
-  await new Promise<void>((resolveListening, rejectListening) => {
-    server.once("error", rejectListening);
-    server.listen(socketPath, resolveListening);
-  });
-  try {
-    const result = await store.createRecord({
-      type: "documents",
-      key: "socket",
-      record: { file: socketPath },
-    });
-
-    assert.match(errorMessages(result)[0] ?? "", /not a file/u);
-    assert.deepEqual(await storedBlobNames(dataFolder), []);
-  } finally {
-    await new Promise<void>((resolveClose, rejectClose) => {
-      server.close((error) => error === undefined ? resolveClose() : rejectClose(error));
-    });
-  }
-});
-
-test("blob path inputs follow symlinks to regular files and use the supplied path extension", async () => {
-  const { dataFolder, root, store } = await makeStore();
-  await createDocumentsType(store);
-  const bytes = Buffer.from("followed symlink\n", "utf8");
-  const targetPath = join(root, "target.bin");
-  const linkPath = join(root, "alias.SYMLINK_EXT");
-  await writeFile(targetPath, bytes);
-  await symlink(targetPath, linkPath);
-
-  assert.deepEqual(await store.createRecord({
-    type: "documents",
-    key: "symlink",
-    record: { file: linkPath },
-  }), { uri: "autofile:///documents/symlink" });
-  const uri = expectedBlobUri(bytes, "symlink_ext");
-  const record = await store.getRecord({ uri: "autofile:///documents/symlink" });
-  assert.ok("value" in record);
-  assert.equal(record.value.file, uri);
-  assert.deepEqual(await readFile(join(dataFolder, "_blobs", uri.split("/").at(-1) ?? "")), bytes);
-});
-
-test("blob extensions use one safe grammar for paths, media types, listing, and reading", async () => {
-  const { root, store } = await makeStore();
+test("blob media types survive attachment reads without standalone listings", async () => {
+  const { store } = await makeStore();
   await createDocumentsType(store);
   const inputs: Array<{ bytes: Buffer; extension?: string; value: string }> = [];
-  for (const [name, contents, extension] of [
-    ["path.HYPHEN-EXT", "path hyphen\n", "hyphen-ext"],
-    ["path.UNDER_SCORE", "path underscore\n", "under_score"],
-    ["path.BAD+EXT", "path unsafe\n", undefined],
-  ] as const) {
-    const bytes = Buffer.from(contents, "utf8");
-    const path = join(root, name);
-    await writeFile(path, bytes);
-    inputs.push({ bytes, extension, value: path });
-  }
   for (const [mediaType, contents, extension] of [
     ["application/vnd.hydrostatix.sof-data", "media hyphen\n", "sfd-hdstx"],
     ["model/vnd.parasolid.transmit.binary", "media underscore\n", "x_b"],
@@ -945,7 +694,7 @@ test("blob extensions use one safe grammar for paths, media types, listing, and 
     inputs.push({
       bytes,
       extension,
-      value: `data:${mediaType};base64,${bytes.toString("base64")}`,
+      value: await store.autofile.blobs.put(bytes, mediaType),
     });
   }
 
@@ -965,36 +714,31 @@ test("blob extensions use one safe grammar for paths, media types, listing, and 
 
   const resources = await store.listResources();
   for (const [index, uri] of expectedUris.entries()) {
-    assert.equal(resources.some((resource) => resource.uri === uri), true);
+    assert.equal(resources.some((resource) => resource.uri === uri), false);
     const contents = await store.readResource(uri ?? "");
     assert.ok(contents !== undefined && "blob" in contents);
     assert.deepEqual(Buffer.from(contents.blob, "base64"), inputs[index]?.bytes);
   }
 });
 
-test("blob size checks refuse an oversized data URI with its size and limit", async () => {
+test("explicit uploads refuse oversized bytes with their size and the limit", async () => {
   const { dataFolder, store } = await makeStore();
-  await createDocumentsType(store);
   const limit = 7_340_032;
-  const bytes = Buffer.alloc(limit + 1);
-  const refusal = await store.createRecord({
-    type: "documents",
-    key: "oversized-data",
-    record: { file: `data:application/octet-stream;base64,${bytes.toString("base64")}` },
+  await assert.rejects(store.autofile.blobs.put(Buffer.alloc(limit + 1), "application/octet-stream"), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, new RegExp(String(limit + 1), "u"));
+    assert.match(error.message, new RegExp(String(limit), "u"));
+    return true;
   });
-  const message = errorMessages(refusal)[0] ?? "";
-  assert.match(message, new RegExp(String(limit + 1), "u"));
-  assert.match(message, new RegExp(String(limit), "u"));
   assert.deepEqual(await storedBlobNames(dataFolder), []);
 });
 
 test("storing the same blob twice does not rewrite its file", async () => {
-  const { dataFolder, root, store } = await makeStore();
+  const { dataFolder, store } = await makeStore();
   await createDocumentsType(store);
   const bytes = Buffer.from("deduplicated\n", "utf8");
-  const path = join(root, "same.TXT");
-  await writeFile(path, bytes);
-  await store.createRecord({ type: "documents", key: "one", record: { file: path } });
+  const data = await store.autofile.blobs.put(bytes, "text/plain");
+  await store.createRecord({ type: "documents", key: "one", record: { file: data } });
   const name = expectedBlobUri(bytes, "txt").split("/").at(-1) ?? "";
   const blobPath = join(dataFolder, "_blobs", name);
   const oldTime = new Date("2020-01-01T00:00:00Z");
@@ -1003,7 +747,7 @@ test("storing the same blob twice does not rewrite its file", async () => {
   assert.deepEqual(await store.createRecord({
     type: "documents",
     key: "two",
-    record: { file: path },
+    record: { file: await store.autofile.blobs.put(bytes, "text/plain") },
   }), { uri: "autofile:///documents/two" });
   assert.equal((await stat(blobPath)).mtime.toISOString(), oldTime.toISOString());
   assert.deepEqual(await storedBlobNames(dataFolder), [name]);
@@ -1019,12 +763,12 @@ test("updates and deletes collect replaced blobs only after their records stop h
   await store.createRecord({
     type: "documents",
     key: "changed",
-    record: { file: `data:text/plain;base64,${first.toString("base64")}` },
+    record: { file: await store.autofile.blobs.put(first, "text/plain") },
   });
 
   assert.deepEqual(await store.updateRecord({
     uri: "autofile:///documents/changed",
-    patch: { file: `data:text/plain;base64,${second.toString("base64")}` },
+    patch: { file: await store.autofile.blobs.put(second, "text/plain") },
   }), { uri: "autofile:///documents/changed" });
   assert.deepEqual(await storedBlobNames(dataFolder), [secondUri.split("/").at(-1)]);
   const updated = await store.getRecord({ uri: "autofile:///documents/changed" });
@@ -1042,10 +786,10 @@ test("shared blobs remain until the last record holding them is deleted", async 
   const { dataFolder, store } = await makeStore();
   await createDocumentsType(store);
   const bytes = Buffer.from("shared\n", "utf8");
-  const data = `data:text/plain;base64,${bytes.toString("base64")}`;
+  const data = await store.autofile.blobs.put(bytes, "text/plain");
   const uri = expectedBlobUri(bytes, "txt");
   await store.createRecord({ type: "documents", key: "one", record: { file: data } });
-  await store.createRecord({ type: "documents", key: "two", record: { file: uri } });
+  await store.createRecord({ type: "documents", key: "two", record: { file: data } });
 
   await store.deleteRecord({ uri: "autofile:///documents/one" });
   assert.deepEqual(await storedBlobNames(dataFolder), [uri.split("/").at(-1)]);
@@ -1061,7 +805,7 @@ test("schema-invalid records retain every blob URI string, including nested arra
   await store.createRecord({
     type: "documents",
     key: "owner",
-    record: { file: `data:text/plain;base64,${bytes.toString("base64")}` },
+    record: { file: await store.autofile.blobs.put(bytes, "text/plain") },
   });
   await store.createType({
     type: "notes",
@@ -1097,7 +841,7 @@ test("schema-valid records do not retain blob URIs outside annotated blob fields
   await store.createRecord({
     type: "documents",
     key: "owner",
-    record: { file: `data:text/plain;base64,${bytes.toString("base64")}` },
+    record: { file: await store.autofile.blobs.put(bytes, "text/plain") },
   });
   await store.createType({
     type: "notes",
@@ -1126,13 +870,13 @@ test("an unreadable record suppresses all blob deletion", async () => {
   await store.createRecord({
     type: "documents",
     key: "owner",
-    record: { file: `data:text/plain;base64,${previous.toString("base64")}` },
+    record: { file: await store.autofile.blobs.put(previous, "text/plain") },
   });
   await writeFile(join(dataFolder, "documents", "broken.json"), "{\n");
 
   assert.deepEqual(await store.updateRecord({
     uri: "autofile:///documents/owner",
-    patch: { file: `data:text/plain;base64,${replacement.toString("base64")}` },
+    patch: { file: await store.autofile.blobs.put(replacement, "text/plain") },
   }), { uri: "autofile:///documents/owner" });
   assert.deepEqual((await storedBlobNames(dataFolder)).sort(), [
     previousUri.split("/").at(-1),
@@ -1148,7 +892,7 @@ test("blob writes precede record writes and unheld blob deletions happen last", 
   await store.createRecord({
     type: "documents",
     key: "ordered",
-    record: { file: `data:text/plain;base64,${first.toString("base64")}` },
+    record: { file: await store.autofile.blobs.put(first, "text/plain") },
   });
   const firstPath = join(dataFolder, "_blobs", expectedBlobUri(first, "txt").split("/").at(-1) ?? "");
   const secondPath = join(dataFolder, "_blobs", expectedBlobUri(second, "txt").split("/").at(-1) ?? "");
@@ -1169,7 +913,7 @@ test("blob writes precede record writes and unheld blob deletions happen last", 
   try {
     assert.deepEqual(await store.updateRecord({
       uri: "autofile:///documents/ordered",
-      patch: { file: `data:text/plain;base64,${second.toString("base64")}` },
+      patch: { file: await store.autofile.blobs.put(second, "text/plain") },
     }), { uri: "autofile:///documents/ordered" });
   } finally {
     fsPromises.rename = originalRename;
@@ -1179,7 +923,7 @@ test("blob writes precede record writes and unheld blob deletions happen last", 
   assert.deepEqual(operations, ["write blob", "write record", "delete old blob"]);
 });
 
-test("the write lock covers blob storage and record storage together", async () => {
+test("explicit blob uploads wait for the same write lock as record writes", async () => {
   const { dataFolder, root, store } = await makeStore();
   await createDocumentsType(store);
   const writeLockPath = join(root, "autofile-home", "write.lock");
@@ -1210,11 +954,8 @@ test("the write lock covers blob storage and record storage together", async () 
   }
 
   let settled = false;
-  const write = store.createRecord({
-    type: "documents",
-    key: "waited",
-    record: { file: "data:text/plain;base64,V2FpdGVkCg==" },
-  }).finally(() => {
+  const bytes = Buffer.from("Waited\n");
+  const write = store.autofile.blobs.put(bytes, "text/plain").finally(() => {
     settled = true;
   });
   await delay(150);
@@ -1225,7 +966,9 @@ test("the write lock covers blob storage and record storage together", async () 
     await writeFile(releasePath, "release\n");
   }
   await holder;
-  assert.deepEqual(await write, { uri: "autofile:///documents/waited" });
+  const uri = await write;
+  assert.equal(uri, expectedBlobUri(bytes, "txt"));
+  assert.deepEqual(await store.createRecord({ type: "documents", key: "waited", record: { file: uri } }), { uri: "autofile:///documents/waited" });
   assert.equal((await storedBlobNames(dataFolder)).length, 1);
 });
 
@@ -1507,7 +1250,7 @@ test("a link target must be a record of a declared type but may fail its own sch
   });
 });
 
-test("record writes propagate an operating-system refusal while reading a link target", async () => {
+test("record writes report storage failures without operating-system details", async () => {
   const { dataFolder, store } = await makeStore();
   await store.createType({
     type: "targets",
@@ -1550,14 +1293,14 @@ test("record writes propagate an operating-system refusal while reading a link t
         key: "created",
         record: { target: targetUri },
       }),
-      { code: "EACCES" },
+      { message: "Storage operation failed" },
     );
     await assert.rejects(
       store.updateRecord({
         uri: "autofile:///sources/updated",
         patch: { target: targetUri },
       }),
-      { code: "EACCES" },
+      { message: "Storage operation failed" },
     );
   } finally {
     fsPromises.open = originalOpen;
@@ -1793,7 +1536,7 @@ test("delete_record is blocked by an invalid record holding the URI or an unread
   assert.deepEqual(await store.deleteRecord({ uri: targetUri }), {
     errors: [{
       uri: "autofile:///notes/broken",
-      message: "record file cannot be read as JSON",
+      message: "record is unavailable",
     }],
   });
   assert.deepEqual(
@@ -1841,7 +1584,7 @@ test("delete_record is blocked by an invalid record holding the URI or an unread
       },
       {
         uri: targetUri,
-        message: "record file cannot be read as JSON",
+        message: "record is unavailable",
       },
     ],
   });
@@ -1873,7 +1616,7 @@ test("delete_record reports an operating-system refusal while reading its target
   syncBuiltinESMExports();
   try {
     assert.deepEqual(await store.deleteRecord({ uri }), {
-      errors: [{ uri, message: "record file cannot be read: EACCES" }],
+      errors: [{ uri, message: "record is unavailable" }],
     });
   } finally {
     fsPromises.open = originalOpen;
@@ -1902,6 +1645,7 @@ test("create_record writes the exact envelope and get_record returns it with its
   );
   assert.deepEqual(record, {
     uri: "autofile:///tasks/book-dentist",
+    title: "Book dentist",
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     value: { title: "Book dentist", status: "active" },
@@ -1918,10 +1662,10 @@ test("record files with legacy created and updated fields are invalid", async ()
     value: { title: "Legacy times", status: "active" },
   }, null, 2)}\n`);
 
-  assert.match(errorMessages(await store.getRecord({ uri }))[0] ?? "", /valid record/u);
+  assert.match(errorMessages(await store.getRecord({ uri }))[0] ?? "", /record is not valid/u);
   assert.deepEqual(await store.findRecords({ type: "tasks" }), {
     records: [],
-    errors: [{ uri, message: "record file does not contain a valid record" }],
+    errors: [{ uri, message: "record is not valid" }],
   });
   assert.equal((await store.listResources()).some((resource) => resource.uri === uri), false);
   assert.equal(await store.readResource(uri), undefined);
@@ -2097,7 +1841,7 @@ test("find_records reports only schema-invalid records that match the search", a
     "autofile:///tasks/unreadable",
   ]);
   assert.match(result.errors[0]?.message ?? "", /unexpected|additional/u);
-  assert.match(result.errors[1]?.message ?? "", /JSON/u);
+  assert.match(result.errors[1]?.message ?? "", /unavailable/u);
 });
 
 test("find_records caps pages by UTF-8 JSON bytes and pages across every result", async () => {
@@ -2225,7 +1969,7 @@ test("find_records pages record files in URI order and advances after a deleted 
   assert.deepEqual(first.records.map(({ uri }) => uri), ["autofile:///tasks/b"]);
   assert.deepEqual(first.errors, [{
     uri: "autofile:///tasks/a",
-    message: "record file cannot be read as JSON",
+    message: "record is unavailable",
   }]);
 
   await writeFile(join(dataFolder, "tasks", "a.json"), storedRecord("A"));
@@ -2384,13 +2128,14 @@ test("find_records reports an operating-system read refusal and continues", asyn
     assert.deepEqual(result, {
       records: [{
         uri: kept.uri,
+        title: "Kept",
         createdAt: kept.createdAt,
         updatedAt: kept.updatedAt,
         value: kept.value,
       }],
       errors: [{
         uri: "autofile:///tasks/denied",
-        message: "record file cannot be read: EACCES",
+        message: "record is unavailable",
       }],
     });
   } finally {
@@ -2645,11 +2390,11 @@ test("refused updates and unreadable record files return errors without overwrit
   await writeFile(join(dataFolder, "tasks", "broken.json"), "{\n");
   assert.match(errorMessages(await store.getRecord({
     uri: "autofile:///tasks/broken",
-  }))[0] ?? "", /JSON/u);
+  }))[0] ?? "", /unavailable/u);
   assert.match(errorMessages(await store.updateRecord({
     uri: "autofile:///tasks/broken",
     patch: { status: "active" },
-  }))[0] ?? "", /JSON/u);
+  }))[0] ?? "", /unavailable/u);
 
   await writeFile(join(dataFolder, "tasks", "spoofed.json"), `${JSON.stringify({
     createdAt: "2026-10-07T09:14:00Z",
@@ -2660,7 +2405,7 @@ test("refused updates and unreadable record files return errors without overwrit
   }, null, 2)}\n`);
   assert.match(errorMessages(await store.getRecord({
     uri: "autofile:///tasks/spoofed",
-  }))[0] ?? "", /valid record/u);
+  }))[0] ?? "", /record is not valid/u);
 
   await writeFile(join(dataFolder, "tasks", "bad-time.json"), `${JSON.stringify({
     createdAt: "2026-02-31T00:00:00Z",
@@ -2669,7 +2414,7 @@ test("refused updates and unreadable record files return errors without overwrit
   }, null, 2)}\n`);
   assert.match(errorMessages(await store.getRecord({
     uri: "autofile:///tasks/bad-time",
-  }))[0] ?? "", /valid record/u);
+  }))[0] ?? "", /record is not valid/u);
 });
 
 test("invalid UTF-8 and BOM-prefixed declarations and records are not exposed", async () => {
@@ -2683,7 +2428,7 @@ test("invalid UTF-8 and BOM-prefixed declarations and records are not exposed", 
     Buffer.from('","status":"active"}}\n'),
   ]));
 
-  assert.match(errorMessages(await store.getRecord({ uri: recordUri }))[0] ?? "", /UTF-8/u);
+  assert.match(errorMessages(await store.getRecord({ uri: recordUri }))[0] ?? "", /unavailable/u);
   assert.equal((await store.listResources()).some(({ uri }) => uri === recordUri), false);
   assert.equal(await store.readResource(recordUri), undefined);
 
@@ -2697,8 +2442,8 @@ test("invalid UTF-8 and BOM-prefixed declarations and records are not exposed", 
     bom,
     Buffer.from('{"description":"BOM type.","schema":{"type":"object"}}\n'),
   ]));
-  assert.match(errorMessages(await store.getRecord({ uri: bomRecordUri }))[0] ?? "", /JSON/u);
-  assert.match(errorMessages(await store.getType({ type: "bom-type" }))[0] ?? "", /JSON/u);
+  assert.match(errorMessages(await store.getRecord({ uri: bomRecordUri }))[0] ?? "", /unavailable/u);
+  assert.match(errorMessages(await store.getType({ type: "bom-type" }))[0] ?? "", /unavailable/u);
   const resourcesBeforeDeclarationCorruption = await store.listResources();
   for (const uri of [bomRecordUri, "autofile:///_types/bom-type"]) {
     assert.equal(resourcesBeforeDeclarationCorruption.some((resource) => resource.uri === uri), false);
@@ -2712,7 +2457,7 @@ test("invalid UTF-8 and BOM-prefixed declarations and records are not exposed", 
     Buffer.from('","schema":{"type":"object"}}\n'),
   ]));
 
-  assert.match(errorMessages(await store.getType({ type: "tasks" }))[0] ?? "", /UTF-8/u);
+  assert.match(errorMessages(await store.getType({ type: "tasks" }))[0] ?? "", /unavailable/u);
   assert.equal((await store.listResources()).some(({ uri }) => uri === typeUri), false);
   assert.equal(await store.readResource(typeUri), undefined);
 });
@@ -2852,7 +2597,7 @@ test("resource reads ignore storage paths whose components are not directories",
   await writeFile(join(wrongTypeFolder.dataFolder, "tasks"), "not a directory\n");
   assert.deepEqual(await wrongTypeFolder.store.listResources(), [{
     uri: "autofile:///_types/tasks",
-    name: "_types/tasks",
+    name: "Type: tasks",
     mimeType: "application/json",
     description: "Things to do.",
   }]);
@@ -2879,12 +2624,7 @@ test("blob resources accept the size limit and ignore files one byte larger", as
   ]);
 
   const resources = await store.listResources();
-  assert.deepEqual(resources, [{
-    uri: `autofile:///_blobs/${acceptedName}`,
-    name: `_blobs/${acceptedName}`,
-    mimeType: "application/octet-stream",
-    size: maximumBlobBytes,
-  }]);
+  assert.deepEqual(resources, []);
   const accepted = await store.readResource(`autofile:///_blobs/${acceptedName}`);
   assert.ok(accepted !== undefined && "blob" in accepted);
   assert.equal(Buffer.from(accepted.blob, "base64").byteLength, maximumBlobBytes);
@@ -2908,7 +2648,6 @@ test("resources enforce recognized files but keep schema-invalid stored envelope
     },
   });
   const keptUri = "autofile:///tasks/kept";
-  const keptText = await readFile(join(dataFolder, "tasks", "kept.json"), "utf8");
 
   const timestamp = "2026-10-07T09:14:00Z";
   const blobDirectoryName = `${"d".repeat(64)}.pdf`;
@@ -2938,11 +2677,9 @@ test("resources enforce recognized files but keep schema-invalid stored envelope
 
   const resources = await store.listResources();
   assert.equal(resources.some(({ uri }) => uri === keptUri), true);
-  assert.deepEqual(await store.readResource(keptUri), {
-    uri: keptUri,
-    mimeType: "application/json",
-    text: keptText,
-  });
+  const contents = await store.readResource(keptUri);
+  assert.ok(contents !== undefined && "text" in contents);
+  assert.deepEqual(JSON.parse(contents.text), await store.autofile.records.get(keptUri));
   for (const uri of [
     "autofile:///tasks/malformed",
     "autofile:///tasks/invalid",
@@ -2983,7 +2720,7 @@ test("record readers ignore names and locations Autofile could not have written"
   });
 });
 
-test("delete_record removes one file and delete_type requires an empty record folder", async () => {
+test("delete_record removes its storage and delete_type refuses all remaining stored data", async () => {
   const { dataFolder, store } = await makeStore();
   await createTasksType(store);
   await store.createRecord({
@@ -2991,7 +2728,7 @@ test("delete_record removes one file and delete_type requires an empty record fo
     key: "last",
     record: { title: "Last", status: "active" },
   });
-  assert.match(errorMessages(await store.deleteType({ type: "tasks" }))[0] ?? "", /not empty/u);
+  assert.match(errorMessages(await store.deleteType({ type: "tasks" }))[0] ?? "", /still has stored data/u);
   assert.deepEqual(await store.deleteRecord({ uri: "autofile:///tasks/last" }), {
     uri: "autofile:///tasks/last",
   });
@@ -2999,13 +2736,16 @@ test("delete_record removes one file and delete_type requires an empty record fo
   assert.match(errorMessages(await store.getRecord({ uri: "autofile:///tasks/last" }))[0] ?? "", /does not exist/u);
   assert.match(errorMessages(await store.deleteRecord({ uri: "autofile:///tasks/last" }))[0] ?? "", /does not exist/u);
   await writeFile(join(dataFolder, "tasks", ".DS_Store"), "ignored\n");
-  assert.match(errorMessages(await store.deleteType({ type: "tasks" }))[0] ?? "", /not empty/u);
+  assert.deepEqual(await store.deleteType({ type: "tasks" }), {
+    errors: [{ uri: "autofile:///_types/tasks", message: "type still has stored data" }],
+  });
+  assert.equal(await readFile(join(dataFolder, "tasks", ".DS_Store"), "utf8"), "ignored\n");
   await rm(join(dataFolder, "tasks", ".DS_Store"));
   assert.deepEqual(await store.deleteType({ type: "tasks" }), {
     uri: "autofile:///_types/tasks",
   });
   await assert.rejects(stat(join(dataFolder, "_types", "tasks.json")));
-  await assert.rejects(stat(join(dataFolder, "tasks")));
+  await assert.rejects(stat(join(dataFolder, "tasks")), { code: "ENOENT" });
 });
 
 test("several processes serialize generated-key creates and updates without losing records", async () => {
@@ -3025,7 +2765,7 @@ test("several processes serialize generated-key creates and updates without losi
       additionalProperties: false,
     },
   });
-  const storeModule = pathToFileURL(resolve("dist/store.js")).href;
+  const storeModule = pathToFileURL(resolve("test/helpers/store.ts")).href;
   const childScript = `
     import { openStore } from ${JSON.stringify(storeModule)};
     const [dataFolder, writeLockPath, workerText] = process.argv.slice(1);
@@ -3073,7 +2813,7 @@ test("concurrent processes preserve every merge patch to one record", async () =
   });
   await store.createRecord({ type: "shared", key: "one", record: { base: true } });
 
-  const storeModule = pathToFileURL(resolve("dist/store.js")).href;
+  const storeModule = pathToFileURL(resolve("test/helpers/store.ts")).href;
   const childScript = `
     import { access, writeFile } from "node:fs/promises";
     import { setTimeout as delay } from "node:timers/promises";
@@ -3154,7 +2894,7 @@ test("reads racing repeated updates see only complete record versions", async ()
     },
   });
 
-  const storeModule = pathToFileURL(resolve("dist/store.js")).href;
+  const storeModule = pathToFileURL(resolve("test/helpers/store.ts")).href;
   const childScript = `
     import { access, writeFile } from "node:fs/promises";
     import { setTimeout as delay } from "node:timers/promises";
@@ -3295,7 +3035,7 @@ test("a public write waits until another process releases write.lock", async () 
 test("a write fails promptly when the lock path is unusable", async () => {
   const { dataFolder, root } = await makeStore();
   const writeLockPath = join(root, "autofile-home", "write.lock");
-  const storeModule = pathToFileURL(resolve("dist/store.js")).href;
+  const storeModule = pathToFileURL(resolve("test/helpers/store.ts")).href;
   const childScript = `
     import { rm, writeFile } from "node:fs/promises";
     import { dirname } from "node:path";
@@ -3313,7 +3053,7 @@ test("a write fails promptly when the lock path is unusable", async () => {
       });
       throw new Error("write unexpectedly succeeded");
     } catch (error) {
-      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOTDIR") throw error;
+      if (!(error instanceof Error) || error.message !== "Storage operation failed" || "code" in error) throw error;
     }
   `;
 
