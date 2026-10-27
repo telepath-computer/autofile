@@ -25,8 +25,8 @@ import {
 } from "@hyperjump/json-schema/annotated-instance/experimental";
 import { JSE, type ErrorObject, type JSEOutput } from "@hyperjump/json-schema-errors";
 
-import { isBlobInput } from "./blobs.js";
-import type { JsonObject, JsonValue } from "./json.js";
+import { BLOB_URI_PATTERN } from "./blobs.js";
+import { jsonObjectProblem, type JsonObject, type JsonValue } from "./json.js";
 
 const DIALECT = "https://json-schema.org/draft/2020-12/schema";
 const FORMAT_KEYWORD = "https://json-schema.org/keyword/draft-2020-12/format";
@@ -69,7 +69,6 @@ const schemaKeywords = [
   "contentSchema",
 ];
 const preparedSchemas = new Map<string, Promise<PreparedSchema>>();
-
 setShouldValidateFormat(true);
 // json-schema-errors augments the package root's TypeScript declarations, but
 // the draft-specific entry point does not expose that augmentation.
@@ -78,7 +77,7 @@ addFormat({
   id: BLOB_FORMAT,
   // JSON Schema formats ignore other instance types. Autofile's separate
   // annotation check gives URI and blob values their stricter string rule.
-  handler: (value) => typeof value !== "string" || isBlobInput(value),
+  handler: (value) => typeof value !== "string" || BLOB_URI_PATTERN.test(value),
 });
 setFormatHandler(FORMAT_KEYWORD, "blob", BLOB_FORMAT);
 
@@ -97,6 +96,10 @@ export interface FormatField {
 
 /** Checks that a declaration schema is safe, valid 2020-12 JSON Schema. */
 export async function prepareSchema(schema: JsonObject): Promise<PreparedSchema> {
+  // Parsed files can contain overflowing numbers or negative zero too. Check
+  // every schema before serialization can change its constants or cache key.
+  const problem = jsonObjectProblem(schema);
+  if (problem !== undefined) throw new SchemaRefusal([`schema: ${problem}`]);
   const inspectionErrors = inspectSchema(schema);
   if (inspectionErrors.length > 0) throw new SchemaRefusal(inspectionErrors);
 

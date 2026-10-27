@@ -1,6 +1,6 @@
 {
   "name": "@telepath-computer/autofile",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Predictable filing for agents.",
   "license": "MIT",
   "repository": {
@@ -44,5 +44,11 @@
     "mime-types": "3.0.1",
     "mingo": "7.2.4",
     "proper-lockfile": "4.1.2"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   }
 }

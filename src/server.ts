@@ -18,7 +18,7 @@ import {
 } from "@modelcontextprotocol/server";
 
 import {
-  isResourceUri,
+  buildTools,
   type CreateRecordInput,
   type CreateTypeInput,
   type DeleteRecordInput,
@@ -26,13 +26,14 @@ import {
   type FindRecordsInput,
   type GetRecordInput,
   type GetTypeInput,
-  type JsonObject,
-  type Store,
   type UpdateRecordInput,
   type UpdateTypeInput,
-} from "./store.js";
+  type UploadBlobInput,
+} from "./mcp-tools.js";
+import { buildResources, isResourceUri } from "./mcp-resources.js";
+import type { Autofile, JsonObject } from "./index.js";
 
-const SERVER_DESCRIPTION = "Typed records that agents file and retrieve, kept as JSON files in a folder the user owns.";
+const SERVER_DESCRIPTION = "Typed records that agents file and retrieve.";
 const BASE_INSTRUCTIONS = "Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree.";
 const RESOURCE_PAGE_SIZE = 100;
 const packageJson = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -40,7 +41,11 @@ const packageJson = createRequire(import.meta.url)("../package.json") as { versi
 const findRecordsSchema = fromJsonSchema<FindRecordsInput>({
   type: "object",
   properties: {
-    type: { type: "string", description: "The type to search." },
+    type: {
+      type: ["string", "array"],
+      items: { type: "string" },
+      description: "The type or types to search. All types when absent.",
+    },
     q: {
       type: "string",
       description: "Words that must all appear, ignoring case, in the string values of a record at any depth.",
@@ -63,10 +68,9 @@ const findRecordsSchema = fromJsonSchema<FindRecordsInput>({
     },
     cursor: {
       type: "string",
-      description: "An opaque cursor returned by the previous page. The next page starts after the last record file that page read, even if that file was deleted.",
+      description: "An opaque cursor returned by the previous page. The next page starts after the last record that page considered, even if that record was deleted.",
     },
   },
-  required: ["type"],
   additionalProperties: false,
 });
 const getRecordSchema = fromJsonSchema<GetRecordInput>({
@@ -85,7 +89,7 @@ const createRecordSchema = fromJsonSchema<CreateRecordInput>({
     },
     record: {
       type: "object",
-      description: "The full record, which must match the schema of its type. A blob field may hold the absolute path of a local file or a `data:` URI with base64 contents; Autofile stores the file and puts its blob URI in the field.",
+      description: "The full record, which must match the schema of its type. Blob fields hold existing blob URIs returned by `upload_blob`; the same URI may be used by multiple records.",
     },
   },
   required: ["type", "record"],
@@ -97,10 +101,19 @@ const updateRecordSchema = fromJsonSchema<UpdateRecordInput>({
     uri: { type: "string", description: "The URI of the record." },
     patch: {
       type: "object",
-      description: "A [JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396): fields in the patch are set, a field set to `null` is removed, nested objects are merged, and arrays are replaced whole. A blob field may hold the absolute path of a local file or a `data:` URI with base64 contents; Autofile stores the file and puts its blob URI in the field.",
+      description: "A [JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396): fields in the patch are set, a field set to `null` is removed, nested objects are merged, and arrays are replaced whole. Blob fields hold existing blob URIs returned by `upload_blob`; the same URI may be used by multiple records.",
     },
   },
   required: ["uri", "patch"],
+  additionalProperties: false,
+});
+const uploadBlobSchema = fromJsonSchema<UploadBlobInput>({
+  type: "object",
+  properties: {
+    base64: { type: "string", description: "Canonical base64 contents. Requires mediaType; cannot be combined with path." },
+    path: { type: "string", description: "An absolute local file path, accepted only over stdio. Cannot be combined with base64." },
+    mediaType: { type: "string", description: "The media type of the contents. Required for base64; inferred from the file extension for a path when absent, falling back to application/octet-stream." },
+  },
   additionalProperties: false,
 });
 const deleteRecordSchema = fromJsonSchema<DeleteRecordInput>({
@@ -124,7 +137,7 @@ const createTypeSchema = fromJsonSchema<CreateTypeInput>({
   type: "object",
   properties: {
     type: { type: "string", description: "The name of the type." },
-    description: { type: "string", description: "What belongs in the folder." },
+    description: { type: "string", description: "What belongs in the type." },
     schema: { type: "object", description: "The JSON Schema for records of the type." },
     titleField: {
       type: "string",
@@ -156,8 +169,10 @@ const deleteTypeSchema = fromJsonSchema<DeleteTypeInput>({
 });
 
 /** Builds one MCP server around a store, without choosing its transport. */
-export async function buildServer(store: Store): Promise<McpServer> {
-  const { types } = await store.listTypes({});
+export async function buildServer(autofile: Autofile): Promise<McpServer> {
+  const tools = buildTools(autofile);
+  const resources = buildResources(autofile);
+  const { types } = await tools.listTypes({});
   const typeNames = types.map(({ type }) => type).sort();
   const typeSummary = typeNames.length === 0 ? "none yet" : typeNames.join(", ");
   const server = new McpServer(
@@ -174,18 +189,18 @@ export async function buildServer(store: Store): Promise<McpServer> {
   server.registerTool(
     "find_records",
     {
-      description: "Searches the records of one type and returns matching records in URI order. It reads past nonmatching files until the page has `limit` results, reaches 64 KB of JSON, or no files remain; the size cap never prevents the first result. `fields` selects top-level fields to return, while matching uses the whole record. A schema-invalid record is listed in `errors` only when it matches the search; a file that cannot be read or parsed as JSON is always listed. Autofile is where the user keeps durable information.",
+      description: "Searches records and returns matching records in URI order. It skips nonmatching records until the page has `limit` results, reaches 64 KB of JSON, or no records remain; the size cap never prevents the first result. `fields` selects top-level fields to return, while matching uses the whole record. A schema-invalid record is listed in `errors` only when it matches the search; a record that cannot be read is always listed. Autofile is where the user keeps durable information.",
       inputSchema: findRecordsSchema,
     },
-    async (input) => toolResult(await store.findRecords(input)),
+    async (input) => toolResult(await tools.findRecords(input)),
   );
   server.registerTool(
     "get_record",
     {
-      description: "Returns one record by URI: its `uri`, `createdAt` and `updatedAt` times, and `value`. A record that does not match its type is still returned, with what must change in `error`.",
+      description: "Returns one record by URI: its `uri`, optional `title`, `createdAt` and `updatedAt` times, and `value`. A record that does not match its type is still returned, with what must change in `error`.",
       inputSchema: getRecordSchema,
     },
-    async (input) => toolResult(await store.getRecord(input)),
+    async (input) => toolResult(await tools.getRecord(input)),
   );
   server.registerTool(
     "create_record",
@@ -193,16 +208,20 @@ export async function buildServer(store: Store): Promise<McpServer> {
       description: "Creates a record and returns its URI. `record` is the full record and must match the schema of its type, which `get_type` returns. `key` is optional and generated when absent. Autofile is where the user keeps durable information.",
       inputSchema: createRecordSchema,
     },
-    async (input, context) => toolResult(await store.createRecord(input, {
-      allowLocalPaths: context.http === undefined,
-    })),
+    async (input) => toolResult(await tools.createRecord(input)),
   );
   server.registerTool(
     "update_record",
     { description: "Changes a record and returns its URI.", inputSchema: updateRecordSchema },
-    async (input, context) => toolResult(await store.updateRecord(input, {
-      allowLocalPaths: context.http === undefined,
-    })),
+    async (input) => toolResult(await tools.updateRecord(input)),
+  );
+  server.registerTool(
+    "upload_blob",
+    {
+      description: "Uploads bytes and returns their blob URI for use in records. Supply canonical base64 and a media type, or an absolute local path over stdio. The maximum size is 7 MiB.",
+      inputSchema: uploadBlobSchema,
+    },
+    async (input, context) => toolResult(await tools.uploadBlob(input, { allowLocalPaths: context.http === undefined })),
   );
   server.registerTool(
     "delete_record",
@@ -210,7 +229,7 @@ export async function buildServer(store: Store): Promise<McpServer> {
       description: "Deletes a record, removes the links to it from other records, and returns its URI.",
       inputSchema: deleteRecordSchema,
     },
-    async (input) => toolResult(await store.deleteRecord(input)),
+    async (input) => toolResult(await tools.deleteRecord(input)),
   );
   server.registerTool(
     "list_types",
@@ -218,17 +237,17 @@ export async function buildServer(store: Store): Promise<McpServer> {
       description: "Returns every type, ordered by name, with the URI of its declaration and its description.",
       inputSchema: listTypesSchema,
     },
-    async (input) => toolResult(await store.listTypes(input)),
+    async (input) => toolResult(await tools.listTypes(input)),
   );
   server.registerTool(
     "get_type",
     { description: "Returns the declaration of a type with its URI added.", inputSchema: getTypeSchema },
-    async (input) => toolResult(await store.getType(input)),
+    async (input) => toolResult(await tools.getType(input)),
   );
   server.registerTool(
     "create_type",
     { description: "Declares a type and returns the URI of its declaration.", inputSchema: createTypeSchema },
-    async (input) => toolResult(await store.createType(input)),
+    async (input) => toolResult(await tools.createType(input)),
   );
   server.registerTool(
     "update_type",
@@ -236,12 +255,12 @@ export async function buildServer(store: Store): Promise<McpServer> {
       description: "Replaces the description, schema or title field of a type, or any of them.",
       inputSchema: updateTypeSchema,
     },
-    async (input) => toolResult(await store.updateType(input)),
+    async (input) => toolResult(await tools.updateType(input)),
   );
   server.registerTool(
     "delete_type",
     { description: "Deletes a type and returns its URI.", inputSchema: deleteTypeSchema },
-    async (input) => toolResult(await store.deleteType(input)),
+    async (input) => toolResult(await tools.deleteType(input)),
   );
 
   // The high-level resource API returns every resource at once. These
@@ -249,7 +268,7 @@ export async function buildServer(store: Store): Promise<McpServer> {
   // the process-level watcher supplies the advertised change notices.
   server.server.registerCapabilities({ resources: { subscribe: true, listChanged: true } });
   server.server.setRequestHandler("resources/list", async (request): Promise<ListResourcesResult> => {
-    const resources = await store.listResources();
+    const listed = await resources.listResources();
     const cursor = request.params?.cursor;
     let start = 0;
     if (cursor !== undefined) {
@@ -257,18 +276,15 @@ export async function buildServer(store: Store): Promise<McpServer> {
       if (previousUri === undefined) {
         throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Invalid resource cursor");
       }
-      const nextIndex = resources.findIndex(({ uri }) => uri > previousUri);
-      start = nextIndex < 0 ? resources.length : nextIndex;
+      const nextIndex = listed.findIndex(({ uri }) => uri > previousUri);
+      start = nextIndex < 0 ? listed.length : nextIndex;
     }
 
-    const page = resources.slice(start, start + RESOURCE_PAGE_SIZE);
+    const page = listed.slice(start, start + RESOURCE_PAGE_SIZE);
     const last = page.at(-1);
     return {
-      resources: page.map(({ lastModified, ...resource }) => ({
-        ...resource,
-        ...(lastModified === undefined ? {} : { annotations: { lastModified } }),
-      })),
-      ...(last !== undefined && start + page.length < resources.length
+      resources: page,
+      ...(last !== undefined && start + page.length < listed.length
         ? { nextCursor: encodeCursor(last.uri) }
         : {}),
       ttlMs: 0,
@@ -277,7 +293,7 @@ export async function buildServer(store: Store): Promise<McpServer> {
   });
 
   server.server.setRequestHandler("resources/read", async (request): Promise<ReadResourceResult> => {
-    const contents = await store.readResource(request.params.uri);
+    const contents = await resources.readResource(request.params.uri);
     if (contents === undefined) throw new ResourceNotFoundError(request.params.uri);
     return { contents: [contents], ttlMs: 0, cacheScope: "private" };
   });

@@ -20,7 +20,7 @@ import {
   type CallToolResult,
 } from "@modelcontextprotocol/client";
 
-import { openStore } from "../dist/store.js";
+import { openStore } from "./helpers/store.ts";
 
 const cli = resolve("dist/cli.js");
 const roots: string[] = [];
@@ -305,7 +305,7 @@ test("serve shares one store across HTTP tool and resource requests", { timeout:
   assert.equal(asObject(stored.value).title, "First note");
 });
 
-test("serve refuses local blob paths and accepts data URIs", { timeout: 30_000 }, async () => {
+test("serve refuses local blob paths and accepts explicit base64 uploads", { timeout: 30_000 }, async () => {
   const root = await temp();
   const dataFolder = join(root, "records");
   const blobFolder = join(dataFolder, "_blobs");
@@ -331,18 +331,11 @@ test("serve refuses local blob paths and accepts data URIs", { timeout: 30_000 }
     },
   });
 
-  const refusedCreate = await client.callTool({
-    name: "create_record",
-    arguments: {
-      type: "receipts",
-      key: "local",
-      record: { scan: sourcePath },
-    },
-  });
+  const refusedCreate = await client.callTool({ name: "upload_blob", arguments: { path: sourcePath } });
   assert.equal(refusedCreate.isError, true);
   const createBody = asObject(refusedCreate.structuredContent);
   assert.ok(Array.isArray(createBody.errors));
-  assert.match(String(asObject(createBody.errors[0]).message), /HTTP/iu);
+  assert.match(String(asObject(createBody.errors[0]).message), /only over stdio, not HTTP/iu);
   assert.deepEqual(await readdir(blobFolder), []);
   assert.deepEqual(
     (await client.listResources()).resources.map(({ uri }) => uri),
@@ -352,12 +345,13 @@ test("serve refuses local blob paths and accepts data URIs", { timeout: 30_000 }
   const dataBytes = Buffer.from([0, 1, 2, 3, 250, 251, 252]);
   const hash = createHash("sha256").update(dataBytes).digest("hex");
   const blobUri = `autofile:///_blobs/${hash}.pdf`;
+  assertToolJson(await client.callTool({ name: "upload_blob", arguments: { base64: dataBytes.toString("base64"), mediaType: "application/pdf" } }), { uri: blobUri });
   assert.deepEqual((await client.callTool({
     name: "create_record",
     arguments: {
       type: "receipts",
       key: "uploaded",
-      record: { scan: `data:application/pdf;base64,${dataBytes.toString("base64")}` },
+      record: { scan: blobUri },
     },
   })).structuredContent, { uri: "autofile:///receipts/uploaded" });
 
@@ -392,7 +386,7 @@ test("serve refuses local blob paths and accepts data URIs", { timeout: 30_000 }
   assert.equal(refusedUpdate.isError, true);
   const updateBody = asObject(refusedUpdate.structuredContent);
   assert.ok(Array.isArray(updateBody.errors));
-  assert.match(String(asObject(updateBody.errors[0]).message), /HTTP/iu);
+  assert.match(String(asObject(updateBody.errors[0]).message), /blob/iu);
   assert.deepEqual(await readdir(blobFolder), filesBeforeUpdate);
   const recordAfterRefusal = await client.readResource({ uri: "autofile:///receipts/uploaded" });
   const contentAfterRefusal = recordAfterRefusal.contents[0];
@@ -403,7 +397,7 @@ test("serve refuses local blob paths and accepts data URIs", { timeout: 30_000 }
   );
 });
 
-test("serve shares data URI blobs and collects them after update and delete", {
+test("serve shares explicitly uploaded blobs and collects them after update and delete", {
   timeout: 30_000,
 }, async () => {
   const root = await temp();
@@ -412,9 +406,7 @@ test("serve shares data URI blobs and collects them after update and delete", {
   const first = Buffer.from("first over HTTP\n", "utf8");
   const second = Buffer.from("second over HTTP\n", "utf8");
   const replacement = Buffer.from("replacement over HTTP\n", "utf8");
-  const dataUri = (bytes: Buffer): string => (
-    `data:text/plain;base64,${bytes.toString("base64")}`
-  );
+
   const blobUri = (bytes: Buffer): string => {
     const hash = createHash("sha256").update(bytes).digest("hex");
     return `autofile:///_blobs/${hash}.txt`;
@@ -441,45 +433,44 @@ test("serve shares data URI blobs and collects them after update and delete", {
       },
     },
   });
+  for (const bytes of [shared, first, second]) {
+    assertToolJson(await client.callTool({ name: "upload_blob", arguments: { base64: bytes.toString("base64"), mediaType: "text/plain" } }), { uri: blobUri(bytes) });
+  }
   for (const [key, unique] of [["first", first], ["second", second]] as const) {
     assert.deepEqual((await client.callTool({
       name: "create_record",
       arguments: {
         type: "assets",
         key,
-        record: { shared: dataUri(shared), unique: dataUri(unique) },
+        record: { shared: sharedUri, unique: blobUri(unique) },
       },
     })).structuredContent, { uri: `autofile:///assets/${key}` });
   }
 
-  let blobUris = (await client.listResources()).resources
-    .map(({ uri }) => uri)
-    .filter((uri) => uri.startsWith("autofile:///_blobs/"));
-  assert.deepEqual(blobUris.sort(), [firstUri, secondUri, sharedUri].sort());
-  assert.equal(blobUris.filter((uri) => uri === sharedUri).length, 1);
+  assert.equal((await client.listResources()).resources.some(({ uri }) => uri.startsWith("autofile:///_blobs/")), false);
+  for (const uri of [firstUri, secondUri, sharedUri]) {
+    assert.equal((await client.readResource({ uri })).contents[0]?.uri, uri);
+  }
 
+  assertToolJson(await client.callTool({ name: "upload_blob", arguments: { base64: replacement.toString("base64"), mediaType: "text/plain" } }), { uri: replacementUri });
   assert.deepEqual((await client.callTool({
     name: "update_record",
     arguments: {
       uri: "autofile:///assets/first",
-      patch: { unique: dataUri(replacement) },
+      patch: { unique: replacementUri },
     },
   })).structuredContent, { uri: "autofile:///assets/first" });
-  blobUris = (await client.listResources()).resources
-    .map(({ uri }) => uri)
-    .filter((uri) => uri.startsWith("autofile:///_blobs/"));
-  assert.deepEqual(blobUris.sort(), [replacementUri, secondUri, sharedUri].sort());
-  assert.equal(blobUris.includes(firstUri), false);
+  for (const uri of [replacementUri, secondUri, sharedUri]) {
+    assert.equal((await client.readResource({ uri })).contents[0]?.uri, uri);
+  }
+  await assert.rejects(client.readResource({ uri: firstUri }));
 
   assert.deepEqual((await client.callTool({
     name: "delete_record",
     arguments: { uri: "autofile:///assets/second" },
   })).structuredContent, { uri: "autofile:///assets/second" });
-  blobUris = (await client.listResources()).resources
-    .map(({ uri }) => uri)
-    .filter((uri) => uri.startsWith("autofile:///_blobs/"));
-  assert.deepEqual(blobUris.sort(), [replacementUri, sharedUri].sort());
-  assert.equal(blobUris.includes(secondUri), false);
+  assert.equal((await client.readResource({ uri: replacementUri })).contents[0]?.uri, replacementUri);
+  await assert.rejects(client.readResource({ uri: secondUri }));
 
   const kept = await client.readResource({ uri: sharedUri });
   assert.ok(kept.contents[0] !== undefined && "blob" in kept.contents[0]);
@@ -520,13 +511,14 @@ test("serve refuses a path exposed by a conditional blob annotation", {
     },
   });
 
+  const uploaded = await client.callTool({ name: "upload_blob", arguments: { base64: Buffer.from("uploaded\n").toString("base64"), mediaType: "text/plain" } });
   const refused = await client.callTool({
     name: "create_record",
     arguments: {
       type: "conditional-assets",
       key: "refused",
       record: {
-        primary: `data:text/plain;base64,${Buffer.from("uploaded\n").toString("base64")}`,
+        primary: String(asObject(uploaded.structuredContent).uri),
         fallback: sourcePath,
       },
     },
@@ -534,7 +526,7 @@ test("serve refuses a path exposed by a conditional blob annotation", {
   assert.equal(refused.isError, true);
   const body = asObject(refused.structuredContent);
   assert.ok(Array.isArray(body.errors));
-  assert.match(String(asObject(body.errors[0]).message), /blob URI/iu);
+  assert.match(String(asObject(body.errors[0]).message), /fallback.*blob/iu);
   assert.deepEqual(
     (await client.listResources()).resources.map(({ uri }) => uri),
     ["autofile:///_types/conditional-assets"],
@@ -582,16 +574,11 @@ test("serve publishes watched resource and list changes over HTTP", {
     "autofile:///tasks/outside",
     "autofile:///tasks/.ignored",
     "autofile:///tasks/sentinel",
-    "autofile:///tasks",
     "autofile:///_types/tasks",
     "autofile:///_types/watched-type",
     "autofile:///_types/reborn",
-    "autofile:///_types",
     blobUri,
-    "autofile:///_blobs",
     "autofile:///reborn/new",
-    "autofile:///reborn",
-    "autofile:///",
   ];
   const subscription = await client.listen({
     resourceSubscriptions,
@@ -610,8 +597,6 @@ test("serve publishes watched resource and list changes over HTTP", {
     }), { uri: "autofile:///tasks/watched" });
     await expectResourceNotices(notices, checkpoint, [
       "autofile:///tasks/watched",
-      "autofile:///tasks",
-      "autofile:///",
     ], false, "same-process HTTP change notices did not arrive");
 
     checkpoint = resourceNoticeCheckpoint(notices);
@@ -621,8 +606,6 @@ test("serve publishes watched resource and list changes over HTTP", {
     }), { uri: "autofile:///tasks/watched" });
     await expectResourceNotices(notices, checkpoint, [
       "autofile:///tasks/watched",
-      "autofile:///tasks",
-      "autofile:///",
     ], true, "cross-process HTTP change notices did not arrive");
 
     const timestamp = new Date().toISOString();
@@ -634,8 +617,6 @@ test("serve publishes watched resource and list changes over HTTP", {
     }, null, 2)}\n`);
     await expectResourceNotices(notices, checkpoint, [
       "autofile:///tasks/outside",
-      "autofile:///tasks",
-      "autofile:///",
     ], true, "outside HTTP record notices did not reach its exact subscriptions");
 
     checkpoint = resourceNoticeCheckpoint(notices);
@@ -650,8 +631,6 @@ test("serve publishes watched resource and list changes over HTTP", {
     }), { uri: "autofile:///tasks/sentinel" });
     await expectResourceNotices(notices, checkpoint, [
       "autofile:///tasks/sentinel",
-      "autofile:///tasks",
-      "autofile:///",
     ], true, "the HTTP sentinel change after an ignored file was not reported");
     assert.equal(
       notices.updated.slice(checkpoint.updated).includes("autofile:///tasks/.ignored"),
@@ -666,8 +645,6 @@ test("serve publishes watched resource and list changes over HTTP", {
     }), { uri: "autofile:///tasks/outside" });
     await expectResourceNotices(notices, checkpoint, [
       "autofile:///tasks/outside",
-      "autofile:///tasks",
-      "autofile:///",
     ], true, "HTTP record deletion notices did not reach its exact subscriptions");
 
     checkpoint = resourceNoticeCheckpoint(notices);
@@ -681,8 +658,6 @@ test("serve publishes watched resource and list changes over HTTP", {
     }), { uri: "autofile:///_types/watched-type" });
     await expectResourceNotices(notices, checkpoint, [
       "autofile:///_types/watched-type",
-      "autofile:///_types",
-      "autofile:///",
     ], true, "HTTP declaration creation notices did not reach its exact subscriptions");
 
     checkpoint = resourceNoticeCheckpoint(notices);
@@ -692,8 +667,6 @@ test("serve publishes watched resource and list changes over HTTP", {
     }), { uri: "autofile:///_types/watched-type", errors: [] });
     await expectResourceNotices(notices, checkpoint, [
       "autofile:///_types/watched-type",
-      "autofile:///_types",
-      "autofile:///",
     ], true, "HTTP declaration change notices did not reach its exact subscriptions");
 
     checkpoint = resourceNoticeCheckpoint(notices);
@@ -703,44 +676,26 @@ test("serve publishes watched resource and list changes over HTTP", {
     }), { uri: "autofile:///_types/watched-type" });
     await expectResourceNotices(notices, checkpoint, [
       "autofile:///_types/watched-type",
-      "autofile:///_types",
-      "autofile:///",
     ], true, "HTTP declaration deletion notices did not reach its exact subscriptions");
 
     checkpoint = resourceNoticeCheckpoint(notices);
     await mkdir(join(dataFolder, "_blobs"), { recursive: true });
-    await writeFile(join(dataFolder, "_blobs", blobName), "watched blob");
-    await expectResourceNotices(notices, checkpoint, [
-      blobUri,
-      "autofile:///_blobs",
-      "autofile:///",
-    ], true, "HTTP blob creation notices did not reach its exact subscriptions");
-
-    checkpoint = resourceNoticeCheckpoint(notices);
-    await writeFile(join(dataFolder, "_blobs", blobName), "changed watched blob");
-    await expectResourceNotices(notices, checkpoint, [
-      blobUri,
-      "autofile:///_blobs",
-      "autofile:///",
-    ], false, "HTTP blob change notices did not reach its exact subscriptions");
-
-    checkpoint = resourceNoticeCheckpoint(notices);
+    await writeFile(join(dataFolder, "_blobs", blobName), "unreferenced attachment");
+    await writeFile(join(dataFolder, "_blobs", blobName), "changed unreferenced attachment");
     await unlink(join(dataFolder, "_blobs", blobName));
-    await expectResourceNotices(notices, checkpoint, [
-      blobUri,
-      "autofile:///_blobs",
-      "autofile:///",
-    ], true, "HTTP blob deletion notices did not reach its exact subscriptions");
+    await other.callTool({
+      name: "update_record",
+      arguments: { uri: "autofile:///tasks/watched", patch: { status: "active" } },
+    });
+    await expectResourceNotices(notices, checkpoint, ["autofile:///tasks/watched"], false,
+      "a record change after attachment changes was not reported");
+    assert.equal(notices.updated.slice(checkpoint.updated).includes(blobUri), false);
 
     checkpoint = resourceNoticeCheckpoint(notices);
     await rm(dataFolder, { recursive: true });
     await expectResourceNotices(notices, checkpoint, [
       "autofile:///_types/tasks",
-      "autofile:///_types",
-      "autofile:///",
       "autofile:///tasks/watched",
-      "autofile:///tasks",
-      "autofile:///",
     ], true, "HTTP data-folder deletion notices did not arrive");
 
     checkpoint = resourceNoticeCheckpoint(notices);
@@ -771,11 +726,7 @@ test("serve publishes watched resource and list changes over HTTP", {
     }), { uri: "autofile:///reborn/new" });
     await expectResourceNotices(notices, checkpoint, [
       "autofile:///_types/reborn",
-      "autofile:///_types",
-      "autofile:///",
       "autofile:///reborn/new",
-      "autofile:///reborn",
-      "autofile:///",
     ], true, "HTTP notices stopped after data-folder recreation");
   } finally {
     await subscription.close();
@@ -845,29 +796,23 @@ test("an HTTP agent can search, patch, invalidate, read resources, and clean lin
   }), { uri: "autofile:///_types/contacts" });
 
   const client = await connect(server.endpoint);
-  assert.equal(client.getServerVersion()?.description, "Typed records that agents file and retrieve, kept as JSON files in a folder the user owns.");
+  assert.equal(client.getServerVersion()?.description, "Typed records that agents file and retrieve.");
   assert.match(client.getInstructions() ?? "", /Types: contacts, organizations\./u);
 
-  const refusedPath = await client.callTool({
-    name: "create_record",
-    arguments: {
-      type: "organizations",
-      key: "local",
-      record: { name: "Local path", logo: localPath },
-    },
-  });
+  const refusedPath = await client.callTool({ name: "upload_blob", arguments: { path: localPath } });
   const refusedPathBody = asObject(refusedPath.structuredContent);
   assert.ok(Array.isArray(refusedPathBody.errors));
   assert.match(String(asObject(refusedPathBody.errors[0]).message), /only over stdio, not HTTP/u);
   assertToolJson(refusedPath, refusedPathBody, { isError: true });
 
+  assertToolJson(await client.callTool({ name: "upload_blob", arguments: { base64: dataBytes.toString("base64"), mediaType: "image/png" } }), { uri: blobUri });
   const createdOrganization = await client.callTool({
     name: "create_record",
     arguments: {
       type: "organizations",
       record: {
         name: "Network Acme",
-        logo: `data:image/png;base64,${dataBytes.toString("base64")}`,
+        logo: blobUri,
       },
     },
   });
@@ -1005,28 +950,24 @@ test("an HTTP agent can search, patch, invalidate, read resources, and clean lin
   assert.equal(resources.cacheScope, "private");
   assert.deepEqual(resources.resources.find(({ uri }) => uri === "autofile:///_types/contacts"), {
     uri: "autofile:///_types/contacts",
-    name: "_types/contacts",
+    name: "Type: contacts",
     mimeType: "application/json",
     description: "Contacts reached over HTTP.",
   });
   assert.deepEqual(resources.resources.find(({ uri }) => uri === contactUri), {
     uri: contactUri,
-    name: "contacts/ada",
+    name: "contacts: ada",
     title: "Ada Lovelace",
     mimeType: "application/json",
-    annotations: { lastModified: repaired.updatedAt },
   });
-  assert.deepEqual(resources.resources.find(({ uri }) => uri === blobUri), {
-    uri: blobUri,
-    name: `_blobs/${blobHash}.png`,
-    mimeType: "image/png",
-    size: dataBytes.byteLength,
-  });
+  assert.equal(resources.resources.find(({ uri }) => uri === blobUri), undefined);
 
   const declaration = await client.readResource({ uri: "autofile:///_types/contacts" });
   const declarationContent = declaration.contents[0];
   assert.ok(declarationContent !== undefined && "text" in declarationContent);
   assert.deepEqual(JSON.parse(declarationContent.text) as unknown, {
+    uri: "autofile:///_types/contacts",
+    type: "contacts",
     description: "Contacts reached over HTTP.",
     titleField: "name",
     schema: completeOnlySchema,
@@ -1103,7 +1044,7 @@ test("serve checks normalized localhost, configured, null, and foreign Origins",
   for (const { origin, accepted } of cases) {
     if (accepted) {
       const client = await connect(server.endpoint, origin);
-      assert.equal((await client.listTools()).tools.length, 10, origin);
+      assert.equal((await client.listTools()).tools.length, 11, origin);
     } else {
       const response = await fetch(server.endpoint, {
         method: "POST",
@@ -1116,7 +1057,7 @@ test("serve checks normalized localhost, configured, null, and foreign Origins",
   }
 
   const client = await connect(server.endpoint);
-  assert.equal((await client.listTools()).tools.length, 10);
+  assert.equal((await client.listTools()).tools.length, 11);
 });
 
 test("serve checks Host against localhost and configured origin hosts", {
