@@ -88,10 +88,14 @@ A declaration has these fields:
 - `description` says what belongs in the folder. Agents read it to choose where to file.
 - `schema` is the JSON Schema that every record of the type must match. Guidance about a single field goes in the standard `description` keyword of that field.
 - `titleField`, which is optional, names a top-level field of the record that holds its title, such as `name` for a contact. Clients show the title in place of the key; see [Resources](#resources). A record whose value for that field is not a string has no title.
+- `title`, which is optional, names the type in words, in the singular, such as "Journal entry" for the type `journal-entry`. Clients show it wherever they name the type or one record of it, and show the type name when it is absent. This follows MCP, where a `name` identifies a tool or resource and the optional `title` is shown to people.
+
+`title` is a non-empty string.
 
 ```json
 {
   "description": "People the user knows or deals with, one record per person.",
+  "title": "Contact",
   "titleField": "name",
   "schema": {
     "type": "object",
@@ -140,11 +144,11 @@ Every record, type declaration and blob is an MCP resource at its URI:
 | Type declaration | `autofile:///_types/<type>` | `_types/<type>` | `application/json` | The file as stored, in `text` |
 | Blob | `autofile:///_blobs/<hash>.<ext>` | `_blobs/<hash>.<ext>` | Given by the extension, or `application/octet-stream` when the extension is unknown | The bytes, base64-encoded, in `blob` |
 
-MCP requires a `name` for every resource and leaves `title` optional, and clients show the `name` when there is no `title`. The `name` is the part of the URI after `autofile:///`, which is unique. A record is listed with the time it last changed, its `updatedAt` time, in `annotations.lastModified`, and, when its type has a `titleField`, with its title in `title`. A type declaration is listed with the description of the type in `description`, and a blob with its size in bytes in `size`. Entries in `resources/list` look like this:
+MCP requires a `name` for every resource and leaves `title` optional, and clients show the `name` when there is no `title`. The `name` is the part of the URI after `autofile:///`, which is unique. A record is listed with the time it last changed, its `updatedAt` time, in `annotations.lastModified`, and, when its type has a `titleField`, with its title in `title`. A type declaration is listed with the description of the type in `description` and, when the type has a `title`, with it in `title`. A blob is listed with its size in bytes in `size`. Entries in `resources/list` look like this:
 
 ```json
 { "uri": "autofile:///contact/priya-narayan", "name": "contact/priya-narayan", "title": "Priya Narayan", "mimeType": "application/json", "annotations": { "lastModified": "2026-10-07T09:20:00Z" } }
-{ "uri": "autofile:///_types/contact", "name": "_types/contact", "mimeType": "application/json", "description": "People the user knows or deals with, one record per person." }
+{ "uri": "autofile:///_types/contact", "name": "_types/contact", "title": "Contact", "mimeType": "application/json", "description": "People the user knows or deals with, one record per person." }
 { "uri": "autofile:///_blobs/9f86d081…0a08.pdf", "name": "_blobs/9f86d081…0a08.pdf", "mimeType": "application/pdf", "size": 482113 }
 ```
 
@@ -280,12 +284,13 @@ Autofile does not detect record writes made at the same time: the last write win
 
 #### list_types
 
-Returns every type, ordered by name, with the URI of its declaration and its description. Takes no arguments.
+Returns every type, ordered by name, with the URI of its declaration, its description, and its `title` when it has one. Takes no arguments.
 
 ```json
 {
   "types": [
-    { "uri": "autofile:///_types/contact", "type": "contact", "description": "People the user knows or deals with, one record per person." }
+    { "uri": "autofile:///_types/contact", "type": "contact", "title": "Contact", "description": "People the user knows or deals with, one record per person." },
+    { "uri": "autofile:///_types/journal-entry", "type": "journal-entry", "title": "Journal entry", "description": "The user's journal, one entry per day." }
   ]
 }
 ```
@@ -302,6 +307,7 @@ Returns the declaration of a type with its URI added. Refused if the type does n
 {
   "uri": "autofile:///_types/contact",
   "description": "People the user knows or deals with, one record per person.",
+  "title": "Contact",
   "titleField": "name",
   "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } }
 }
@@ -309,7 +315,7 @@ Returns the declaration of a type with its URI added. Refused if the type does n
 
 #### create_type
 
-Declares a type and returns `{ "uri": "autofile:///_types/<type>" }`. Refused if the type exists, the name breaks the rule in [Types](#types), or the schema is not one Autofile accepts, as described in [Types](#types).
+Declares a type and returns `{ "uri": "autofile:///_types/<type>" }`. Refused if the type exists, the name breaks the rule in [Types](#types), `title` is an empty string, or the schema is not one Autofile accepts, as described in [Types](#types).
 
 | Argument | Type | Meaning |
 | --- | --- | --- |
@@ -317,11 +323,13 @@ Declares a type and returns `{ "uri": "autofile:///_types/<type>" }`. Refused if
 | `description` | string, required | What belongs in the folder. |
 | `schema` | object, required | The JSON Schema for records of the type. |
 | `titleField` | string | The field that holds the title of a record, as described in [Types](#types). |
+| `title` | string | The name of the type in words, in the singular, as described in [Types](#types). |
 
 ```json
 {
   "type": "contact",
   "description": "People the user knows or deals with, one record per person.",
+  "title": "Contact",
   "titleField": "name",
   "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } }
 }
@@ -329,7 +337,7 @@ Declares a type and returns `{ "uri": "autofile:///_types/<type>" }`. Refused if
 
 #### update_type
 
-Replaces the description, schema or title field of a type, or any of them. A valid change is always accepted, as described in [Changing types](#changing-types); the call is refused if the type does not exist or the schema is not one Autofile accepts, as for `create_type`. Returns the URI of the declaration, and in `errors` each record that no longer matches:
+Replaces the description, schema, title field or title of a type, or any of them. A valid change is always accepted, as described in [Changing types](#changing-types); the call is refused if the type does not exist, `title` is an empty string, or the schema is not one Autofile accepts, as for `create_type`. Returns the URI of the declaration, and in `errors` each record that no longer matches:
 
 ```json
 {
@@ -346,6 +354,7 @@ Replaces the description, schema or title field of a type, or any of them. A val
 | `description` | string | The new description. |
 | `schema` | object | The new JSON Schema. |
 | `titleField` | string or null | The new title field; `null` removes it. |
+| `title` | string or null | The new title; `null` removes it. |
 
 #### delete_type
 
