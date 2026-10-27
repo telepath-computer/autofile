@@ -1,13 +1,15 @@
 /** Exercises resource watching through real filesystem events. */
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 
-import { openStore, type Store } from "../dist/store.js";
-import { watchStore, type ResourceChange, type StoreWatcher } from "../dist/watch.js";
+import { openStore, type Store } from "./helpers/store.ts";
+import { watchResources, type ResourceChange, type ResourceWatcher } from "../dist/mcp-watch.js";
+import { buildResources, type Resources } from "../dist/mcp-resources.js";
+import { watchFolder } from "../dist/watch.js";
 
 const roots: string[] = [];
 const waitTimeoutMs = 10_000;
@@ -31,7 +33,7 @@ interface WatchFixture {
   dataFolder: string;
   errors: Error[];
   store: Store;
-  watcher: StoreWatcher;
+  watcher: ResourceWatcher;
 }
 
 async function temp(): Promise<string> {
@@ -110,11 +112,10 @@ function storedDeclaration(description: string): string {
 }
 
 async function createFixture(options: {
-  blobs?: Record<string, string | Buffer>;
   recordFiles?: Record<string, { status: string; title: string }>;
   records?: Record<string, { status: string; title: string }>;
   types?: string[];
-  watchedStore?: (store: Store) => Store;
+  watchedResources?: (store: Resources) => Resources;
 } = {}): Promise<WatchFixture> {
   const root = await temp();
   const dataFolder = join(root, "data");
@@ -140,21 +141,25 @@ async function createFixture(options: {
       storedRecord(record.title, record.status),
     );
   }
-  for (const [name, bytes] of Object.entries(options.blobs ?? {})) {
-    await mkdir(join(dataFolder, "_blobs"), { recursive: true });
-    await writeFile(join(dataFolder, "_blobs", name), bytes);
-  }
+
 
   const changes = createChangeLog();
   const errors: Error[] = [];
-  const watcher = await watchStore(
-    dataFolder,
-    options.watchedStore?.(store) ?? store,
+  const resources = buildResources(store.autofile);
+  const subscription = await watchResources(
+    store.autofile,
     (batch) => {
       for (const change of batch.changes) recordChange(changes, change);
     },
     (error) => errors.push(error),
+    options.watchedResources?.(resources) ?? resources,
   );
+  const watcher = {
+    async close(): Promise<void> {
+      await subscription.close();
+      await store.autofile.close();
+    },
+  };
   return { changes, dataFolder, errors, store, watcher };
 }
 
@@ -162,12 +167,46 @@ after(async () => {
   for (const root of roots) await rm(root, { recursive: true, force: true });
 });
 
-test("the watcher maps record, declaration, and blob create, change, and delete events", {
+test("folder watching reports recognized file changes without reading their contents", {
   timeout: 30_000,
 }, async () => {
-  const blobName = `${"a".repeat(64)}.txt`;
+  const dataFolder = join(await temp(), "data");
+  await mkdir(join(dataFolder, "undeclared"), { recursive: true });
+  const changes = createChangeLog();
+  const errors: Error[] = [];
+  const watcher = await watchFolder(dataFolder, (batch) => {
+    for (const change of batch) {
+      assert.deepEqual(Object.keys(change).sort(), ["kind", "uri"]);
+      recordChange(changes, { ...change, listChanged: false });
+    }
+  }, (error) => errors.push(error));
+  try {
+    await mkdir(join(dataFolder, "_blobs"));
+    await writeFile(join(dataFolder, "_blobs", `${"a".repeat(64)}.txt`), "ignored attachment");
+    const path = join(dataFolder, "undeclared", "broken.json");
+    await writeFile(path, "not JSON");
+    await waitForChanges(changes, 0, [{
+      uri: "autofile:///undeclared/broken",
+      kind: "created",
+      listChanged: false,
+    }], "physical file creation was filtered by its contents");
+    const start = changes.changes.length;
+    await unlink(path);
+    await waitForChanges(changes, start, [{
+      uri: "autofile:///undeclared/broken",
+      kind: "deleted",
+      listChanged: false,
+    }], "physical file deletion was not reported");
+    assert.deepEqual(errors, []);
+  } finally {
+    await watcher.close();
+  }
+});
+
+test("the watcher maps record and declaration changes", {
+  timeout: 30_000,
+}, async () => {
   const fixture = await createFixture({
-    blobs: { [blobName]: "one" },
     records: { existing: { title: "Existing", status: "active" } },
   });
   const { changes, dataFolder, errors, store, watcher } = fixture;
@@ -242,31 +281,30 @@ test("the watcher maps record, declaration, and blob create, change, and delete 
       listChanged: true,
     }], "declaration deletion was not reported");
 
-    start = changes.changes.length;
-    const secondBlobName = `${"b".repeat(64)}.txt`;
-    const secondBlobPath = join(dataFolder, "_blobs", secondBlobName);
-    await writeFile(secondBlobPath, "one");
+
+    assert.deepEqual(errors, []);
+  } finally {
+    await watcher.close();
+  }
+});
+
+test("unattached blobs do not produce resource notices", {
+  timeout: 30_000,
+}, async () => {
+  const { changes, dataFolder, errors, store, watcher } = await createFixture();
+  try {
+    const start = changes.changes.length;
+    const blobName = `${"b".repeat(64)}.txt`;
+    await mkdir(join(dataFolder, "_blobs"), { recursive: true });
+    await writeFile(join(dataFolder, "_blobs", blobName), "unattached contents");
+    await store.createRecord({
+      type: "tasks", key: "after-blob", record: { title: "After blob", status: "active" },
+    });
     await waitForChanges(changes, start, [{
-      uri: `autofile:///_blobs/${secondBlobName}`,
+      uri: "autofile:///tasks/after-blob",
       kind: "created",
       listChanged: true,
-    }], "blob creation was not reported");
-
-    start = changes.changes.length;
-    await writeFile(secondBlobPath, "two");
-    await waitForChanges(changes, start, [{
-      uri: `autofile:///_blobs/${secondBlobName}`,
-      kind: "changed",
-      listChanged: false,
-    }], "blob change was not reported");
-
-    start = changes.changes.length;
-    await unlink(secondBlobPath);
-    await waitForChanges(changes, start, [{
-      uri: `autofile:///_blobs/${secondBlobName}`,
-      kind: "deleted",
-      listChanged: true,
-    }], "blob deletion was not reported");
+    }], "an unattached blob produced a resource notice");
 
     assert.deepEqual(errors, []);
   } finally {
@@ -328,11 +366,10 @@ test("a failed focused read of a new resource emits a hint and marks its metadat
   timeout: 30_000,
 }, async () => {
   let failNextRead = true;
-  const blobName = `${"e".repeat(64)}.txt`;
-  const uri = `autofile:///_blobs/${blobName}`;
+  const uri = "autofile:///tasks/created";
   const fixture = await createFixture({
-    blobs: { [`${"f".repeat(64)}.txt`]: "existing blob" },
-    watchedStore: (store) => new Proxy(store, {
+    records: { existing: { title: "Existing", status: "active" } },
+    watchedResources: (store) => new Proxy(store, {
       get(target, property, receiver) {
         if (property === "getResourceMetadata") {
           return async (resourceUri: string) => {
@@ -348,10 +385,10 @@ test("a failed focused read of a new resource emits a hint and marks its metadat
     }),
   });
   const { changes, dataFolder, errors, watcher } = fixture;
-  const path = join(dataFolder, "_blobs", blobName);
+  const path = join(dataFolder, "tasks", "created.json");
   try {
     let start = changes.changes.length;
-    await writeFile(path, "first contents");
+    await writeFile(path, storedRecord("First title", "active"));
     await waitForChanges(changes, start, [{
       uri,
       kind: "created",
@@ -363,7 +400,7 @@ test("a failed focused read of a new resource emits a hint and marks its metadat
     );
 
     start = changes.changes.length;
-    await writeFile(path, "second contents");
+    await writeFile(path, storedRecord("Second title", "active", 1));
     await waitForChanges(changes, start, [{
       uri,
       kind: "changed",
@@ -380,7 +417,7 @@ test("a failed focused read of a title change emits a hint and marks its metadat
   let failNextRead = true;
   const fixture = await createFixture({
     records: { flaky: { title: "Flaky", status: "initial" } },
-    watchedStore: (store) => new Proxy(store, {
+    watchedResources: (store) => new Proxy(store, {
       get(target, property, receiver) {
         if (property === "getResourceMetadata") {
           return async (uri: string) => {
@@ -425,7 +462,7 @@ test("a deletion after a failed focused read still emits a hint", {
   let failNextRead = true;
   const fixture = await createFixture({
     records: { doomed: { title: "Doomed", status: "initial" } },
-    watchedStore: (store) => new Proxy(store, {
+    watchedResources: (store) => new Proxy(store, {
       get(target, property, receiver) {
         if (property === "getResourceMetadata") {
           return async (uri: string) => {
@@ -470,7 +507,7 @@ test("a failed declaration read emits a hint and marks that type's metadata unkn
   let failNextRead = true;
   const fixture = await createFixture({
     records: { flaky: { title: "Flaky", status: "initial" } },
-    watchedStore: (store) => new Proxy(store, {
+    watchedResources: (store) => new Proxy(store, {
       get(target, property, receiver) {
         if (property === "listTypeResources") {
           return async (type: string) => {
@@ -506,48 +543,6 @@ test("a failed declaration read emits a hint and marks that type's metadata unkn
       kind: "changed",
       listChanged: true,
     }], "the next successful type read did not replace the unknown cache entries", waitTimeoutMs, true);
-  } finally {
-    await watcher.close();
-  }
-});
-
-test("a failed added-folder read is reported without suppressing child resource hints", {
-  timeout: 30_000,
-}, async () => {
-  let failNextRead = true;
-  const blobName = `${"d".repeat(64)}.txt`;
-  const fixture = await createFixture({
-    watchedStore: (store) => new Proxy(store, {
-      get(target, property, receiver) {
-        if (property === "listResourceFolder") {
-          return async (folder: string) => {
-            if (folder === "_blobs" && failNextRead) {
-              failNextRead = false;
-              throw new Error("folder metadata temporarily unavailable");
-            }
-            return await target.listResourceFolder(folder);
-          };
-        }
-        return Reflect.get(target, property, receiver) as unknown;
-      },
-    }),
-  });
-  const { changes, dataFolder, errors, watcher } = fixture;
-  const incomingFolder = join(dirname(dataFolder), "incoming-blobs");
-  try {
-    await mkdir(incomingFolder);
-    await writeFile(join(incomingFolder, blobName), "restored blob");
-    const start = changes.changes.length;
-    await rename(incomingFolder, join(dataFolder, "_blobs"));
-    await waitForChanges(changes, start, [{
-      uri: `autofile:///_blobs/${blobName}`,
-      kind: "created",
-      listChanged: true,
-    }], "a failed folder read suppressed its child resource hint");
-    assert.deepEqual(
-      errors.map(({ message }) => message),
-      ["folder metadata temporarily unavailable"],
-    );
   } finally {
     await watcher.close();
   }
@@ -657,7 +652,7 @@ test("a burst of many resources is reported without another whole-store scan", {
   let listResourcesCalls = 0;
   const fixture = await createFixture({
     records: { atomic: { title: "Atomic", status: "initial" } },
-    watchedStore: (store) => new Proxy(store, {
+    watchedResources: (store) => new Proxy(store, {
       get(target, property, receiver) {
         if (property === "listResources") {
           return async () => {

@@ -1,13 +1,9 @@
-/**
- * Parses, checks, and persists blob-field inputs. Candidate preparation is
- * deliberately separate from persistence so a refused record write cannot
- * leave a blob behind.
- */
+/** Stores explicitly uploaded attachments and checks their canonical addresses. */
 
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, unlink, writeFile, type FileHandle } from "node:fs/promises";
-import { basename, dirname, extname, isAbsolute, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { extension as extensionForMimeType } from "mime-types";
 
@@ -26,83 +22,41 @@ export const BLOB_URI_PATTERN = new RegExp(
   "u",
 );
 
-const SOURCE_READ_CHUNK_BYTES = 64 * 1024;
 const blobExtensionPattern = new RegExp(`^${BLOB_EXTENSION_PATTERN_SOURCE}$`, "u");
 
-/** One checked blob which may still need to be copied into the store. */
-export interface PreparedBlob {
-  uri: string;
-  name: string;
-  bytes?: Buffer;
-}
-
-/** A user-correctable refusal for one blob field. */
-interface BlobRefusal {
-  message: string;
-}
-
-/** Returns whether the value has one of the three syntactic blob input forms. */
-export function isBlobInput(value: unknown): value is string {
-  return typeof value === "string"
-    && (BLOB_URI_PATTERN.test(value) || isAbsolute(value) || parseDataUri(value) !== undefined);
-}
-
-/** Checks and materializes one candidate without changing the blob folder. */
-export async function prepareBlob(
-  value: string,
-  blobFolder: string,
-  allowLocalPaths: boolean,
-): Promise<PreparedBlob | BlobRefusal> {
-  const blobName = blobNameFromUri(value);
-  if (blobName !== undefined) {
-    const details = await storedBlobDetails(blobFolder, blobName);
-    if (details === undefined) return { message: `references a blob that does not exist: ${value}` };
-    if (details.size > MAX_BLOB_BYTES) return sizeRefusal(details.size);
-    return { uri: value, name: blobName };
-  }
-
-  if (isAbsolute(value)) {
-    if (!allowLocalPaths) {
-      return { message: "local paths are accepted only over stdio, not HTTP" };
-    }
-    const source = await openRegularFile(value, false);
-    if (source === undefined) return { message: `path does not exist or is not a file: ${value}` };
-    try {
-      if (source.size > MAX_BLOB_BYTES) return sizeRefusal(source.size);
-      const bytes = await readSourceFile(source.handle);
-      if ("message" in bytes) return bytes;
-      return preparedBytes(bytes, pathExtension(value));
-    } finally {
-      await source.handle.close();
-    }
-  }
-
-  const data = parseDataUri(value);
-  if (data === undefined) return { message: "must be a blob URI, an absolute path, or a base64 data URI" };
-  if (data.size > MAX_BLOB_BYTES) return sizeRefusal(data.size);
-  return preparedBytes(Buffer.from(data.base64, "base64"), data.extension);
-}
-
-/** Stores checked blobs atomically, skipping any destination already present. */
-export async function writePreparedBlobs(
-  blobFolder: string,
-  blobs: Iterable<PreparedBlob>,
-): Promise<void> {
-  const pending = [...blobs].filter((blob) => blob.bytes !== undefined);
-  if (pending.length === 0) return;
+/** Stores one attachment atomically, reusing an existing regular file. */
+export async function writeBlob(blobFolder: string, bytes: Buffer, mediaType: string): Promise<string> {
+  const extension = extensionForMimeType(mediaType.toLowerCase());
+  const suffix = extension === false ? undefined : normalizeExtension(extension);
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const name = `${digest}${suffix === undefined ? "" : `.${suffix}`}`;
   await mkdir(blobFolder, { recursive: true });
   if (!await isDirectory(blobFolder)) {
     throw Object.assign(new Error("blob folder is not a directory"), { code: "ENOTDIR" });
   }
+  const path = join(blobFolder, name);
+  if (!await isRegularFile(path)) await writeBlobAtomically(path, bytes);
+  return blobUri(name);
+}
 
-  const written = new Set<string>();
-  for (const blob of pending) {
-    if (written.has(blob.name)) continue;
-    written.add(blob.name);
-    const path = join(blobFolder, blob.name);
-    if (await isRegularFile(path)) continue;
-    await writeBlobAtomically(path, blob.bytes ?? Buffer.alloc(0));
-  }
+/** Reports unavailable or oversized bytes for a canonical attachment address. */
+export async function blobReferenceProblem(blobFolder: string, uri: string): Promise<string | undefined> {
+  const name = blobNameFromUri(uri);
+  const details = name === undefined ? undefined : await storedBlobDetails(blobFolder, name);
+  if (details === undefined) return `references a blob that does not exist: ${uri}`;
+  return details.size > MAX_BLOB_BYTES ? blobSizeProblem(details.size) : undefined;
+}
+
+/** Checks the bare media type accepted by explicit uploads. */
+export function isMediaType(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const token = "[!#$%&'*+.^_`|~0-9A-Za-z-]+";
+  return new RegExp(`^${token}/${token}$`, "u").test(value);
+}
+
+/** Gives the upload size and the accepted limit in the existing refusal form. */
+export function blobSizeProblem(size: number): string {
+  return `blob is ${String(size)} bytes; limit is ${String(MAX_BLOB_BYTES)} bytes`;
 }
 
 /** Deletes the named canonical blob resources when they still exist. */
@@ -121,7 +75,7 @@ export async function deleteBlobUris(blobFolder: string, uris: Iterable<string>)
 
 /** Returns the canonical blob name from a URI. */
 export function blobNameFromUri(uri: string): string | undefined {
-  return BLOB_URI_PATTERN.exec(uri)?.[1];
+  return typeof uri === "string" ? BLOB_URI_PATTERN.exec(uri)?.[1] : undefined;
 }
 
 /** Builds the canonical URI for a recognized blob name. */
@@ -134,109 +88,14 @@ interface OpenedFile {
   size: number;
 }
 
-interface ParsedDataUri {
-  base64: string;
-  extension?: string;
-  size: number;
-}
-
-function preparedBytes(bytes: Buffer, extension?: string): PreparedBlob {
-  const digest = createHash("sha256").update(bytes).digest("hex");
-  const name = `${digest}${extension === undefined ? "" : `.${extension}`}`;
-  return { uri: blobUri(name), name, bytes };
-}
-
-function parseDataUri(value: string): ParsedDataUri | undefined {
-  if (value.slice(0, "data:".length).toLowerCase() !== "data:") return undefined;
-  const comma = value.indexOf(",", "data:".length);
-  if (comma === -1) return undefined;
-  const header = value.slice("data:".length, comma);
-  const marker = ";base64";
-  if (header.slice(-marker.length).toLowerCase() !== marker) return undefined;
-  const metadata = header.slice(0, -marker.length);
-  const base64 = value.slice(comma + 1);
-  if (!isCanonicalBase64(base64)) return undefined;
-  const [mediaType = "", ...parameters] = metadata.split(";");
-  if (
-    (mediaType !== "" && !isMediaType(mediaType))
-    || parameters.some((parameter) => !isMediaTypeParameter(parameter))
-  ) {
-    return undefined;
-  }
-  const normalizedMediaType = mediaType === "" ? "text/plain" : mediaType.toLowerCase();
-  const usualExtension = extensionForMimeType(normalizedMediaType);
-  const extension = usualExtension === false ? undefined : normalizeExtension(usualExtension);
-  return {
-    base64,
-    ...(extension === undefined ? {} : { extension }),
-    size: decodedBase64Size(base64),
-  };
-}
-
-function isCanonicalBase64(value: string): boolean {
-  if (value.length % 4 !== 0) return false;
-  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
-  const contentLength = value.length - padding;
-  if (padding === 2 && contentLength % 4 !== 2) return false;
-  if (padding === 1 && contentLength % 4 !== 3) return false;
-  for (let index = 0; index < contentLength; index += 1) {
-    const code = value.charCodeAt(index);
-    if (
-      !(code >= 0x41 && code <= 0x5a)
-      && !(code >= 0x61 && code <= 0x7a)
-      && !(code >= 0x30 && code <= 0x39)
-      && code !== 0x2b
-      && code !== 0x2f
-    ) {
-      return false;
-    }
-  }
-  if (padding > 0) {
-    const finalCode = value.charCodeAt(contentLength - 1);
-    const finalSextet = finalCode >= 0x41 && finalCode <= 0x5a
-      ? finalCode - 0x41
-      : finalCode >= 0x61 && finalCode <= 0x7a
-        ? finalCode - 0x61 + 26
-        : finalCode >= 0x30 && finalCode <= 0x39
-          ? finalCode - 0x30 + 52
-          : finalCode === 0x2b ? 62 : 63;
-    const unusedBits = padding === 2 ? 4 : 2;
-    if ((finalSextet & ((1 << unusedBits) - 1)) !== 0) return false;
-  }
-  return true;
-}
-
-function decodedBase64Size(value: string): number {
-  if (value.length === 0) return 0;
-  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
-  return value.length / 4 * 3 - padding;
-}
-
-function isMediaType(value: string): boolean {
-  const token = "[!#$%&'*+.^_`|~0-9A-Za-z-]+";
-  return new RegExp(`^${token}/${token}$`, "u").test(value);
-}
-
-function isMediaTypeParameter(value: string): boolean {
-  return /^[!#$%&'*+.^_`|~0-9A-Za-z-]+=[^\s,;]+$/u.test(value);
-}
-
-function pathExtension(path: string): string | undefined {
-  return normalizeExtension(extname(basename(path)).slice(1));
-}
-
 function normalizeExtension(extension: string): string | undefined {
   const normalized = extension.toLowerCase();
   return blobExtensionPattern.test(normalized) ? normalized : undefined;
 }
 
-function sizeRefusal(size: number): BlobRefusal {
-  return { message: `blob is ${String(size)} bytes; limit is ${String(MAX_BLOB_BYTES)} bytes` };
-}
-
 async function storedBlobDetails(blobFolder: string, name: string): Promise<{ size: number } | undefined> {
   if (!await isDirectory(blobFolder)) return undefined;
-  const file = await openRegularFile(join(blobFolder, name), true);
+  const file = await openRegularFile(join(blobFolder, name));
   if (file === undefined) return undefined;
   try {
     return { size: file.size };
@@ -245,28 +104,12 @@ async function storedBlobDetails(blobFolder: string, name: string): Promise<{ si
   }
 }
 
-async function readSourceFile(handle: FileHandle): Promise<Buffer | BlobRefusal> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  while (true) {
-    // The extra byte proves the source is too large without allowing a file that grew after stat,
-    // or a regular special file with an inaccurate size, to make this read unbounded.
-    const remainingWithSentinel = MAX_BLOB_BYTES + 1 - size;
-    const buffer = Buffer.alloc(Math.min(SOURCE_READ_CHUNK_BYTES, remainingWithSentinel));
-    const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, null);
-    if (bytesRead === 0) return Buffer.concat(chunks, size);
-    size += bytesRead;
-    if (size > MAX_BLOB_BYTES) return sizeRefusal(size);
-    chunks.push(bytesRead === buffer.byteLength ? buffer : buffer.subarray(0, bytesRead));
-  }
-}
-
-async function openRegularFile(path: string, noFollow: boolean): Promise<OpenedFile | undefined> {
+async function openRegularFile(path: string): Promise<OpenedFile | undefined> {
   let handle: FileHandle;
   try {
     handle = await open(
       path,
-      constants.O_RDONLY | constants.O_NONBLOCK | (noFollow ? constants.O_NOFOLLOW : 0),
+      constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
     );
   } catch (error) {
     if (

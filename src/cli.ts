@@ -14,12 +14,11 @@ import {
 } from "./config.js";
 import { startHttpServer } from "./http.js";
 import { buildServer } from "./server.js";
-import { openStore } from "./store.js";
+import { Autofile } from "./index.js";
 import {
-  resourceNotificationUris,
-  watchStore,
-  type StoreWatcher,
-} from "./watch.js";
+  watchResources,
+  type ResourceWatcher,
+} from "./mcp-watch.js";
 
 const usage = `Usage:
   autofile
@@ -80,24 +79,27 @@ async function main(args: string[]): Promise<void> {
 
 async function runStdio(): Promise<void> {
   const settings = await getSettings();
-  const store = await openStore({ dataFolder: settings.storage });
+  const store = new Autofile({ folder: settings.storage });
   let connectedServer: Awaited<ReturnType<typeof buildServer>> | undefined;
-  let watcher: StoreWatcher | undefined;
+  let watcher: ResourceWatcher | undefined;
   let handle: ReturnType<typeof serveStdio> | undefined;
   let stopping: Promise<void> | undefined;
 
   const stop = (): Promise<void> => {
     stopping ??= Promise.all([
-      watcher?.close() ?? Promise.resolve(),
+      (async () => {
+        await watcher?.close();
+        await store.close();
+      })(),
       handle?.close() ?? Promise.resolve(),
     ]).then(() => undefined);
     return stopping;
   };
-  watcher = await watchStore(settings.storage, store, async (batch) => {
+  watcher = await watchResources(store, async (batch) => {
     const server = connectedServer;
     if (server === undefined || !server.isConnected()) return;
     try {
-      const uris = new Set(batch.changes.flatMap(({ uri }) => resourceNotificationUris(uri)));
+      const uris = new Set(batch.changes.map(({ uri }) => uri));
       for (const uri of uris) {
         await server.server.sendResourceUpdated({ uri });
       }
@@ -106,7 +108,10 @@ async function runStdio(): Promise<void> {
       // Closing the connection can race an event already queued by Chokidar.
       if (server.isConnected()) throw error;
     }
-  }, reportError);
+  }, reportError).catch(async (error: unknown) => {
+    await store.close();
+    throw error;
+  });
   handle = serveStdio(async () => {
     const server = await buildServer(store);
     connectedServer = server;
@@ -139,8 +144,8 @@ async function serve(args: string[]): Promise<void> {
     ...(overrides.host === undefined ? {} : { host: overrides.host }),
     ...(overrides.port === undefined ? {} : { port: overrides.port }),
   };
-  const store = await openStore({ dataFolder: settings.storage });
-  const running = await startHttpServer(store, settings.storage, http, reportError);
+  const store = new Autofile({ folder: settings.storage });
+  const running = await startHttpServer(store, http, reportError);
   process.stderr.write(`autofile: listening on ${running.endpoint.href}\n`);
 
   const stop = () => {
