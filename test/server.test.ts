@@ -242,7 +242,7 @@ test("tools are listed in spec order with exact descriptions and described close
     },
     {
       name: "list_types",
-      description: "Returns every type, ordered by name, with the URI of its declaration and its description.",
+      description: "Returns every type, ordered by name, with the URI of its declaration, its description, and its `title` when it has one.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -272,6 +272,10 @@ test("tools are listed in spec order with exact descriptions and described close
             type: "string",
             description: "A top-level field of the record whose string value is shown as its title.",
           },
+          title: {
+            type: "string",
+            description: "The name of the type in words, in the singular, such as \"Journal entry\", shown to people in place of the type name.",
+          },
         },
         required: ["type", "description", "schema"],
         additionalProperties: false,
@@ -279,7 +283,7 @@ test("tools are listed in spec order with exact descriptions and described close
     },
     {
       name: "update_type",
-      description: "Replaces the description, schema or title field of a type, or any of them.",
+      description: "Replaces the description, schema, title field or title of a type, or any of them.",
       inputSchema: {
         type: "object",
         properties: {
@@ -289,6 +293,10 @@ test("tools are listed in spec order with exact descriptions and described close
           titleField: {
             type: ["string", "null"],
             description: "The new title field; `null` removes it.",
+          },
+          title: {
+            type: ["string", "null"],
+            description: "The new title; `null` removes it.",
           },
         },
         required: ["type"],
@@ -327,6 +335,7 @@ test("all ten tools map store results to matching structured and text JSON", asy
     arguments: {
       type: "tasks",
       description: "Things to do.",
+      title: "Task",
       titleField: "title",
       schema: taskSchema,
     },
@@ -339,6 +348,7 @@ test("all ten tools map store results to matching structured and text JSON", asy
       uri: "autofile:///_types/tasks",
       type: "tasks",
       description: "Things to do.",
+      title: "Task",
     }],
   });
 
@@ -346,6 +356,7 @@ test("all ten tools map store results to matching structured and text JSON", asy
   assertToolJson(gotType, {
     uri: "autofile:///_types/tasks",
     description: "Things to do.",
+    title: "Task",
     titleField: "title",
     schema: taskSchema,
   });
@@ -402,6 +413,7 @@ test("all ten tools map store results to matching structured and text JSON", asy
     arguments: {
       type: "tasks",
       description: "Completed and active tasks.",
+      title: "To-do",
     },
   });
   assertToolJson(updatedType, { uri: "autofile:///_types/tasks", errors: [] });
@@ -413,6 +425,7 @@ test("all ten tools map store results to matching structured and text JSON", asy
   assertToolJson(gotUpdatedType, {
     uri: "autofile:///_types/tasks",
     description: "Completed and active tasks.",
+    title: "To-do",
     titleField: "title",
     schema: taskSchema,
   });
@@ -737,6 +750,7 @@ test("tool argument objects reject additional properties before calling the stor
 test("resources list every stored kind in URI order with their exact metadata", async () => {
   const { dataFolder, store } = await makeStore();
   await createTasksType(store);
+  await store.updateType({ type: "tasks", title: "Task" });
   await store.createRecord({
     type: "tasks",
     key: "book-dentist",
@@ -774,6 +788,7 @@ test("resources list every stored kind in URI order with their exact metadata", 
     {
       uri: "autofile:///_types/tasks",
       name: "_types/tasks",
+      title: "Task",
       mimeType: "application/json",
       description: "Things to do.",
     },

@@ -189,6 +189,7 @@ test("type operations persist exact declarations and list recognized files in na
   assert.deepEqual(await store.createType({
     type: "tasks",
     description: "Things to do.",
+    title: "Task",
     titleField: "title",
     schema: taskSchema,
   }), { uri: "autofile:///_types/tasks" });
@@ -202,6 +203,7 @@ test("type operations persist exact declarations and list recognized files in na
     await readFile(join(dataFolder, "_types", "tasks.json"), "utf8"),
     `${JSON.stringify({
       description: "Things to do.",
+      title: "Task",
       titleField: "title",
       schema: taskSchema,
     }, null, 2)}\n`,
@@ -209,15 +211,31 @@ test("type operations persist exact declarations and list recognized files in na
   assert.deepEqual(await store.getType({ type: "tasks" }), {
     uri: "autofile:///_types/tasks",
     description: "Things to do.",
+    title: "Task",
     titleField: "title",
     schema: taskSchema,
   });
   assert.deepEqual(await store.listTypes({}), {
     types: [
       { uri: "autofile:///_types/contacts", type: "contacts", description: "People." },
-      { uri: "autofile:///_types/tasks", type: "tasks", description: "Things to do." },
+      {
+        uri: "autofile:///_types/tasks",
+        type: "tasks",
+        description: "Things to do.",
+        title: "Task",
+      },
     ],
   });
+  assert.deepEqual(
+    (await store.listResources()).find(({ uri }) => uri === "autofile:///_types/tasks"),
+    {
+      uri: "autofile:///_types/tasks",
+      name: "_types/tasks",
+      title: "Task",
+      mimeType: "application/json",
+      description: "Things to do.",
+    },
+  );
 
   await writeFile(join(dataFolder, "_types", ".draft.json"), "{}\n");
   await writeFile(join(dataFolder, "_types", "Bad.json"), "{}\n");
@@ -289,6 +307,18 @@ test("argument refusals name the argument that must be corrected", async () => {
     schema: { type: "object" },
   }), { errors: [{ message: "titleField: must be a string" }] });
   assert.deepEqual(await store.createType({
+    type: "empty-title",
+    description: "Invalid title.",
+    title: "",
+    schema: { type: "object" },
+  }), { errors: [{ message: "title: must be a non-empty string" }] });
+  assert.deepEqual(await store.createType({
+    type: "bad-title",
+    description: "Invalid title.",
+    title: 42 as unknown as string,
+    schema: { type: "object" },
+  }), { errors: [{ message: "title: must be a non-empty string" }] });
+  assert.deepEqual(await store.createType({
     type: "bad-schema-value",
     description: "Invalid schema value.",
     schema: [] as unknown as JsonObject,
@@ -299,6 +329,14 @@ test("argument refusals name the argument that must be corrected", async () => {
   }), { errors: [{ message: "titleField: must be a string or null" }] });
   assert.deepEqual(await store.updateType({
     type: "tasks",
+    title: "",
+  }), { errors: [{ message: "title: must be a non-empty string or null" }] });
+  assert.deepEqual(await store.updateType({
+    type: "tasks",
+    title: 42 as unknown as string,
+  }), { errors: [{ message: "title: must be a non-empty string or null" }] });
+  assert.deepEqual(await store.updateType({
+    type: "tasks",
     description: 42 as unknown as string,
   }), { errors: [{ message: "description: must be a string" }] });
   assert.deepEqual(await store.updateType({
@@ -306,6 +344,66 @@ test("argument refusals name the argument that must be corrected", async () => {
     schema: [] as unknown as JsonObject,
   }), { errors: [{ message: "schema: must be a JSON object" }] });
 
+});
+
+test("update_type preserves, replaces, and removes a type title", async () => {
+  const { dataFolder, store } = await makeStore();
+  await store.createType({
+    type: "journal-entries",
+    description: "Journal entries.",
+    title: "Journal entry",
+    schema: { type: "object" },
+  });
+
+  assert.deepEqual(await store.updateType({
+    type: "journal-entries",
+    description: "Dated journal entries.",
+  }), { uri: "autofile:///_types/journal-entries", errors: [] });
+  assert.deepEqual(await store.getType({ type: "journal-entries" }), {
+    uri: "autofile:///_types/journal-entries",
+    description: "Dated journal entries.",
+    title: "Journal entry",
+    schema: { type: "object" },
+  });
+
+  assert.deepEqual(await store.updateType({
+    type: "journal-entries",
+    title: "Diary entry",
+  }), { uri: "autofile:///_types/journal-entries", errors: [] });
+  assert.deepEqual(await store.getType({ type: "journal-entries" }), {
+    uri: "autofile:///_types/journal-entries",
+    description: "Dated journal entries.",
+    title: "Diary entry",
+    schema: { type: "object" },
+  });
+  assert.deepEqual(await store.listTypes({}), {
+    types: [{
+      uri: "autofile:///_types/journal-entries",
+      type: "journal-entries",
+      description: "Dated journal entries.",
+      title: "Diary entry",
+    }],
+  });
+
+  assert.deepEqual(await store.updateType({
+    type: "journal-entries",
+    title: null,
+  }), { uri: "autofile:///_types/journal-entries", errors: [] });
+  assert.deepEqual(await store.getType({ type: "journal-entries" }), {
+    uri: "autofile:///_types/journal-entries",
+    description: "Dated journal entries.",
+    schema: { type: "object" },
+  });
+  assert.deepEqual(
+    JSON.parse(await readFile(
+      join(dataFolder, "_types", "journal-entries.json"),
+      "utf8",
+    )) as unknown,
+    {
+      description: "Dated journal entries.",
+      schema: { type: "object" },
+    },
+  );
 });
 
 test("schemas use draft 2020-12, internal refs, known formats, and readable validation errors", async () => {
@@ -2927,6 +3025,18 @@ test("resources enforce recognized files but keep schema-invalid stored envelope
     writeFile(join(dataFolder, "_types", "malformed.json"), "{\n"),
     writeFile(join(dataFolder, "_types", "invalid.json"), '{"description":42,"schema":{}}\n'),
     writeFile(
+      join(dataFolder, "_types", "empty-title.json"),
+      '{"description":"Bad title.","title":"","schema":{}}\n',
+    ),
+    writeFile(
+      join(dataFolder, "_types", "bad-title.json"),
+      '{"description":"Bad title.","title":42,"schema":{}}\n',
+    ),
+    writeFile(
+      join(dataFolder, "_types", "unexpected-field.json"),
+      '{"description":"Unexpected field.","unexpected":true,"schema":{}}\n',
+    ),
+    writeFile(
       join(dataFolder, "_types", "bad-schema.json"),
       '{"description":"Bad schema.","schema":{"type":"not-a-type"}}\n',
     ),
@@ -2943,6 +3053,17 @@ test("resources enforce recognized files but keep schema-invalid stored envelope
     mimeType: "application/json",
     text: keptText,
   });
+  const listedTypes = await store.listTypes({});
+  for (const type of [
+    "empty-title",
+    "bad-title",
+    "unexpected-field",
+  ]) {
+    assert.equal(listedTypes.types.some((listed) => listed.type === type), false);
+    assert.deepEqual(await store.getType({ type }), {
+      errors: [{ uri: `autofile:///_types/${type}`, message: "type declaration is not valid" }],
+    });
+  }
   for (const uri of [
     "autofile:///tasks/malformed",
     "autofile:///tasks/invalid",
@@ -2951,6 +3072,9 @@ test("resources enforce recognized files but keep schema-invalid stored envelope
     "autofile:///tasks/nested",
     "autofile:///_types/malformed",
     "autofile:///_types/invalid",
+    "autofile:///_types/empty-title",
+    "autofile:///_types/bad-title",
+    "autofile:///_types/unexpected-field",
     "autofile:///_types/bad-schema",
     "autofile:///_types/Bad",
     "autofile:///_types/nested",
