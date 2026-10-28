@@ -30,7 +30,7 @@ import {
   type UpdateTypeInput,
   type UploadBlobInput,
 } from "./mcp-tools.js";
-import { buildResources, isResourceUri } from "./mcp-resources.js";
+import { buildResources, isResourceUri, type ResourceOptions } from "./mcp-resources.js";
 import type { Autofile, JsonObject } from "./index.js";
 
 const SERVER_DESCRIPTION = "Typed records that agents file and retrieve.";
@@ -177,9 +177,9 @@ const deleteTypeSchema = fromJsonSchema<DeleteTypeInput>({
 });
 
 /** Builds one MCP server around a store, without choosing its transport. */
-export async function buildServer(autofile: Autofile): Promise<McpServer> {
+export async function buildServer(autofile: Autofile, options: ResourceOptions = {}): Promise<McpServer> {
   const tools = buildTools(autofile);
-  const resources = buildResources(autofile);
+  const resources = buildResources(autofile, options);
   const { types } = await tools.listTypes({});
   const typeNames = types.map(({ type }) => type).sort();
   const typeSummary = typeNames.length === 0 ? "none yet" : typeNames.join(", ");
@@ -226,7 +226,7 @@ export async function buildServer(autofile: Autofile): Promise<McpServer> {
   server.registerTool(
     "upload_blob",
     {
-      description: "Uploads bytes and returns their blob URI for use in records. Supply canonical base64 and a media type, or an absolute local path over stdio. The maximum size is 7 MiB.",
+      description: "Uploads bytes and returns their blob URI for use in records. Supply canonical base64 and a media type, up to 7 MiB, or an absolute local path over stdio with no size limit.",
       inputSchema: uploadBlobSchema,
     },
     async (input, context) => toolResult(await tools.uploadBlob(input, { allowLocalPaths: context.http === undefined })),

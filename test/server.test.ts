@@ -54,7 +54,7 @@ async function makeStore(): Promise<TestStore> {
 }
 
 async function connect(store: Store): Promise<Client> {
-  const handler = createMcpHandler(() => buildServer(store.autofile), { legacy: "reject" });
+  const handler = createMcpHandler(() => buildServer(store.autofile, { blobLocation: "http" }), { legacy: "reject" });
   const transport = new StreamableHTTPClientTransport(new URL("http://autofile.test/mcp"), {
     fetch: (url, init) => handler.fetch(new Request(url, init)),
   });
@@ -98,7 +98,7 @@ async function createTasksType(store: Store): Promise<void> {
     description: "Things to do.",
     titleField: "title",
     schema: taskSchema,
-  }), { uri: "autofile:///_types/tasks" });
+  }), { uri: "autofile:///types/tasks" });
 }
 
 afterEach(async () => {
@@ -236,7 +236,7 @@ test("tools are listed in spec order with exact descriptions and described close
     },
     {
       name: "upload_blob",
-      description: "Uploads bytes and returns their blob URI for use in records. Supply canonical base64 and a media type, or an absolute local path over stdio. The maximum size is 7 MiB.",
+      description: "Uploads bytes and returns their blob URI for use in records. Supply canonical base64 and a media type, up to 7 MiB, or an absolute local path over stdio with no size limit.",
       inputSchema: {
         type: "object",
         properties: {
@@ -357,12 +357,12 @@ test("record and type tools map store results to matching structured and text JS
       schema: taskSchema,
     },
   });
-  assertToolJson(createdType, { uri: "autofile:///_types/tasks" });
+  assertToolJson(createdType, { uri: "autofile:///types/tasks" });
 
   const listedTypes = await client.callTool({ name: "list_types", arguments: {} });
   assertToolJson(listedTypes, {
     types: [{
-      uri: "autofile:///_types/tasks",
+      uri: "autofile:///types/tasks",
       type: "tasks",
       description: "Things to do.",
       title: "Task",
@@ -371,7 +371,7 @@ test("record and type tools map store results to matching structured and text JS
 
   const gotType = await client.callTool({ name: "get_type", arguments: { type: "tasks" } });
   assertToolJson(gotType, {
-    uri: "autofile:///_types/tasks",
+    uri: "autofile:///types/tasks",
     description: "Things to do.",
     title: "Task",
     titleField: "title",
@@ -386,7 +386,7 @@ test("record and type tools map store results to matching structured and text JS
       record: { title: "Book dentist", status: "active" },
     },
   });
-  assertToolJson(createdRecord, { uri: "autofile:///tasks/book-dentist" });
+  assertToolJson(createdRecord, { uri: "autofile:///records/tasks/book-dentist" });
 
   const foundRecords = await client.callTool({
     name: "find_records",
@@ -400,17 +400,17 @@ test("record and type tools map store results to matching structured and text JS
   const found = asObject(foundRecords.structuredContent);
   assert.ok(Array.isArray(found.records));
   assert.equal(found.records.length, 1);
-  assert.equal(asObject(found.records[0]).uri, "autofile:///tasks/book-dentist");
+  assert.equal(asObject(found.records[0]).uri, "autofile:///records/tasks/book-dentist");
   assert.deepEqual(asObject(found.records[0]).value, { title: "Book dentist" });
   assert.deepEqual(found.errors, []);
   assertToolJson(foundRecords, found);
 
   const gotRecord = await client.callTool({
     name: "get_record",
-    arguments: { uri: "autofile:///tasks/book-dentist" },
+    arguments: { uri: "autofile:///records/tasks/book-dentist" },
   });
   const record = asObject(gotRecord.structuredContent);
-  assert.equal(record.uri, "autofile:///tasks/book-dentist");
+  assert.equal(record.uri, "autofile:///records/tasks/book-dentist");
   assert.deepEqual(record.value, { title: "Book dentist", status: "active" });
   assert.equal(typeof record.createdAt, "string");
   assert.equal(record.updatedAt, record.createdAt);
@@ -419,11 +419,11 @@ test("record and type tools map store results to matching structured and text JS
   const updatedRecord = await client.callTool({
     name: "update_record",
     arguments: {
-      uri: "autofile:///tasks/book-dentist",
+      uri: "autofile:///records/tasks/book-dentist",
       patch: { status: "complete" },
     },
   });
-  assertToolJson(updatedRecord, { uri: "autofile:///tasks/book-dentist" });
+  assertToolJson(updatedRecord, { uri: "autofile:///records/tasks/book-dentist" });
 
   const updatedType = await client.callTool({
     name: "update_type",
@@ -433,14 +433,14 @@ test("record and type tools map store results to matching structured and text JS
       title: "To-do",
     },
   });
-  assertToolJson(updatedType, { uri: "autofile:///_types/tasks", errors: [] });
+  assertToolJson(updatedType, { uri: "autofile:///types/tasks", errors: [] });
 
   const gotUpdatedType = await client.callTool({
     name: "get_type",
     arguments: { type: "tasks" },
   });
   assertToolJson(gotUpdatedType, {
-    uri: "autofile:///_types/tasks",
+    uri: "autofile:///types/tasks",
     description: "Completed and active tasks.",
     title: "To-do",
     titleField: "title",
@@ -449,12 +449,12 @@ test("record and type tools map store results to matching structured and text JS
 
   const deletedRecord = await client.callTool({
     name: "delete_record",
-    arguments: { uri: "autofile:///tasks/book-dentist" },
+    arguments: { uri: "autofile:///records/tasks/book-dentist" },
   });
-  assertToolJson(deletedRecord, { uri: "autofile:///tasks/book-dentist" });
+  assertToolJson(deletedRecord, { uri: "autofile:///records/tasks/book-dentist" });
 
   const deletedType = await client.callTool({ name: "delete_type", arguments: { type: "tasks" } });
-  assertToolJson(deletedType, { uri: "autofile:///_types/tasks" });
+  assertToolJson(deletedType, { uri: "autofile:///types/tasks" });
 });
 
 test("find_records returns complete records and error-only pages as successful results", async () => {
@@ -465,8 +465,8 @@ test("find_records returns complete records and error-only pages as successful r
     key: "book-dentist",
     record: { title: "Book dentist", status: "active" },
   });
-  await writeFile(join(dataFolder, "tasks", "a-broken.json"), "{\n");
-  const stored = await store.getRecord({ uri: "autofile:///tasks/book-dentist" });
+  await writeFile(join(dataFolder, "records", "tasks", "a-broken.json"), "{\n");
+  const stored = await store.getRecord({ uri: "autofile:///records/tasks/book-dentist" });
   assert.ok("value" in stored);
   const client = await connect(store);
 
@@ -479,7 +479,7 @@ test("find_records returns complete records and error-only pages as successful r
   assertToolJson(errorOnlyPage, {
     records: [],
     errors: [{
-      uri: "autofile:///tasks/a-broken",
+      uri: "autofile:///records/tasks/a-broken",
       message: "record is unavailable",
     }],
     cursor: errorOnlyBody.cursor,
@@ -501,7 +501,7 @@ test("find_records returns complete records and error-only pages as successful r
   });
 
   assert.deepEqual(errorOnlyBody.errors, [{
-    uri: "autofile:///tasks/a-broken",
+    uri: "autofile:///records/tasks/a-broken",
     message: "record is unavailable",
   }]);
 
@@ -561,9 +561,9 @@ test("find_records enforces byte-capped paging through MCP", async () => {
   } while (cursor !== undefined);
 
   assert.deepEqual(uris, [
-    "autofile:///entries/a",
-    "autofile:///entries/b",
-    "autofile:///entries/c",
+    "autofile:///records/entries/a",
+    "autofile:///records/entries/b",
+    "autofile:///records/entries/c",
   ]);
 });
 
@@ -586,7 +586,7 @@ test("find_records searches all or selected types and keeps value filters separa
     const body = asObject(result.structuredContent);
     assert.ok(Array.isArray(body.records));
     assert.deepEqual(body.records.map((record) => asObject(record).uri),
-      expected.map((type) => `autofile:///${type}/one`));
+      expected.map((type) => `autofile:///records/${type}/one`));
     assert.deepEqual(body.errors, []);
   }
 });
@@ -599,7 +599,7 @@ test("get_record and projected find_records carry the title from the type declar
   });
   const client = await connect(store);
   const got = await client.callTool({
-    name: "get_record", arguments: { uri: "autofile:///tasks/named" },
+    name: "get_record", arguments: { uri: "autofile:///records/tasks/named" },
   });
   assert.equal(asObject(got.structuredContent).title, "A useful title");
   const found = await client.callTool({
@@ -625,17 +625,17 @@ test("tool refusals are errors, accepted type changes with record errors are not
 
   const refused = await client.callTool({
     name: "get_record",
-    arguments: { uri: "autofile:///tasks/missing" },
+    arguments: { uri: "autofile:///records/tasks/missing" },
   });
   assertToolJson(refused, {
-    errors: [{ uri: "autofile:///tasks/missing", message: "record does not exist" }],
+    errors: [{ uri: "autofile:///records/tasks/missing", message: "record does not exist" }],
   }, { isError: true });
 
   assertToolJson(await client.callTool({
     name: "get_record",
-    arguments: { uri: "autofile:///missing/record" },
+    arguments: { uri: "autofile:///records/missing/record" },
   }), {
-    errors: [{ uri: "autofile:///_types/missing", message: "type does not exist" }],
+    errors: [{ uri: "autofile:///types/missing", message: "type does not exist" }],
   }, { isError: true });
 
   const accepted = await client.callTool({
@@ -654,14 +654,14 @@ test("tool refusals are errors, accepted type changes with record errors are not
     },
   });
   const acceptedBody = asObject(accepted.structuredContent);
-  assert.equal(acceptedBody.uri, "autofile:///_types/tasks");
+  assert.equal(acceptedBody.uri, "autofile:///types/tasks");
   assert.ok(Array.isArray(acceptedBody.errors));
   assert.equal(acceptedBody.errors.length, 1);
-  assert.deepEqual(asObject(acceptedBody.errors[0]).uri, "autofile:///tasks/unfinished");
+  assert.deepEqual(asObject(acceptedBody.errors[0]).uri, "autofile:///records/tasks/unfinished");
   assertToolJson(accepted, acceptedBody);
   assert.notEqual(accepted.isError, true);
 
-  const uri = "autofile:///tasks/unfinished";
+  const uri = "autofile:///records/tasks/unfinished";
   const publicRecord = await store.autofile.records.get(uri);
   assert.ok(publicRecord !== undefined);
   assert.deepEqual(publicRecord.problems, acceptedBody.errors);
@@ -704,10 +704,10 @@ test("record link writes and deletes return their results and refusals through M
       additionalProperties: false,
     },
   });
-  const targetUri = "autofile:///targets/one";
-  const sourceUri = "autofile:///sources/one";
-  const blockerUri = "autofile:///blockers/one";
-  const missingUri = "autofile:///targets/missing";
+  const targetUri = "autofile:///records/targets/one";
+  const sourceUri = "autofile:///records/sources/one";
+  const blockerUri = "autofile:///records/blockers/one";
+  const missingUri = "autofile:///records/targets/missing";
   await store.createRecord({ type: "targets", key: "one", record: {} });
   await store.createRecord({
     type: "sources",
@@ -731,7 +731,7 @@ test("record link writes and deletes return their results and refusals through M
   });
   assertToolJson(refusedCreate, {
     errors: [{
-      uri: "autofile:///sources/dangling",
+      uri: "autofile:///records/sources/dangling",
       message: `target: links to a record that does not exist: ${missingUri}`,
     }],
   }, { isError: true });
@@ -784,10 +784,10 @@ test("record link writes and deletes return their results and refusals through M
   assert.deepEqual(sourceAfterDeleteBody.value, { name: "Source" });
   assertToolJson(sourceAfterDelete, sourceAfterDeleteBody);
 
-  const malformedTargetUri = "autofile:///targets/malformed";
-  const malformedBlockerUri = "autofile:///blockers/malformed";
-  const malformedTargetPath = join(dataFolder, "targets", "malformed.json");
-  const malformedBlockerPath = join(dataFolder, "blockers", "malformed.json");
+  const malformedTargetUri = "autofile:///records/targets/malformed";
+  const malformedBlockerUri = "autofile:///records/blockers/malformed";
+  const malformedTargetPath = join(dataFolder, "records", "targets", "malformed.json");
+  const malformedBlockerPath = join(dataFolder, "records", "blockers", "malformed.json");
   await store.createRecord({ type: "targets", key: "malformed", record: {} });
   await store.createRecord({
     type: "blockers",
@@ -840,16 +840,16 @@ test("resources list only records and types, with no standalone blobs or storage
     key: "book-dentist",
     record: { title: "Book dentist", status: "active" },
   });
-  const storedRecord = await store.getRecord({ uri: "autofile:///tasks/book-dentist" });
+  const storedRecord = await store.getRecord({ uri: "autofile:///records/tasks/book-dentist" });
   assert.ok("updatedAt" in storedRecord);
   const blobName = `${"a".repeat(64)}.pdf`;
   const blob = Buffer.from("%PDF-1.7\nAutofile test\n", "utf8");
   const unknownBlobName = `${"c".repeat(64)}.madeup`;
   const unknownBlob = Buffer.from("unknown media type\n", "utf8");
-  await mkdir(join(dataFolder, "_blobs"), { recursive: true });
+  await mkdir(join(dataFolder, "blobs"), { recursive: true });
   await Promise.all([
-    writeFile(join(dataFolder, "_blobs", blobName), blob),
-    writeFile(join(dataFolder, "_blobs", unknownBlobName), unknownBlob),
+    writeFile(join(dataFolder, "blobs", blobName), blob),
+    writeFile(join(dataFolder, "blobs", unknownBlobName), unknownBlob),
   ]);
   const client = await connect(store);
 
@@ -858,17 +858,17 @@ test("resources list only records and types, with no standalone blobs or storage
   assert.equal(result.cacheScope, "private");
   assert.deepEqual(result.resources, [
     {
-      uri: "autofile:///_types/tasks",
+      uri: "autofile:///records/tasks/book-dentist",
+      name: "tasks: book-dentist",
+      title: "Book dentist",
+      mimeType: "application/json",
+    },
+    {
+      uri: "autofile:///types/tasks",
       name: "Type: tasks",
       title: "Task",
       mimeType: "application/json",
       description: "Things to do.",
-    },
-    {
-      uri: "autofile:///tasks/book-dentist",
-      name: "tasks: book-dentist",
-      title: "Book dentist",
-      mimeType: "application/json",
     },
   ]);
 });
@@ -889,7 +889,7 @@ test("resources/list pages after a deleted cursor URI and rejects invalid cursor
   const timestamp = "2026-10-07T09:14:00Z";
   await Promise.all(Array.from({ length: 205 }, async (_, index) => {
     const key = `item-${String(index).padStart(3, "0")}`;
-    await writeFile(join(dataFolder, "items", `${key}.json`), `${JSON.stringify({
+    await writeFile(join(dataFolder, "records", "items", `${key}.json`), `${JSON.stringify({
       createdAt: timestamp,
       updatedAt: timestamp,
       value: { name: `Item ${String(index)}` },
@@ -913,7 +913,7 @@ test("resources/list pages after a deleted cursor URI and rejects invalid cursor
     assert.ok(page.resources.length > 0);
     if (pages === 1) {
       const lastResource = page.resources.at(-1);
-      assert.ok(lastResource !== undefined && lastResource.uri.startsWith("autofile:///items/"));
+      assert.ok(lastResource !== undefined && lastResource.uri.startsWith("autofile:///records/items/"));
       deletedCursorUri = lastResource.uri;
       assert.deepEqual(await store.deleteRecord({ uri: deletedCursorUri }), { uri: deletedCursorUri });
     } else if (pages === 2) {
@@ -958,9 +958,9 @@ test("resources/read serializes public records and types as stable JSON and read
   });
   const blobName = `${"b".repeat(64)}.pdf`;
   const blob = Buffer.from([0, 1, 2, 3, 250, 251, 252]);
-  await mkdir(join(dataFolder, "_blobs"), { recursive: true });
-  await writeFile(join(dataFolder, "_blobs", blobName), blob);
-  const stored = await store.autofile.records.get("autofile:///tasks/book-dentist");
+  await mkdir(join(dataFolder, "blobs"), { recursive: true });
+  await writeFile(join(dataFolder, "blobs", blobName), blob);
+  const stored = await store.autofile.records.get("autofile:///records/tasks/book-dentist");
   assert.ok(stored !== undefined);
   const declarationText = `${JSON.stringify({
     description: "Things to do.",
@@ -975,7 +975,7 @@ test("resources/read serializes public records and types as stable JSON and read
     },
     titleField: "title",
     type: "tasks",
-    uri: "autofile:///_types/tasks",
+    uri: "autofile:///types/tasks",
   }, null, 2)}\n`;
   const recordText = `${JSON.stringify({
     createdAt: stored.createdAt,
@@ -988,24 +988,24 @@ test("resources/read serializes public records and types as stable JSON and read
   }, null, 2)}\n`;
   // Storage formatting and object insertion order do not control the resource.
   await Promise.all([
-    writeFile(join(dataFolder, "_types", "tasks.json"), JSON.stringify({
+    writeFile(join(dataFolder, "types", "tasks.json"), JSON.stringify({
       titleField: "title", schema: taskSchema, description: "Things to do.",
     })),
-    writeFile(join(dataFolder, "tasks", "book-dentist.json"), JSON.stringify({
+    writeFile(join(dataFolder, "records", "tasks", "book-dentist.json"), JSON.stringify({
       value: { title: "Book dentist", status: "active" },
       updatedAt: stored.updatedAt, createdAt: stored.createdAt,
     }, null, 4)),
   ]);
   const client = await connect(store);
 
-  const declaration = await client.readResource({ uri: "autofile:///_types/tasks" });
+  const declaration = await client.readResource({ uri: "autofile:///types/tasks" });
   assert.deepEqual({
     contents: declaration.contents,
     ttlMs: declaration.ttlMs,
     cacheScope: declaration.cacheScope,
   }, {
     contents: [{
-      uri: "autofile:///_types/tasks",
+      uri: "autofile:///types/tasks",
       mimeType: "application/json",
       text: declarationText,
     }],
@@ -1013,14 +1013,14 @@ test("resources/read serializes public records and types as stable JSON and read
     cacheScope: "private",
   });
 
-  const record = await client.readResource({ uri: "autofile:///tasks/book-dentist" });
+  const record = await client.readResource({ uri: "autofile:///records/tasks/book-dentist" });
   assert.deepEqual({
     contents: record.contents,
     ttlMs: record.ttlMs,
     cacheScope: record.cacheScope,
   }, {
     contents: [{
-      uri: "autofile:///tasks/book-dentist",
+      uri: "autofile:///records/tasks/book-dentist",
       mimeType: "application/json",
       text: recordText,
     }],
@@ -1028,14 +1028,14 @@ test("resources/read serializes public records and types as stable JSON and read
     cacheScope: "private",
   });
 
-  const readBlob = await client.readResource({ uri: `autofile:///_blobs/${blobName}` });
+  const readBlob = await client.readResource({ uri: `autofile:///blobs/${blobName}` });
   assert.deepEqual({
     contents: readBlob.contents,
     ttlMs: readBlob.ttlMs,
     cacheScope: readBlob.cacheScope,
   }, {
     contents: [{
-      uri: `autofile:///_blobs/${blobName}`,
+      uri: `autofile:///blobs/${blobName}`,
       mimeType: "application/pdf",
       blob: blob.toString("base64"),
     }],
@@ -1044,7 +1044,7 @@ test("resources/read serializes public records and types as stable JSON and read
   });
 
   await assert.rejects(
-    client.readResource({ uri: "autofile:///tasks/missing" }),
+    client.readResource({ uri: "autofile:///records/tasks/missing" }),
     (error: unknown) => {
       assert.ok(error instanceof ProtocolError);
       assert.equal(error.code, -32602);
@@ -1063,7 +1063,7 @@ test("uploaded blob URIs can be moved and shared by record creates and updates",
       },
     },
   } });
-  const uri = "autofile:///attachments/owner";
+  const uri = "autofile:///records/attachments/owner";
   const uploaded = await client.callTool({ name: "upload_blob", arguments: { base64: "aGVsbG8=", mediaType: "text/plain" } });
   const uploadedUri = asObject(uploaded.structuredContent).uri;
   await client.callTool({ name: "create_record", arguments: {
@@ -1074,12 +1074,12 @@ test("uploaded blob URIs can be moved and shared by record creates and updates",
   const copy = await client.callTool({ name: "create_record", arguments: {
     type: "attachments", key: "copy", record: { first: attachment },
   } });
-  assertToolJson(copy, { uri: "autofile:///attachments/copy" });
+  assertToolJson(copy, { uri: "autofile:///records/attachments/copy" });
   await client.callTool({ name: "create_record", arguments: { type: "attachments", key: "other", record: {} } });
   const attachElsewhere = await client.callTool({ name: "update_record", arguments: {
-    uri: "autofile:///attachments/other", patch: { first: attachment },
+    uri: "autofile:///records/attachments/other", patch: { first: attachment },
   } });
-  assertToolJson(attachElsewhere, { uri: "autofile:///attachments/other" });
+  assertToolJson(attachElsewhere, { uri: "autofile:///records/attachments/other" });
   assertToolJson(await client.callTool({ name: "update_record", arguments: {
     uri, patch: { first: null, second: attachment },
   } }), { uri });
@@ -1089,26 +1089,26 @@ test("uploaded blob URIs can be moved and shared by record creates and updates",
 });
 
 
-test("existing declarations and attachments retain their original addresses without migration", async () => {
+test("stored declarations, records and attachments use the public address tree", async () => {
   const { dataFolder, store } = await makeStore();
   const bytes = Buffer.from("existing attachment");
   const name = `${createHash("sha256").update(bytes).digest("hex")}.txt`;
-  const attachmentUri = `autofile:///_blobs/${name}`;
-  const recordUri = "autofile:///receipts/one";
-  const typeUri = "autofile:///_types/receipts";
+  const attachmentUri = `autofile:///blobs/${name}`;
+  const recordUri = "autofile:///records/receipts/one";
+  const typeUri = "autofile:///types/receipts";
   const schema = {
     type: "object",
     required: ["name", "attachment"],
     properties: {
       name: { type: "string" },
-      attachment: { type: "string", format: "blob", pattern: "^autofile:///_blobs/" },
+      attachment: { type: "string", format: "blob", pattern: "^autofile:///blobs/" },
     },
   };
-  await Promise.all(["_types", "_blobs", "receipts"].map((folder) => mkdir(join(dataFolder, folder))));
+  await Promise.all(["types", "blobs", "records/receipts"].map((folder) => mkdir(join(dataFolder, folder), { recursive: true })));
   await Promise.all([
-    writeFile(join(dataFolder, "_types", "receipts.json"), JSON.stringify({ description: "Receipts.", schema })),
-    writeFile(join(dataFolder, "_blobs", name), bytes),
-    writeFile(join(dataFolder, "receipts", "one.json"), JSON.stringify({
+    writeFile(join(dataFolder, "types", "receipts.json"), JSON.stringify({ description: "Receipts.", schema })),
+    writeFile(join(dataFolder, "blobs", name), bytes),
+    writeFile(join(dataFolder, "records", "receipts", "one.json"), JSON.stringify({
       createdAt: "2026-10-07T09:14:00Z", updatedAt: "2026-10-07T09:14:00Z",
       value: { name: "Existing", attachment: attachmentUri },
     })),
@@ -1121,7 +1121,7 @@ test("existing declarations and attachments retain their original addresses with
   const updated = await store.autofile.records.update(recordUri, { name: "Updated" });
   assert.equal(updated.value.attachment, attachmentUri);
   const client = await connect(store);
-  assert.deepEqual((await client.listResources()).resources.map(({ uri }) => uri), [typeUri, recordUri]);
+  assert.deepEqual((await client.listResources()).resources.map(({ uri }) => uri), [recordUri, typeUri]);
   const attachment = await client.readResource({ uri: attachmentUri });
   assert.deepEqual(attachment.contents, [{ uri: attachmentUri, mimeType: "text/plain", blob: bytes.toString("base64") }]);
   const declaration = await client.readResource({ uri: typeUri });

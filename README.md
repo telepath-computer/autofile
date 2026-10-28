@@ -64,7 +64,7 @@ try {
 
 The `folder` option is the path of a store in the current implementation; [Storage](spec/storage.md) describes its format. Importing starts no server or watcher, and construction does no I/O. The first operation initializes the store if needed. [Library API](spec/index.md#library-api) covers writing records, declaring types, blobs, change subscriptions and errors.
 
-Record addresses use `autofile:///<type>/<key>`, type declarations use `autofile:///_types/<name>`, and attachments use `autofile:///_blobs/<hash>.<ext>`. Keep and reuse these addresses as opaque identifiers; they do not tell a client how data is stored.
+Record addresses use `autofile:///records/<type>/<key>`, type declarations use `autofile:///types/<name>`, and attachments use `autofile:///blobs/<hash>.<ext>`. Read and write through these addresses rather than opening stored files.
 
 Upload an attachment before writing the record that holds it. `blobs.put(bytes, mediaType)` takes a `Uint8Array` and returns an address; put that address in a field marked `"format": "blob"` in the type schema. For an open store with a `document` type that declares `title` and `attachment` fields:
 
@@ -72,6 +72,8 @@ Upload an attachment before writing the record that holds it. `blobs.put(bytes, 
 const uri = await store.blobs.put(new TextEncoder().encode("Meeting notes"), "text/plain");
 await store.records.create("document", { title: "Meeting notes", attachment: uri });
 ```
+
+Attachments have no size limit. `blobs.stream(uri)` reads a large one without loading it into memory. MCP clients read attachments of up to 7 MiB with `resources/read`; a larger one is downloaded from `autofile serve` over HTTP, or read from the local file path that Autofile gives over stdio.
 
 Records may share an attachment address. MCP clients use `upload_blob` with base64 bytes and a media type, or an absolute local file path over stdio, then put the returned address in the record. Record writes accept neither data URIs nor local paths in blob fields.
 

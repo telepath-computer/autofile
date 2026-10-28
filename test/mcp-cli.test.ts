@@ -216,7 +216,7 @@ test("the built command exits when its initial resource listing cannot read a re
   const store = await openStore({ dataFolder, writeLockPath: join(autofileHome, "write.lock") });
   await store.createType({ type: "notes", description: "Notes", schema: { type: "object" } });
   await store.createRecord({ type: "notes", key: "unreadable", record: {} });
-  const recordPath = join(dataFolder, "notes", "unreadable.json");
+  const recordPath = join(dataFolder, "records", "notes", "unreadable.json");
   await chmod(recordPath, 0o000);
   const child = spawn("/usr/bin/setpriv", [
     "--securebits", "+noroot,+noroot_locked",
@@ -254,11 +254,11 @@ test("the built command searches across types and returns titles with projected 
         arguments: {
           type, description: type, titleField: "name", schema: { type: "object" },
         },
-      }), { uri: `autofile:///_types/${type}` });
+      }), { uri: `autofile:///types/${type}` });
       assertToolJson(await client.callTool({
         name: "create_record",
         arguments: { type, key: "one", record: { name: `${type} title`, type: "value", status: "active" } },
-      }), { uri: `autofile:///${type}/one` });
+      }), { uri: `autofile:///records/${type}/one` });
     }
     for (const [query, expected] of [
       [{ fields: ["status"] }, ["notes", "projects", "tasks"]],
@@ -271,10 +271,10 @@ test("the built command searches across types and returns titles with projected 
       assert.deepEqual(body.records.map((record) => ({
         uri: asObject(record).uri, title: asObject(record).title, value: asObject(record).value,
       })), expected.map((type) => ({
-        uri: `autofile:///${type}/one`, title: `${type} title`, value: { status: "active" },
+        uri: `autofile:///records/${type}/one`, title: `${type} title`, value: { status: "active" },
       })));
     }
-    const got = await client.callTool({ name: "get_record", arguments: { uri: "autofile:///tasks/one" } });
+    const got = await client.callTool({ name: "get_record", arguments: { uri: "autofile:///records/tasks/one" } });
     assert.equal(asObject(got.structuredContent).title, "tasks title");
   } finally {
     await client.close();
@@ -338,10 +338,10 @@ test("the built command serves an exact 7 MiB blob through a default-limit clien
   const blob = Buffer.alloc(7 * 1024 * 1024, 0xa5);
   blob[0] = 0;
   blob[blob.length - 1] = 0xff;
-  await mkdir(join(dataFolder, "_blobs"), { recursive: true });
+  await mkdir(join(dataFolder, "blobs"), { recursive: true });
   await mkdir(autofileHome, { recursive: true });
   await Promise.all([
-    writeFile(join(dataFolder, "_blobs", blobName), blob),
+    writeFile(join(dataFolder, "blobs", blobName), blob),
     writeFile(
       join(autofileHome, "config.json"),
       `${JSON.stringify({ storage: dataFolder }, null, 2)}\n`,
@@ -360,7 +360,7 @@ test("the built command serves an exact 7 MiB blob through a default-limit clien
 
   try {
     await client.connect(transport);
-    const result = await client.readResource({ uri: `autofile:///_blobs/${blobName}` });
+    const result = await client.readResource({ uri: `autofile:///blobs/${blobName}` });
     const content = result.contents[0];
     assert.ok(content !== undefined && "blob" in content);
     assert.equal(content.mimeType, "application/pdf");
@@ -380,7 +380,7 @@ test("the built command uploads local paths over stdio and serves their attachme
   const sourceLink = join(root, "Receipt-alias.PDF");
   const bytes = Buffer.from([0, 1, 2, 3, 250, 251, 252, 253]);
   const hash = createHash("sha256").update(bytes).digest("hex");
-  const blobUri = `autofile:///_blobs/${hash}.pdf`;
+  const blobUri = `autofile:///blobs/${hash}.pdf`;
   await mkdir(autofileHome, { recursive: true });
   await Promise.all([
     writeFile(sourcePath, bytes),
@@ -415,18 +415,18 @@ test("the built command uploads local paths over stdio and serves their attachme
           additionalProperties: false,
         },
       },
-    })).structuredContent, { uri: "autofile:///_types/receipts" });
+    })).structuredContent, { uri: "autofile:///types/receipts" });
     assertToolJson(await client.callTool({ name: "upload_blob", arguments: { path: sourceLink } }), { uri: blobUri });
     assertToolJson(await client.callTool({
       name: "create_record",
       arguments: { type: "receipts", key: "first", record: { scan: blobUri } },
-    }), { uri: "autofile:///receipts/first" });
+    }), { uri: "autofile:///records/receipts/first" });
     assertToolJson(await client.callTool({
       name: "update_record",
-      arguments: { uri: "autofile:///receipts/first", patch: { scan: blobUri } },
-    }), { uri: "autofile:///receipts/first" });
+      arguments: { uri: "autofile:///records/receipts/first", patch: { scan: blobUri } },
+    }), { uri: "autofile:///records/receipts/first" });
 
-    const record = await client.readResource({ uri: "autofile:///receipts/first" });
+    const record = await client.readResource({ uri: "autofile:///records/receipts/first" });
     const recordContent = record.contents[0];
     assert.ok(recordContent !== undefined && "text" in recordContent);
     const stored = JSON.parse(recordContent.text) as { value: { scan: string } };
@@ -457,14 +457,14 @@ test("the built command deduplicates uploaded bytes and collects blobs after upd
   const root = await temp();
   const autofileHome = join(root, "autofile-home");
   const dataFolder = join(root, "configured", "records");
-  const blobFolder = join(dataFolder, "_blobs");
+  const blobFolder = join(dataFolder, "blobs");
   const shared = Buffer.from("shared by both records\n", "utf8");
   const first = Buffer.from("first record only\n", "utf8");
   const second = Buffer.from("second record only\n", "utf8");
   const replacement = Buffer.from("replacement for first\n", "utf8");
   const uriFor = (bytes: Buffer): string => {
     const hash = createHash("sha256").update(bytes).digest("hex");
-    return `autofile:///_blobs/${hash}.txt`;
+    return `autofile:///blobs/${hash}.txt`;
   };
   const sharedUri = uriFor(shared);
   const firstUri = uriFor(first);
@@ -509,7 +509,7 @@ test("the built command deduplicates uploaded bytes and collects blobs after upd
       assert.deepEqual((await client.callTool({
         name: "create_record",
         arguments: { type: "assets", key, record: { shared: sharedUri, unique } },
-      })).structuredContent, { uri: `autofile:///assets/${key}` });
+      })).structuredContent, { uri: `autofile:///records/assets/${key}` });
     }
 
     assert.deepEqual((await readdir(blobFolder)).sort(), [
@@ -526,10 +526,10 @@ test("the built command deduplicates uploaded bytes and collects blobs after upd
     assert.deepEqual((await client.callTool({
       name: "update_record",
       arguments: {
-        uri: "autofile:///assets/first",
+        uri: "autofile:///records/assets/first",
         patch: { unique: replacementUri },
       },
-    })).structuredContent, { uri: "autofile:///assets/first" });
+    })).structuredContent, { uri: "autofile:///records/assets/first" });
     for (const uri of [replacementUri, secondUri, sharedUri]) {
       assert.equal((await client.readResource({ uri })).contents[0]?.uri, uri);
     }
@@ -537,8 +537,8 @@ test("the built command deduplicates uploaded bytes and collects blobs after upd
 
     assert.deepEqual((await client.callTool({
       name: "delete_record",
-      arguments: { uri: "autofile:///assets/second" },
-    })).structuredContent, { uri: "autofile:///assets/second" });
+      arguments: { uri: "autofile:///records/assets/second" },
+    })).structuredContent, { uri: "autofile:///records/assets/second" });
     assert.equal((await client.readResource({ uri: replacementUri })).contents[0]?.uri, replacementUri);
     await assert.rejects(client.readResource({ uri: secondUri }));
 
@@ -551,7 +551,7 @@ test("the built command deduplicates uploaded bytes and collects blobs after upd
   }
 });
 
-test("the built command refuses an upload over 7 MiB with its size and limit", {
+test("the built command refuses a base64 upload over 7 MiB with its size and limit", {
   timeout: 30_000,
 }, async () => {
   const root = await temp();
@@ -590,7 +590,7 @@ test("the built command refuses an upload over 7 MiB with its size and limit", {
       },
     });
     const exact = Buffer.alloc(7_340_032, 0xa5);
-    const exactUri = `autofile:///_blobs/${createHash("sha256").update(exact).digest("hex")}.pdf`;
+    const exactUri = `autofile:///blobs/${createHash("sha256").update(exact).digest("hex")}.pdf`;
     assertToolJson(await client.callTool({ name: "upload_blob", arguments: {
       base64: exact.toString("base64"), mediaType: "application/pdf",
     } }), { uri: exactUri });
@@ -607,7 +607,7 @@ test("the built command refuses an upload over 7 MiB with its size and limit", {
     assert.match(body.errors[0]?.message ?? "", /7340032/u);
     assert.deepEqual(
       (await client.listResources()).resources.map(({ uri }) => uri),
-      ["autofile:///_types/assets"],
+      ["autofile:///types/assets"],
     );
   } finally {
     await client.close();
@@ -648,17 +648,17 @@ test("the built command publishes watched resource and list changes over stdio",
   const other = await connectCommand(root, autofileHome, "autofile-stdio-other-writer");
   const notices = collectResourceNotices(client);
   const blobName = `${"c".repeat(64)}.txt`;
-  const blobUri = `autofile:///_blobs/${blobName}`;
+  const blobUri = `autofile:///blobs/${blobName}`;
   const resourceSubscriptions = [
-    "autofile:///tasks/watched",
-    "autofile:///tasks/outside",
-    "autofile:///tasks/.ignored",
-    "autofile:///tasks/sentinel",
-    "autofile:///_types/tasks",
-    "autofile:///_types/watched-type",
-    "autofile:///_types/reborn",
+    "autofile:///records/tasks/watched",
+    "autofile:///records/tasks/outside",
+    "autofile:///records/tasks/.ignored",
+    "autofile:///records/tasks/sentinel",
+    "autofile:///types/tasks",
+    "autofile:///types/watched-type",
+    "autofile:///types/reborn",
     blobUri,
-    "autofile:///reborn/new",
+    "autofile:///records/reborn/new",
   ];
   const subscription = await client.listen({
     resourceSubscriptions,
@@ -673,34 +673,34 @@ test("the built command publishes watched resource and list changes over stdio",
     let checkpoint = resourceNoticeCheckpoint(notices);
     assertToolJson(await client.callTool({
       name: "update_record",
-      arguments: { uri: "autofile:///tasks/watched", patch: { status: "complete" } },
-    }), { uri: "autofile:///tasks/watched" });
+      arguments: { uri: "autofile:///records/tasks/watched", patch: { status: "complete" } },
+    }), { uri: "autofile:///records/tasks/watched" });
     await expectResourceNotices(notices, checkpoint, [
-      "autofile:///tasks/watched",
+      "autofile:///records/tasks/watched",
     ], false, "same-process change notices did not arrive");
 
     checkpoint = resourceNoticeCheckpoint(notices);
     assertToolJson(await other.callTool({
       name: "update_record",
-      arguments: { uri: "autofile:///tasks/watched", patch: { title: "Changed elsewhere" } },
-    }), { uri: "autofile:///tasks/watched" });
+      arguments: { uri: "autofile:///records/tasks/watched", patch: { title: "Changed elsewhere" } },
+    }), { uri: "autofile:///records/tasks/watched" });
     await expectResourceNotices(notices, checkpoint, [
-      "autofile:///tasks/watched",
+      "autofile:///records/tasks/watched",
     ], true, "cross-process change notices did not arrive");
 
     const timestamp = new Date().toISOString();
     checkpoint = resourceNoticeCheckpoint(notices);
-    await writeFile(join(dataFolder, "tasks", "outside.json"), `${JSON.stringify({
+    await writeFile(join(dataFolder, "records", "tasks", "outside.json"), `${JSON.stringify({
       createdAt: timestamp,
       updatedAt: timestamp,
       value: { title: "Outside", status: "active" },
     }, null, 2)}\n`);
     await expectResourceNotices(notices, checkpoint, [
-      "autofile:///tasks/outside",
+      "autofile:///records/tasks/outside",
     ], true, "outside record notices did not reach its exact subscriptions");
 
     checkpoint = resourceNoticeCheckpoint(notices);
-    await writeFile(join(dataFolder, "tasks", ".ignored.json"), "{}\n");
+    await writeFile(join(dataFolder, "records", "tasks", ".ignored.json"), "{}\n");
     assertToolJson(await client.callTool({
       name: "create_record",
       arguments: {
@@ -708,12 +708,12 @@ test("the built command publishes watched resource and list changes over stdio",
         key: "sentinel",
         record: { title: "Sentinel", status: "active" },
       },
-    }), { uri: "autofile:///tasks/sentinel" });
+    }), { uri: "autofile:///records/tasks/sentinel" });
     await expectResourceNotices(notices, checkpoint, [
-      "autofile:///tasks/sentinel",
+      "autofile:///records/tasks/sentinel",
     ], true, "the sentinel change after an ignored file was not reported");
     assert.equal(
-      notices.updated.slice(checkpoint.updated).includes("autofile:///tasks/.ignored"),
+      notices.updated.slice(checkpoint.updated).includes("autofile:///records/tasks/.ignored"),
       false,
       "an ignored file produced a resource notice",
     );
@@ -721,10 +721,10 @@ test("the built command publishes watched resource and list changes over stdio",
     checkpoint = resourceNoticeCheckpoint(notices);
     assertToolJson(await other.callTool({
       name: "delete_record",
-      arguments: { uri: "autofile:///tasks/outside" },
-    }), { uri: "autofile:///tasks/outside" });
+      arguments: { uri: "autofile:///records/tasks/outside" },
+    }), { uri: "autofile:///records/tasks/outside" });
     await expectResourceNotices(notices, checkpoint, [
-      "autofile:///tasks/outside",
+      "autofile:///records/tasks/outside",
     ], true, "record deletion notices did not reach its exact subscriptions");
 
     checkpoint = resourceNoticeCheckpoint(notices);
@@ -735,40 +735,40 @@ test("the built command publishes watched resource and list changes over stdio",
         description: "Watched declarations.",
         schema: { type: "object" },
       },
-    }), { uri: "autofile:///_types/watched-type" });
+    }), { uri: "autofile:///types/watched-type" });
     await expectResourceNotices(notices, checkpoint, [
-      "autofile:///_types/watched-type",
+      "autofile:///types/watched-type",
     ], true, "declaration creation notices did not reach its exact subscriptions");
 
     checkpoint = resourceNoticeCheckpoint(notices);
     assertToolJson(await other.callTool({
       name: "update_type",
       arguments: { type: "watched-type", title: "Watched type" },
-    }), { uri: "autofile:///_types/watched-type", errors: [] });
+    }), { uri: "autofile:///types/watched-type", errors: [] });
     await expectResourceNotices(notices, checkpoint, [
-      "autofile:///_types/watched-type",
+      "autofile:///types/watched-type",
     ], true, "declaration title change notices did not reach its exact subscriptions");
 
     checkpoint = resourceNoticeCheckpoint(notices);
     assertToolJson(await other.callTool({
       name: "update_type",
       arguments: { type: "watched-type", description: "Changed declarations." },
-    }), { uri: "autofile:///_types/watched-type", errors: [] });
+    }), { uri: "autofile:///types/watched-type", errors: [] });
     await expectResourceNotices(notices, checkpoint, [
-      "autofile:///_types/watched-type",
+      "autofile:///types/watched-type",
     ], true, "declaration description change notices did not reach its exact subscriptions");
 
     checkpoint = resourceNoticeCheckpoint(notices);
     assertToolJson(await other.callTool({
       name: "update_type",
       arguments: { type: "watched-type", title: null },
-    }), { uri: "autofile:///_types/watched-type", errors: [] });
+    }), { uri: "autofile:///types/watched-type", errors: [] });
     await expectResourceNotices(notices, checkpoint, [
-      "autofile:///_types/watched-type",
+      "autofile:///types/watched-type",
     ], true, "declaration title removal notices did not reach its exact subscriptions");
     const untitledResources = await other.listResources();
-    assert.deepEqual(untitledResources.resources.find(({ uri }) => uri === "autofile:///_types/watched-type"), {
-      uri: "autofile:///_types/watched-type",
+    assert.deepEqual(untitledResources.resources.find(({ uri }) => uri === "autofile:///types/watched-type"), {
+      uri: "autofile:///types/watched-type",
       name: "Type: watched-type",
       mimeType: "application/json",
       description: "Changed declarations.",
@@ -778,29 +778,29 @@ test("the built command publishes watched resource and list changes over stdio",
     assertToolJson(await other.callTool({
       name: "delete_type",
       arguments: { type: "watched-type" },
-    }), { uri: "autofile:///_types/watched-type" });
+    }), { uri: "autofile:///types/watched-type" });
     await expectResourceNotices(notices, checkpoint, [
-      "autofile:///_types/watched-type",
+      "autofile:///types/watched-type",
     ], true, "declaration deletion notices did not reach its exact subscriptions");
 
     checkpoint = resourceNoticeCheckpoint(notices);
-    await mkdir(join(dataFolder, "_blobs"), { recursive: true });
-    await writeFile(join(dataFolder, "_blobs", blobName), "unreferenced attachment");
-    await writeFile(join(dataFolder, "_blobs", blobName), "changed unreferenced attachment");
-    await unlink(join(dataFolder, "_blobs", blobName));
+    await mkdir(join(dataFolder, "blobs"), { recursive: true });
+    await writeFile(join(dataFolder, "blobs", blobName), "unreferenced attachment");
+    await writeFile(join(dataFolder, "blobs", blobName), "changed unreferenced attachment");
+    await unlink(join(dataFolder, "blobs", blobName));
     await other.callTool({
       name: "update_record",
-      arguments: { uri: "autofile:///tasks/watched", patch: { status: "active" } },
+      arguments: { uri: "autofile:///records/tasks/watched", patch: { status: "active" } },
     });
-    await expectResourceNotices(notices, checkpoint, ["autofile:///tasks/watched"], false,
+    await expectResourceNotices(notices, checkpoint, ["autofile:///records/tasks/watched"], false,
       "a record change after attachment changes was not reported");
     assert.equal(notices.updated.slice(checkpoint.updated).includes(blobUri), false);
 
     checkpoint = resourceNoticeCheckpoint(notices);
     await rm(dataFolder, { recursive: true });
     await expectResourceNotices(notices, checkpoint, [
-      "autofile:///_types/tasks",
-      "autofile:///tasks/watched",
+      "autofile:///types/tasks",
+      "autofile:///records/tasks/watched",
     ], true, "data-folder deletion notices did not arrive");
 
     checkpoint = resourceNoticeCheckpoint(notices);
@@ -820,7 +820,7 @@ test("the built command publishes watched resource and list changes over stdio",
           additionalProperties: false,
         },
       },
-    }), { uri: "autofile:///_types/reborn" });
+    }), { uri: "autofile:///types/reborn" });
     assertToolJson(await other.callTool({
       name: "create_record",
       arguments: {
@@ -828,10 +828,10 @@ test("the built command publishes watched resource and list changes over stdio",
         key: "new",
         record: { title: "New", status: "active" },
       },
-    }), { uri: "autofile:///reborn/new" });
+    }), { uri: "autofile:///records/reborn/new" });
     await expectResourceNotices(notices, checkpoint, [
-      "autofile:///_types/reborn",
-      "autofile:///reborn/new",
+      "autofile:///types/reborn",
+      "autofile:///records/reborn/new",
     ], true, "stdio notices stopped after data-folder recreation");
   } finally {
     await subscription.close();
@@ -845,8 +845,8 @@ test("declaration listing changes notify an exact record subscription over stdio
   const root = await temp();
   const autofileHome = join(root, "autofile-home");
   const dataFolder = join(autofileHome, "data");
-  const declarationPath = join(dataFolder, "_types", "tasks.json");
-  const recordUri = "autofile:///tasks/lifecycle";
+  const declarationPath = join(dataFolder, "types", "tasks.json");
+  const recordUri = "autofile:///records/tasks/lifecycle";
   const declaration = `${JSON.stringify({
     description: "Things to do.",
     titleField: "title",
@@ -860,8 +860,8 @@ test("declaration listing changes notify an exact record subscription over stdio
       additionalProperties: false,
     },
   }, null, 2)}\n`;
-  await mkdir(join(dataFolder, "tasks"), { recursive: true });
-  await writeFile(join(dataFolder, "tasks", "lifecycle.json"), `${JSON.stringify({
+  await mkdir(join(dataFolder, "records", "tasks"), { recursive: true });
+  await writeFile(join(dataFolder, "records", "tasks", "lifecycle.json"), `${JSON.stringify({
     createdAt: "2026-10-08T12:00:00.000Z",
     updatedAt: "2026-10-08T12:00:00.000Z",
     value: { title: "Lifecycle", status: "active" },
@@ -871,19 +871,19 @@ test("declaration listing changes notify an exact record subscription over stdio
   const notices = collectResourceNotices(client);
   const resourceSubscriptions = [
     recordUri,
-    "autofile:///_types/tasks",
+    "autofile:///types/tasks",
   ];
   const subscription = await client.listen({
     resourceSubscriptions,
     resourcesListChanged: true,
   });
   const expectedUris = [
-    "autofile:///_types/tasks",
+    "autofile:///types/tasks",
     recordUri,
   ];
   try {
     let checkpoint = resourceNoticeCheckpoint(notices);
-    await mkdir(join(dataFolder, "_types"));
+    await mkdir(join(dataFolder, "types"));
     await writeFile(declarationPath, declaration);
     await expectResourceNotices(
       notices,
@@ -944,7 +944,7 @@ test("a watcher read error is reported without closing its stdio connection", {
   const root = await temp();
   const autofileHome = join(root, "autofile-home");
   const dataFolder = join(autofileHome, "data");
-  const recordPath = join(dataFolder, "tasks", "flaky.json");
+  const recordPath = join(dataFolder, "records", "tasks", "flaky.json");
   const store = await openStore({
     dataFolder,
     writeLockPath: join(autofileHome, "write.lock"),
@@ -984,7 +984,7 @@ test("a watcher read error is reported without closing its stdio connection", {
   try {
     assertToolJson(await client.callTool({ name: "list_types", arguments: {} }), {
       types: [{
-        uri: "autofile:///_types/tasks",
+        uri: "autofile:///types/tasks",
         type: "tasks",
         description: "Things to do.",
       }],
@@ -1004,7 +1004,7 @@ test("a watcher read error is reported without closing its stdio connection", {
     try {
       assertToolJson(await client.callTool({ name: "list_types", arguments: {} }), {
         types: [{
-          uri: "autofile:///_types/tasks",
+          uri: "autofile:///types/tasks",
           type: "tasks",
           description: "Things to do.",
         }],
@@ -1030,18 +1030,18 @@ test("delete_type over stdio refuses unreadable records and unrelated data but d
       ["unrelated", { name: "ignored.txt", contents: "keep this data" }],
       ["empty", undefined],
     ] as const) {
-      const uri = `autofile:///_types/${type}`;
+      const uri = `autofile:///types/${type}`;
       assertToolJson(await client.callTool({
         name: "create_type",
         arguments: { type, description: "Deletion fixture.", schema: { type: "object" } },
       }), { uri });
-      const folder = join(autofileHome, "data", type);
+      const folder = join(autofileHome, "data", "records", type);
       if (entry !== undefined) await writeFile(join(folder, entry.name), entry.contents);
       const result = await client.callTool({ name: "delete_type", arguments: { type } });
       if (entry === undefined) {
         assertToolJson(result, { uri });
         await assert.rejects(stat(folder), { code: "ENOENT" });
-        await assert.rejects(stat(join(autofileHome, "data", "_types", `${type}.json`)), { code: "ENOENT" });
+        await assert.rejects(stat(join(autofileHome, "data", "types", `${type}.json`)), { code: "ENOENT" });
       } else {
         assertToolJson(result, { errors: [{ uri, message: "type still has stored data" }] }, { isError: true });
         assert.equal(await readFile(join(folder, entry.name), "utf8"), entry.contents);
@@ -1062,7 +1062,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
   const autofileHome = join(root, "autofile-home");
   const sourceBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 250, 251]);
   const blobHash = createHash("sha256").update(sourceBytes).digest("hex");
-  const blobUri = `autofile:///_blobs/${blobHash}.png`;
+  const blobUri = `autofile:///blobs/${blobHash}.png`;
   const sourcePath = join(root, "logo.png");
   await writeFile(sourcePath, sourceBytes);
 
@@ -1083,7 +1083,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       employer: {
         type: "string",
         format: "uri",
-        pattern: "^autofile:///organizations/",
+        pattern: "^autofile:///records/organizations/",
       },
       related: { type: "array", items: { type: "string", format: "uri" } },
       details: {
@@ -1225,12 +1225,12 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       assertToolJson(await bootstrap.callTool({
         name: "create_type",
         arguments: input,
-      }), { uri: `autofile:///_types/${input.type}` });
+      }), { uri: `autofile:///types/${input.type}` });
     }
     assertToolJson(await bootstrap.callTool({
       name: "delete_type",
       arguments: { type: "temporary" },
-    }), { uri: "autofile:///_types/temporary" });
+    }), { uri: "autofile:///types/temporary" });
 
     const invalidType = await bootstrap.callTool({
       name: "create_type",
@@ -1269,19 +1269,19 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     assertToolJson(await bootstrap.callTool({ name: "list_types", arguments: {} }), {
       types: [
         {
-          uri: "autofile:///_types/contacts",
+          uri: "autofile:///types/contacts",
           type: "contacts",
           description: "People and their organizations.",
           title: "Contact",
         },
         {
-          uri: "autofile:///_types/entries",
+          uri: "autofile:///types/entries",
           type: "entries",
           description: "Searchable entries.",
           title: "Entry",
         },
         {
-          uri: "autofile:///_types/organizations",
+          uri: "autofile:///types/organizations",
           type: "organizations",
           description: "Organizations with their logos.",
         },
@@ -1291,7 +1291,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       name: "get_type",
       arguments: { type: "contacts" },
     }), {
-      uri: "autofile:///_types/contacts",
+      uri: "autofile:///types/contacts",
       description: "People and their organizations.",
       title: "Contact",
       titleField: "name",
@@ -1302,7 +1302,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       arguments: { type: "missing" },
     });
     assertToolJson(missingType, {
-      errors: [{ uri: "autofile:///_types/missing", message: "type does not exist" }],
+      errors: [{ uri: "autofile:///types/missing", message: "type does not exist" }],
     }, { isError: true });
 
     await bootstrap.close();
@@ -1315,7 +1315,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     );
 
     assertToolJson(await client.callTool({ name: "upload_blob", arguments: { path: sourcePath } }), { uri: blobUri });
-    const organizationUri = "autofile:///organizations/acme";
+    const organizationUri = "autofile:///records/organizations/acme";
     assertToolJson(await client.callTool({
       name: "create_record",
       arguments: {
@@ -1335,7 +1335,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     assertToolJson(duplicateRecord, {
       errors: [{ uri: organizationUri, message: "a record with that key already exists" }],
     }, { isError: true });
-    const missingBlobUri = `autofile:///_blobs/${"a".repeat(64)}.png`;
+    const missingBlobUri = `autofile:///blobs/${"a".repeat(64)}.png`;
     const missingBlob = await client.callTool({
       name: "create_record",
       arguments: {
@@ -1349,7 +1349,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     assert.match(String(asObject(missingBlobBody.errors[0]).message), /blob that does not exist/u);
     assertToolJson(missingBlob, missingBlobBody, { isError: true });
 
-    const missingOrganizationUri = "autofile:///organizations/missing";
+    const missingOrganizationUri = "autofile:///records/organizations/missing";
     const missingLink = await client.callTool({
       name: "create_record",
       arguments: {
@@ -1360,7 +1360,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     });
     assertToolJson(missingLink, {
       errors: [{
-        uri: "autofile:///contacts/dangling",
+        uri: "autofile:///records/contacts/dangling",
         message: `employer: links to a record that does not exist: ${missingOrganizationUri}`,
       }],
     }, { isError: true });
@@ -1381,7 +1381,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     });
     const contactBody = asObject(createdContact.structuredContent);
     const contactUri = String(contactBody.uri);
-    assert.match(contactUri, /^autofile:\/\/\/contacts\/[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}$/u);
+    assert.match(contactUri, /^autofile:\/\/\/records\/contacts\/[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}$/u);
     assertToolJson(createdContact, contactBody);
     const invalidKey = await client.callTool({
       name: "create_record",
@@ -1404,15 +1404,15 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     }, { isError: true });
     const missingRecord = await client.callTool({
       name: "get_record",
-      arguments: { uri: "autofile:///contacts/missing" },
+      arguments: { uri: "autofile:///records/contacts/missing" },
     });
     assertToolJson(missingRecord, {
-      errors: [{ uri: "autofile:///contacts/missing", message: "record does not exist" }],
+      errors: [{ uri: "autofile:///records/contacts/missing", message: "record does not exist" }],
     }, { isError: true });
 
     for (let index = 0; index <= 100; index += 1) {
       const suffix = String(index).padStart(3, "0");
-      const uri = `autofile:///entries/item-${suffix}`;
+      const uri = `autofile:///records/entries/item-${suffix}`;
       assertToolJson(await client.callTool({
         name: "create_record",
         arguments: {
@@ -1429,7 +1429,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       }), { uri });
     }
 
-    const mergeUri = "autofile:///entries/item-000";
+    const mergeUri = "autofile:///records/entries/item-000";
     const beforeMergeResult = await client.callTool({
       name: "get_record",
       arguments: { uri: mergeUri },
@@ -1492,8 +1492,8 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     } while (recordCursor !== undefined);
     assert.equal(searchPages, 2);
     assert.equal(foundUris.length, 100);
-    assert.equal(foundUris[0], "autofile:///entries/item-001");
-    assert.equal(foundUris.at(-1), "autofile:///entries/item-100");
+    assert.equal(foundUris[0], "autofile:///records/entries/item-001");
+    assert.equal(foundUris.at(-1), "autofile:///records/entries/item-100");
 
     const unsupportedWhere = await client.callTool({
       name: "find_records",
@@ -1515,7 +1515,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
             body: `cap marker ${"🙂".repeat(9_000)}`,
           },
         },
-      }), { uri: `autofile:///entries/${key}` });
+      }), { uri: `autofile:///records/entries/${key}` });
     }
     const largeUris: string[] = [];
     recordCursor = undefined;
@@ -1541,9 +1541,9 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       assertToolJson(result, page);
     } while (recordCursor !== undefined);
     assert.deepEqual(largeUris, [
-      "autofile:///entries/large-a",
-      "autofile:///entries/large-b",
-      "autofile:///entries/large-c",
+      "autofile:///records/entries/large-a",
+      "autofile:///records/entries/large-b",
+      "autofile:///records/entries/large-c",
     ]);
 
     assertToolJson(await client.callTool({
@@ -1558,7 +1558,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
           additionalProperties: false,
         },
       },
-    }), { uri: "autofile:///_types/required-links" });
+    }), { uri: "autofile:///types/required-links" });
     assertToolJson(await client.callTool({
       name: "create_record",
       arguments: {
@@ -1566,14 +1566,14 @@ test("an agent can complete the full record, link, search, blob, type, and resou
         key: "blocker",
         record: { target: organizationUri },
       },
-    }), { uri: "autofile:///required-links/blocker" });
+    }), { uri: "autofile:///records/required-links/blocker" });
     const blockedDelete = await client.callTool({
       name: "delete_record",
       arguments: { uri: organizationUri },
     });
     assertToolJson(blockedDelete, {
       errors: [{
-        uri: "autofile:///required-links/blocker",
+        uri: "autofile:///records/required-links/blocker",
         message: "missing required property: target",
       }],
     }, { isError: true });
@@ -1584,7 +1584,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     });
     assertToolJson(nonemptyTypeDelete, {
       errors: [{
-        uri: "autofile:///_types/entries",
+        uri: "autofile:///types/entries",
         message: "type still has stored data",
       }],
     }, { isError: true });
@@ -1620,9 +1620,9 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     assert.deepEqual(listedUris, [...listedUris].sort());
 
     assert.deepEqual(
-      listedResources.find(({ uri }) => uri === "autofile:///_types/contacts"),
+      listedResources.find(({ uri }) => uri === "autofile:///types/contacts"),
       {
-        uri: "autofile:///_types/contacts",
+        uri: "autofile:///types/contacts",
         name: "Type: contacts",
         title: "Contact",
         mimeType: "application/json",
@@ -1637,13 +1637,13 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     });
     assert.equal(listedResources.find(({ uri }) => uri === blobUri), undefined);
 
-    const declaration = await client.readResource({ uri: "autofile:///_types/contacts" });
+    const declaration = await client.readResource({ uri: "autofile:///types/contacts" });
     assert.equal(declaration.ttlMs, 0);
     assert.equal(declaration.cacheScope, "private");
     const declarationContent = declaration.contents[0];
     assert.ok(declarationContent !== undefined && "text" in declarationContent);
     assert.deepEqual(JSON.parse(declarationContent.text) as unknown, {
-      uri: "autofile:///_types/contacts",
+      uri: "autofile:///types/contacts",
       type: "contacts",
       description: "People and their organizations.",
       title: "Contact",
@@ -1682,7 +1682,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       cacheScope: "private",
     });
     await assert.rejects(
-      client.readResource({ uri: "autofile:///contacts/missing" }),
+      client.readResource({ uri: "autofile:///records/contacts/missing" }),
       (error: unknown) => error instanceof ProtocolError && error.code === -32602,
     );
     await assert.rejects(
@@ -1724,18 +1724,18 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       },
     });
     const changedTypeBody = asObject(changedType.structuredContent);
-    assert.equal(changedTypeBody.uri, "autofile:///_types/entries");
+    assert.equal(changedTypeBody.uri, "autofile:///types/entries");
     assert.ok(Array.isArray(changedTypeBody.errors));
     assert.equal(changedTypeBody.errors.length, 103);
     assert.ok(changedTypeBody.errors.some((error) => (
-      asObject(error).uri === "autofile:///entries/item-001"
+      asObject(error).uri === "autofile:///records/entries/item-001"
     )));
     assertToolJson(changedType, changedTypeBody);
     assertToolJson(await client.callTool({
       name: "get_type",
       arguments: { type: "entries" },
     }), {
-      uri: "autofile:///_types/entries",
+      uri: "autofile:///types/entries",
       description: "Searchable entries.",
       title: "Journal entry",
       titleField: "title",
@@ -1755,13 +1755,13 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     assert.deepEqual(invalidSearchBody.records, []);
     assert.ok(Array.isArray(invalidSearchBody.errors));
     assert.equal(invalidSearchBody.errors.length, 1);
-    assert.equal(asObject(invalidSearchBody.errors[0]).uri, "autofile:///entries/item-001");
+    assert.equal(asObject(invalidSearchBody.errors[0]).uri, "autofile:///records/entries/item-001");
     assert.match(String(asObject(invalidSearchBody.errors[0]).message), /status/u);
     assertToolJson(invalidSearch, invalidSearchBody);
 
     const invalidRecord = await client.callTool({
       name: "get_record",
-      arguments: { uri: "autofile:///entries/item-001" },
+      arguments: { uri: "autofile:///records/entries/item-001" },
     });
     const invalidRecordBody = asObject(invalidRecord.structuredContent);
     assert.match(String(invalidRecordBody.error), /status/u);
@@ -1769,8 +1769,8 @@ test("an agent can complete the full record, link, search, blob, type, and resou
 
     assertToolJson(await client.callTool({
       name: "delete_record",
-      arguments: { uri: "autofile:///required-links/blocker" },
-    }), { uri: "autofile:///required-links/blocker" });
+      arguments: { uri: "autofile:///records/required-links/blocker" },
+    }), { uri: "autofile:///records/required-links/blocker" });
     assertToolJson(await client.callTool({
       name: "delete_record",
       arguments: { uri: organizationUri },
@@ -1805,8 +1805,8 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       errors: [{ uri: organizationUri, message: "record does not exist" }],
     }, { isError: true });
 
-    const brokenUri = "autofile:///entries/broken";
-    await writeFile(join(autofileHome, "data", "entries", "broken.json"), "{\n");
+    const brokenUri = "autofile:///records/entries/broken";
+    await writeFile(join(autofileHome, "data", "records", "entries", "broken.json"), "{\n");
     const unreadableSearch = await client.callTool({
       name: "find_records",
       arguments: { type: "entries", q: "does-not-match" },
@@ -1884,10 +1884,10 @@ test("stdio path uploads follow nested, array, referenced and conditional blob f
           then: { properties: { source: { $ref: "#/$defs/attachment" } } },
         }],
       },
-    } }), { uri: "autofile:///_types/uploads" });
+    } }), { uri: "autofile:///types/uploads" });
     const firstUri = String(asObject((await client.callTool({ name: "upload_blob", arguments: { path: firstPath } })).structuredContent).uri);
     const secondUri = String(asObject((await client.callTool({ name: "upload_blob", arguments: { path: secondPath } })).structuredContent).uri);
-    const uri = "autofile:///uploads/one";
+    const uri = "autofile:///records/uploads/one";
     assertToolJson(await client.callTool({ name: "create_record", arguments: {
       type: "uploads", key: "one", record: {
         mode: "plain", source: secondPath, note: firstPath,
@@ -1897,7 +1897,7 @@ test("stdio path uploads follow nested, array, referenced and conditional blob f
     let record = asObject((await client.callTool({ name: "get_record", arguments: { uri } })).structuredContent);
     let value = asObject(record.value);
     assert.equal(asObject(value.nested).scan, firstUri);
-    assert.match(firstUri, /^autofile:\/\/\/_blobs\//u);
+    assert.match(firstUri, /^autofile:\/\/\/blobs\//u);
     assert.deepEqual(value.attachments, [firstUri]);
     assert.equal(value.source, secondPath);
     assert.equal(value.note, firstPath);
@@ -1912,7 +1912,7 @@ test("stdio path uploads follow nested, array, referenced and conditional blob f
     record = asObject((await client.callTool({ name: "get_record", arguments: { uri } })).structuredContent);
     value = asObject(record.value);
     assert.equal(value.source, secondUri);
-    assert.match(secondUri, /^autofile:\/\/\/_blobs\//u);
+    assert.match(secondUri, /^autofile:\/\/\/blobs\//u);
     assert.notEqual(secondUri, firstUri);
     assert.deepEqual(value.nested, { label: "Keep me", scan: secondUri });
     assert.deepEqual(value.attachments, [secondUri]);
@@ -1925,13 +1925,11 @@ test("stdio path uploads follow nested, array, referenced and conditional blob f
   }
 });
 
-test("stdio rejects oversized and nonregular upload sources without creating a record", {
+test("stdio rejects nonregular and missing upload sources without creating a record", {
   timeout: 30_000,
 }, async () => {
   const root = await temp();
   const home = join(root, "autofile-home");
-  const oversized = join(root, "oversized.bin");
-  await writeFile(oversized, Buffer.alloc(7_340_033));
   const fifo = join(root, "fifo");
   if (process.platform !== "win32") {
     const child = spawn("mkfifo", [fifo]);
@@ -1947,15 +1945,14 @@ test("stdio rejects oversized and nonregular upload sources without creating a r
         type: "object", properties: { attachment: { type: "string", format: "blob" } },
       },
     } });
-    for (const [key, path] of [["large", oversized], ["directory", root], ["missing", join(root, "missing.txt")], ...(process.platform === "win32" ? [] : [["fifo", fifo], ["device", "/dev/zero"]])]) {
+    for (const path of [root, join(root, "missing.txt"), ...(process.platform === "win32" ? [] : [fifo, "/dev/zero"])]) {
       const result = await client.callTool({ name: "upload_blob", arguments: { path } });
       assert.equal(result.isError, true);
       const errors = asObject(result.structuredContent).errors;
       assert.ok(Array.isArray(errors));
       assert.match(String(asObject(errors[0]).message), /blob|source/u);
-      if (key === "large") assert.match(String(asObject(errors[0]).message), /7340033.*7340032/u);
     }
-    assert.deepEqual((await client.listResources()).resources.map(({ uri }) => uri), ["autofile:///_types/uploads"]);
+    assert.deepEqual((await client.listResources()).resources.map(({ uri }) => uri), ["autofile:///types/uploads"]);
   } finally {
     await client.close();
   }
@@ -1977,14 +1974,14 @@ test("stdio PDF uploads preserve schemas that constrain the final attachment add
         type: "object", required: ["attachment"],
         properties: { attachment: { type: "string", format: "blob", pattern: "\\.pdf$" } },
       },
-    } }), { uri: "autofile:///_types/receipts" });
+    } }), { uri: "autofile:///types/receipts" });
     const firstUri = String(asObject((await client.callTool({ name: "upload_blob", arguments: { path: firstPath } })).structuredContent).uri);
-    const uri = "autofile:///receipts/one";
+    const uri = "autofile:///records/receipts/one";
     assertToolJson(await client.callTool({ name: "create_record", arguments: {
       type: "receipts", key: "one", record: { attachment: firstUri },
     } }), { uri });
     const first = asObject((await client.callTool({ name: "get_record", arguments: { uri } })).structuredContent);
-    assert.match(String(asObject(first.value).attachment), /^autofile:\/\/\/_blobs\/[a-f0-9]{64}\.pdf$/u);
+    assert.match(String(asObject(first.value).attachment), /^autofile:\/\/\/blobs\/[a-f0-9]{64}\.pdf$/u);
     const secondUri = String(asObject((await client.callTool({ name: "upload_blob", arguments: { path: secondPath } })).structuredContent).uri);
     assertToolJson(await client.callTool({ name: "update_record", arguments: {
       uri, patch: { attachment: secondUri },
@@ -1999,7 +1996,7 @@ test("stdio PDF uploads preserve schemas that constrain the final attachment add
       uri, patch: { attachment: "data:text/plain;base64,d3Jvbmc=" },
     } });
     assert.equal(invalid.isError, true);
-    assert.deepEqual((await readdir(join(home, "data", "_blobs"))).filter((name) => !name.startsWith(".")), [attachmentUri.split("/").at(-1)]);
+    assert.deepEqual((await readdir(join(home, "data", "blobs"))).filter((name) => !name.startsWith(".")), [attachmentUri.split("/").at(-1)]);
   } finally {
     await client.close();
   }
@@ -2026,15 +2023,15 @@ test("stdio upload_blob validates sources, canonical base64, media types and rec
       assert.ok(Array.isArray(body.errors), JSON.stringify(arguments_));
       assertToolJson(result, body, { isError: true });
     }
-    const txtUri = `autofile:///_blobs/${hash}.txt`;
-    const pdfUri = `autofile:///_blobs/${hash}.pdf`;
+    const txtUri = `autofile:///blobs/${hash}.txt`;
+    const pdfUri = `autofile:///blobs/${hash}.pdf`;
     assertToolJson(await client.callTool({ name: "upload_blob", arguments: { base64: "aGVsbG8=", mediaType: "text/plain" } }), { uri: txtUri });
     assertToolJson(await client.callTool({ name: "upload_blob", arguments: { path, mediaType: "application/pdf" } }), { uri: pdfUri });
     const fallback = await client.callTool({ name: "upload_blob", arguments: { path } });
     assert.notEqual(fallback.isError, true);
     assert.equal((await client.readResource({ uri: String(asObject(fallback.structuredContent).uri) })).contents[0]?.mimeType, "application/octet-stream");
     assertToolJson(await client.callTool({ name: "upload_blob", arguments: { base64: "", mediaType: "text/plain" } }), {
-      uri: `autofile:///_blobs/${createHash("sha256").update("").digest("hex")}.txt`,
+      uri: `autofile:///blobs/${createHash("sha256").update("").digest("hex")}.txt`,
     });
     await client.callTool({ name: "create_type", arguments: {
       type: "files", description: "Files.", schema: { type: "object", properties: { file: { type: "string", format: "blob" } } },
@@ -2043,11 +2040,151 @@ test("stdio upload_blob validates sources, canonical base64, media types and rec
       assert.equal((await client.callTool({ name: "create_record", arguments: { type: "files", record: { file } } })).isError, true);
     }
     for (const key of ["first", "second"]) {
-      assertToolJson(await client.callTool({ name: "create_record", arguments: { type: "files", key, record: { file: txtUri } } }), { uri: `autofile:///files/${key}` });
+      assertToolJson(await client.callTool({ name: "create_record", arguments: { type: "files", key, record: { file: txtUri } } }), { uri: `autofile:///records/files/${key}` });
     }
     for (const file of [path, "data:text/plain;base64,aGVsbG8="]) {
-      assert.equal((await client.callTool({ name: "update_record", arguments: { uri: "autofile:///files/first", patch: { file } } })).isError, true);
+      assert.equal((await client.callTool({ name: "update_record", arguments: { uri: "autofile:///records/files/first", patch: { file } } })).isError, true);
     }
+  } finally {
+    await client.close();
+  }
+});
+
+test("stdio uploads files above the inline limit and creates and updates records holding them", {
+  timeout: 30_000,
+}, async () => {
+  const root = await temp();
+  const home = join(root, "autofile-home");
+  const source = join(root, "large.pdf");
+  const bytes = Buffer.alloc(7_340_033, 0xa5);
+  const name = `${createHash("sha256").update(bytes).digest("hex")}.pdf`;
+  const uri = `autofile:///blobs/${name}`;
+  const path = join(home, "data", "blobs", name);
+  await writeFile(source, bytes);
+  const client = await connectCommand(root, home, "large-path-upload");
+  try {
+    assertToolJson(await client.callTool({ name: "upload_blob", arguments: { path: source } }), { uri });
+    assert.equal((await stat(path)).mode & 0o777, 0o444);
+    assert.deepEqual(await readFile(path), bytes);
+    assertToolJson(await client.callTool({ name: "create_type", arguments: {
+      type: "assets", description: "Attachments.", schema: {
+        type: "object", properties: { attachment: { type: "string", format: "blob" }, title: { type: "string" } },
+      },
+    } }), { uri: "autofile:///types/assets" });
+    assertToolJson(await client.callTool({ name: "create_record", arguments: {
+      type: "assets", key: "created", record: { attachment: uri },
+    } }), { uri: "autofile:///records/assets/created" });
+    assertToolJson(await client.callTool({ name: "update_record", arguments: {
+      uri: "autofile:///records/assets/created", patch: { title: "Large attachment" },
+    } }), { uri: "autofile:///records/assets/created" });
+    await client.callTool({ name: "create_record", arguments: { type: "assets", key: "updated", record: {} } });
+    assertToolJson(await client.callTool({ name: "update_record", arguments: {
+      uri: "autofile:///records/assets/updated", patch: { attachment: uri },
+    } }), { uri: "autofile:///records/assets/updated" });
+    await assert.rejects(client.readResource({ uri }), (error: unknown) => {
+      assert.ok(error instanceof ProtocolError);
+      assert.equal(error.code, -32602);
+      assert.deepEqual(error.data, { uri, size: bytes.length, limit: 7_340_032, path });
+      assert.ok(error.message.endsWith(
+        `The blob is 7,340,033 bytes, more than the 7,340,032 bytes resources/read returns. Read it from the local file ${path}.`,
+      ));
+      return true;
+    });
+  } finally {
+    await client.close();
+  }
+});
+
+test("stdio describes an over-limit blob without opening its bytes", {
+  timeout: 30_000,
+  skip: process.platform !== "linux",
+}, async () => {
+  const root = await temp();
+  const home = join(root, "autofile-home");
+  const name = `${"e".repeat(64)}.bin`;
+  const uri = `autofile:///blobs/${name}`;
+  const path = join(home, "data", "blobs", name);
+  await mkdir(join(home, "data", "blobs"), { recursive: true });
+  await writeFile(path, Buffer.alloc(7_340_033), { mode: 0o000 });
+  const client = await connectCommand(root, home, "metadata-only-read", {
+    command: "/usr/bin/setpriv",
+    args: ["--securebits", "+noroot,+noroot_locked", "--bounding-set=-dac_override,-dac_read_search",
+      "--inh-caps=-all", "--ambient-caps=-all", process.execPath, cli],
+  });
+  try {
+    await assert.rejects(client.readResource({ uri }), (error: unknown) => {
+      assert.ok(error instanceof ProtocolError);
+      assert.equal(error.code, -32602);
+      assert.deepEqual(error.data, { uri, size: 7_340_033, limit: 7_340_032, path });
+      return true;
+    });
+  } finally {
+    await client.close();
+    await chmod(path, 0o444);
+  }
+});
+
+test("stdio uploads local files in chunks without calling readFile on the source", { timeout: 30_000 }, async () => {
+  const root = await temp();
+  const home = join(root, "home");
+  const source = join(root, "chunked.pdf");
+  const audit = join(root, "chunks.log");
+  const preload = join(root, "guard.mjs");
+  const failureMarker = join(root, "fail-source");
+  const closedAudit = join(root, "closed.log");
+  const bytes = Buffer.alloc(8 * 1024 * 1024, 0xa5);
+  const name = `${createHash("sha256").update(bytes).digest("hex")}.pdf`;
+  const uri = `autofile:///blobs/${name}`;
+  await writeFile(source, bytes);
+  await writeFile(preload, `
+    import fs from "node:fs/promises";
+    import { appendFileSync, existsSync } from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const originalOpen = fs.open;
+    fs.open = async (...args) => {
+      const file = await originalOpen(...args);
+      if (args[0] === process.env.UPLOAD_SOURCE) {
+        file.readFile = async () => { throw new Error("Whole-file source reads are forbidden"); };
+        const close = file.close.bind(file);
+        file.close = async () => {
+          await close();
+          appendFileSync(process.env.UPLOAD_CLOSED, "closed\\n");
+        };
+        const createReadStream = file.createReadStream.bind(file);
+        file.createReadStream = (...options) => {
+          const stream = createReadStream(...options);
+          stream.on("data", (chunk) => {
+            appendFileSync(process.env.UPLOAD_AUDIT, chunk.length + "\\n");
+            if (existsSync(process.env.UPLOAD_FAILURE)) stream.destroy(Object.assign(new Error("Source fixture read failure"), { code: "EIO" }));
+          });
+          return stream;
+        };
+      }
+      return file;
+    };
+    syncBuiltinESMExports();
+  `);
+  const client = await connectCommand(root, home, "chunked-path-upload", {
+    args: ["--import", preload, cli], environment: { UPLOAD_SOURCE: source, UPLOAD_AUDIT: audit, UPLOAD_FAILURE: failureMarker, UPLOAD_CLOSED: closedAudit },
+  });
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      assertToolJson(await client.callTool({ name: "upload_blob", arguments: { path: source } }), { uri });
+    }
+    const chunks = (await readFile(audit, "utf8")).trim().split("\n").map(Number);
+    assert.ok(chunks.length > 2);
+    assert.equal(chunks.reduce((sum, size) => sum + size, 0), bytes.length * 2);
+    assert.ok(chunks.every((size) => size > 0 && size <= 1024 * 1024));
+    const folder = join(home, "data", "blobs");
+    assert.deepEqual(await readdir(folder), [name]);
+    assert.deepEqual(await readFile(join(folder, name)), bytes);
+    assert.equal((await stat(join(folder, name))).mode & 0o777, 0o444);
+    await writeFile(failureMarker, "fail");
+    assertToolJson(await client.callTool({ name: "upload_blob", arguments: { path: source } }), {
+      errors: [{ message: "local upload source cannot be read" }],
+    }, { isError: true });
+    assert.deepEqual(await readdir(folder), [name]);
+    assert.ok((await readFile(closedAudit, "utf8")).trim().split("\n").length >= 3, "every source handle must close, including a failed upload");
   } finally {
     await client.close();
   }

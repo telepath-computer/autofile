@@ -37,7 +37,7 @@ async function put(store: Autofile, contents: string): Promise<string> {
 }
 
 function address(contents: string): string {
-  return `autofile:///_blobs/${createHash("sha256").update(contents).digest("hex")}.pdf`;
+  return `autofile:///blobs/${createHash("sha256").update(contents).digest("hex")}.pdf`;
 }
 
 after(async () => {
@@ -62,7 +62,7 @@ test("library creates and updates PDF attachments using existing address constra
   const read = await store.records.get(created.uri);
   assert.deepEqual(read?.value, updated.value);
   assert.equal(read?.problems, undefined);
-  const stored = JSON.parse(await readFile(join(folder, "receipts", "one.json"), "utf8")) as { value: unknown };
+  const stored = JSON.parse(await readFile(join(folder, "records", "receipts", "one.json"), "utf8")) as { value: unknown };
   assert.deepEqual(stored.value, updated.value);
   assert.equal(await store.blobs.get(address("first PDF")), undefined);
 });
@@ -111,7 +111,7 @@ test("a mismatched attachment address refuses creates and updates without changi
   await assert.rejects(store.records.create("receipts", { attachment: wrong }, { key: "refused" }), AutofileError);
   await assert.rejects(store.records.update(created.uri, { attachment: wrong }), AutofileError);
   assert.deepEqual((await store.records.get(created.uri))?.value, {});
-  assert.deepEqual(await readdir(join(folder, "_blobs")), [wrong.split("/").at(-1)]);
+  assert.deepEqual(await readdir(join(folder, "blobs")), [wrong.split("/").at(-1)]);
 });
 
 test("failing schema branches do not convert ordinary data URIs or grant attachment ownership", async () => {
@@ -135,11 +135,11 @@ test("failing schema branches do not convert ordinary data URIs or grant attachm
   });
   assert.equal(created.value.note, dataUri("ordinary note"));
   assert.equal(created.value.attachment, address("first PDF"));
-  const unrelated = `autofile:///_blobs/${"a".repeat(64)}.pdf`;
+  const unrelated = `autofile:///blobs/${"a".repeat(64)}.pdf`;
   const updated = await store.records.update(created.uri, { note: unrelated, attachment: await put(store, "second PDF") });
   assert.equal(updated.value.note, unrelated);
   assert.equal(updated.value.attachment, address("second PDF"));
-  assert.deepEqual(await readdir(join(folder, "_blobs")), [address("second PDF").split("/").at(-1)]);
+  assert.deepEqual(await readdir(join(folder, "blobs")), [address("second PDF").split("/").at(-1)]);
 });
 
 for (const keyword of ["anyOf", "oneOf"]) test(`a successful ${keyword} ordinary-string alternative controls attachment annotations`, async () => {
@@ -289,7 +289,7 @@ test("schema preparation accepts only blob addresses and reports annotations for
   assert.deepEqual(schema.formatFields(value, "blob"), [
     { pointer: "/attachment", location: "attachment", value: value.attachment },
   ]);
-  for (const attachment of [dataUri("PDF"), "/tmp/document.pdf", "input:one", "autofile:///_blobs/short.pdf"]) {
+  for (const attachment of [dataUri("PDF"), "/tmp/document.pdf", "input:one", "autofile:///blobs/short.pdf"]) {
     assert.ok((await schema.validate({ attachment })).length > 0);
   }
 });
@@ -320,7 +320,7 @@ test("uploads accept bytes independently, deduplicate contents, normalize media 
   assert.equal(uri, address("uploaded"));
   assert.deepEqual(Buffer.from((await store.blobs.get(uri))!.bytes), bytes);
   assert.equal((await store.blobs.get(uri))!.mimeType, "application/pdf");
-  const path = join(folder, "_blobs", uri.split("/").at(-1)!);
+  const path = join(folder, "blobs", uri.split("/").at(-1)!);
   const oldTime = new Date("2020-01-01T00:00:00Z");
   await utimes(path, oldTime, oldTime);
   assert.equal(await store.blobs.put(bytes, "application/pdf"), uri);
@@ -330,34 +330,27 @@ test("uploads accept bytes independently, deduplicate contents, normalize media 
   assert.equal((await store.blobs.get(unknown))!.mimeType, "application/octet-stream");
 });
 
-test("uploads accept exactly 7 MiB and reject invalid bytes, media types and larger inputs", async () => {
+test("uploads accept large attachments and reject invalid bytes and media types", async () => {
   const { store, folder } = await fixture();
   const bytes = Buffer.alloc(7_340_032);
   const uri = await store.blobs.put(bytes, "application/octet-stream");
   assert.equal((await store.blobs.get(uri))!.bytes.byteLength, bytes.length);
-  await assert.rejects(store.blobs.put(Buffer.alloc(bytes.length + 1), "application/octet-stream"), (error: unknown) => {
-    assert.ok(error instanceof AutofileError);
-    assert.match(error.message, /7340033.*7340032/u);
-    return true;
-  });
+  const larger = await store.blobs.put(Buffer.alloc(bytes.length + 1), "application/octet-stream");
+  assert.equal((await store.blobs.get(larger))!.bytes.byteLength, bytes.length + 1);
   for (const value of [undefined, null, "bytes", [1, 2], new ArrayBuffer(2), new Uint16Array(2)]) {
     await assert.rejects(store.blobs.put(value as unknown as Uint8Array, "application/pdf"), AutofileError);
   }
   for (const mediaType of [undefined, null, 42, "", "pdf", "application/", "application/pdf\n", "application/pdf; charset=utf-8"]) {
     await assert.rejects(store.blobs.put(Buffer.from("no"), mediaType as string), AutofileError);
   }
-  assert.equal((await readdir(join(folder, "_blobs"))).length, 1);
+  assert.equal((await readdir(join(folder, "blobs"))).length, 2);
 });
 
-test("upload limits use the copied bytes even when the input shadows its byte length", async () => {
-  const { store, folder } = await fixture();
+test("uploads copy all bytes even when the input shadows its byte length", async () => {
+  const { store } = await fixture();
   const bytes = Object.defineProperty(new Uint8Array(7_340_033), "byteLength", { value: 0 });
-  await assert.rejects(store.blobs.put(bytes, "application/octet-stream"), (error: unknown) => {
-    assert.ok(error instanceof AutofileError);
-    assert.match(error.message, /7340033.*7340032/u);
-    return true;
-  });
-  await assert.rejects(readdir(folder), { code: "ENOENT" });
+  const uri = await store.blobs.put(bytes, "application/octet-stream");
+  assert.equal((await store.blobs.get(uri))!.bytes.byteLength, 7_340_033);
 });
 
 test("uploads copy the precise byte view synchronously before callers mutate it", async () => {

@@ -1,11 +1,17 @@
 /** Derives MCP resources from public Autofile records and type declarations. */
 
+import { ProtocolError, ProtocolErrorCode } from "@modelcontextprotocol/server";
+
 import { AutofileError, type Autofile, type AutofileRecord, type TypeDeclaration } from "./index.js";
 
 const typeNamePattern = /^[a-z][a-z0-9-]*$/u;
-const typeUriPattern = /^autofile:\/\/\/_types\/([a-z][a-z0-9-]*)$/u;
-const recordUriPattern = /^autofile:\/\/\/[a-z][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/u;
-const blobUriPattern = /^autofile:\/\/\/_blobs\/[^/]+$/u;
+const typeUriPattern = /^autofile:\/\/\/types\/([a-z][a-z0-9-]*)$/u;
+const recordUriPattern = /^autofile:\/\/\/records\/[a-z][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/u;
+const blobUriPattern = /^autofile:\/\/\/blobs\/[^/]+$/u;
+const MAX_INLINE_BLOB_BYTES = 7_340_032;
+
+/** Chooses the location offered when a blob exceeds the MCP inline limit. */
+export interface ResourceOptions { blobLocation?: "stdio" | "http" }
 
 /** The public information used in an MCP resource listing. */
 export interface StoreResource {
@@ -28,7 +34,7 @@ export interface Resources {
 }
 
 /** Builds resource operations using only the public library interface. */
-export function buildResources(autofile: Autofile): Resources {
+export function buildResources(autofile: Autofile, options: ResourceOptions = {}): Resources {
   async function listResources(): Promise<StoreResource[]> {
     const resources: StoreResource[] = [];
     for (const declaration of await autofile.types.list()) {
@@ -71,6 +77,22 @@ export function buildResources(autofile: Autofile): Resources {
 
   async function readResource(uri: string): Promise<StoreResourceContents | undefined> {
     if (blobUriPattern.test(uri)) {
+      const details = await autofile.blobs.stat(uri);
+      if (details === undefined) return undefined;
+      if (details.size > MAX_INLINE_BLOB_BYTES) {
+        const data = { uri, size: details.size, limit: MAX_INLINE_BLOB_BYTES };
+        const message = `The blob is ${details.size.toLocaleString("en-US")} bytes, more than the 7,340,032 bytes resources/read returns.`;
+        if (options.blobLocation === "http") {
+          const url = uri.slice("autofile:///".length);
+          throw new ProtocolError(ProtocolErrorCode.InvalidParams,
+            `${message} Download it with HTTP GET from ${url}, relative to the MCP endpoint URL.`,
+            { ...data, url });
+        }
+        if (details.path === undefined) throw new Error("No local file is available for this blob");
+        throw new ProtocolError(ProtocolErrorCode.InvalidParams,
+          `${message} Read it from the local file ${details.path}.`,
+          { ...data, path: details.path });
+      }
       const blob = await autofile.blobs.get(uri);
       return blob === undefined ? undefined : {
         uri, mimeType: blob.mimeType, blob: Buffer.from(blob.bytes).toString("base64"),

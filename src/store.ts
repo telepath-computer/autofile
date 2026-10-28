@@ -26,13 +26,12 @@ import { Query } from "mingo";
 import lockfile from "proper-lockfile";
 
 import {
-  MAX_BLOB_BYTES,
   blobNameFromUri,
   deleteBlobUris,
   blobReferenceProblem,
-  blobSizeProblem,
   isMediaType,
   writeBlob,
+  writeBlobStream,
 } from "./blobs.js";
 import { getWriteLockPath } from "./config.js";
 import { jsonObjectProblem, type JsonObject, type JsonValue } from "./json.js";
@@ -44,13 +43,13 @@ export type { JsonObject, JsonPrimitive, JsonValue } from "./json.js";
 
 const typeNamePattern = /^[a-z][a-z0-9-]*$/u;
 const keyPattern = /^[a-z0-9][a-z0-9-]*$/u;
-const recordUriPattern = /^autofile:\/\/\/([a-z][a-z0-9-]*)\/([a-z0-9][a-z0-9-]*)$/u;
+const recordUriPattern = /^autofile:\/\/\/records\/([a-z][a-z0-9-]*)\/([a-z0-9][a-z0-9-]*)$/u;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
 const MAX_FIND_RECORDS_PAGE_BYTES = 64 * 1024;
 const tidAlphabet = "234567abcdefghijklmnopqrstuvwxyz";
 const invalidTypeMessage = "type: must use lowercase letters, digits, and hyphens and start with a letter";
 const invalidKeyMessage = "key: must use lowercase letters, digits, and hyphens and start with a letter or digit";
-const invalidRecordUriMessage = "uri: must be a record URI, such as autofile:///task/book-the-dentist";
+const invalidRecordUriMessage = "uri: must be a record URI, such as autofile:///records/task/book-the-dentist";
 const clockIdentifier = BigInt(randomBytes(2).readUInt16BE() & 0x3ff);
 let lastTidTimestamp = 0n;
 
@@ -118,6 +117,12 @@ export type TypeChanges = Partial<Omit<TypeDefinition, "titleField" | "title">> 
   title?: string | null;
 };
 
+/** Metadata for a blob, including a read-only local file when available. */
+export interface BlobStat { size: number; mimeType: string; path?: string }
+
+/** A half-open interval of attachment bytes, like Uint8Array.subarray. */
+export interface BlobRange { start: number; end: number }
+
 /** A record or type was created, changed, or deleted. */
 export interface ChangeEvent { uri: string; kind: "created" | "changed" | "deleted" }
 
@@ -161,8 +166,8 @@ export class Autofile {
       refuse("folder: must be a non-empty string");
     }
     this.#dataFolder = resolve(options.folder);
-    this.#typeFolder = join(this.#dataFolder, "_types");
-    this.#blobFolder = join(this.#dataFolder, "_blobs");
+    this.#typeFolder = join(this.#dataFolder, "types");
+    this.#blobFolder = join(this.#dataFolder, "blobs");
     // Keep the existing process-home lock policy until a separate change moves it.
     this.#writeLockPath = resolve(getWriteLockPath());
   }
@@ -196,13 +201,18 @@ export class Autofile {
   readonly blobs = {
     put: (bytes: Uint8Array, mediaType: string): Promise<string> => this.#operation(() => {
       if (!(bytes instanceof Uint8Array)) return refuse("bytes: must be a Uint8Array");
-      if (bytes.byteLength > MAX_BLOB_BYTES) return refuse(blobSizeProblem(bytes.byteLength));
       if (!isMediaType(mediaType)) return refuse("mediaType: must be a valid media type, such as application/pdf");
       const snapshot = Buffer.from(bytes);
-      if (snapshot.length > MAX_BLOB_BYTES) return refuse(blobSizeProblem(snapshot.length));
       return this.#withWriteLock(() => writeBlob(this.#blobFolder, snapshot, mediaType));
     }),
+    putStream: (chunks: AsyncIterable<Uint8Array>, mediaType: string): Promise<string> => this.#operation(() => {
+      if (typeof chunks?.[Symbol.asyncIterator] !== "function") return refuse("chunks: must be an AsyncIterable of Uint8Array chunks");
+      if (!isMediaType(mediaType)) return refuse("mediaType: must be a valid media type, such as application/pdf");
+      return this.#withWriteLock(() => writeBlobStream(this.#blobFolder, snapshotBlobChunks(chunks), mediaType));
+    }),
     get: (uri: string): Promise<{ bytes: Uint8Array; mimeType: string } | undefined> => this.#operation(() => this.#getBlob(uri)),
+    stat: (uri: string): Promise<BlobStat | undefined> => this.#operation(() => this.#statBlob(uri)),
+    stream: (uri: string, range?: BlobRange): Promise<ReadableStream<Uint8Array> | undefined> => this.#operation(() => this.#streamBlob(uri, range)),
   };
 
   /** Checks a schema without accessing storage or checking link targets. */
@@ -297,8 +307,8 @@ export class Autofile {
     const uncertainTypes = new Set<string>();
     const events: ChangeEvent[] = [];
     for (const change of changes) {
-      if (!change.uri.startsWith("autofile:///_types/")) continue;
-      const type = change.uri.slice("autofile:///_types/".length);
+      if (!change.uri.startsWith("autofile:///types/")) continue;
+      const type = change.uri.slice("autofile:///types/".length);
       try {
         const declaration = await readValidDeclaration(this.#typeFolder, type);
         if (declaration === undefined) this.#watchTypes.delete(type);
@@ -400,7 +410,7 @@ export class Autofile {
     const entries: Array<{ type: string; key: string; name: string; uri: string; declaration: TypeDeclaration; schema: PreparedSchema }> = [];
     for (const declaration of declarations) {
       const schema = await preparedDeclarationSchema(declaration, declaration.uri);
-      for (const entry of await recognizedRecordEntries(join(this.#dataFolder, declaration.type))) {
+      for (const entry of await recognizedRecordEntries(recordFolder(this.#dataFolder, declaration.type))) {
         const key = entry.name.slice(0, -".json".length);
         entries.push({ type: declaration.type, key, name: entry.name, uri: recordUri(declaration.type, key), declaration, schema });
       }
@@ -427,7 +437,7 @@ export class Autofile {
       let record: AutofileRecord | undefined;
       let resultError: { uri: string; message: string } | undefined;
       try {
-        stored = await readStoredRecord(join(this.#dataFolder, type, name));
+        stored = await readStoredRecord(join(recordFolder(this.#dataFolder, type), name));
       } catch (error) {
         resultError = { uri, message: recordReadError(error) };
       }
@@ -534,7 +544,7 @@ export class Autofile {
       );
       if (linkErrors.length > 0) throw new AutofileError(linkErrors);
 
-      await mkdir(join(this.#dataFolder, type), { recursive: true });
+      await mkdir(recordFolder(this.#dataFolder, type), { recursive: true });
       let key = options.key;
       if (key === undefined) {
         do key = nextTid();
@@ -630,13 +640,13 @@ export class Autofile {
         const otherDeclaration = await readValidDeclaration(this.#typeFolder, type);
         if (otherDeclaration === undefined) continue;
         const schema = await preparedDeclarationSchema(otherDeclaration, typeUri(type));
-        for (const entry of await recognizedRecordEntries(join(this.#dataFolder, type))) {
+        for (const entry of await recognizedRecordEntries(recordFolder(this.#dataFolder, type))) {
           const key = entry.name.slice(0, -".json".length);
           const uri = recordUri(type, key);
           if (uri === targetUri) continue;
           let stored: ReadResult<StoredRecord>;
           try {
-            stored = await readStoredRecord(join(this.#dataFolder, type, entry.name));
+            stored = await readStoredRecord(join(recordFolder(this.#dataFolder, type), entry.name));
           } catch (error) {
             errors.push({ uri, message: recordReadError(error) });
             continue;
@@ -671,7 +681,7 @@ export class Autofile {
             continue;
           }
           changes.push({
-            path: join(this.#dataFolder, type, entry.name),
+            path: join(recordFolder(this.#dataFolder, type), entry.name),
             record: {
               createdAt: stored.value.createdAt,
               updatedAt: timestampAfter(stored.value.updatedAt),
@@ -753,7 +763,7 @@ export class Autofile {
 
       await Promise.all([
         mkdir(this.#typeFolder, { recursive: true }),
-        mkdir(join(this.#dataFolder, type), { recursive: true }),
+        mkdir(recordFolder(this.#dataFolder, type), { recursive: true }),
       ]);
       await writeJsonAtomically(declarationPath, declaration);
       return typeResult(type, declaration);
@@ -813,7 +823,7 @@ export class Autofile {
       const declaration = await readDeclaration(this.#typeFolder, type);
       if (declaration.status !== "found") return declarationRefusal(type, declaration);
       try {
-        await rmdir(join(this.#dataFolder, type));
+        await rmdir(recordFolder(this.#dataFolder, type));
       } catch (error) {
         // Keep the declaration whenever any stored data remains, including
         // entries that cannot be recognized or read as records.
@@ -830,8 +840,49 @@ export class Autofile {
     await this.#ensureReady();
     const name = blobNameFromUri(uri);
     if (name === undefined || !await isDirectory(this.#blobFolder)) return undefined;
-    const bytes = await readRegularFile(join(this.#blobFolder, name), MAX_BLOB_BYTES);
+    const bytes = await readRegularFile(join(this.#blobFolder, name));
     return bytes === undefined ? undefined : { bytes, mimeType: mimeTypeForBlob(name) };
+  }
+
+  async #statBlob(uri: string): Promise<BlobStat | undefined> {
+    await this.#ensureReady();
+    const name = blobNameFromUri(uri);
+    if (name === undefined || !await isDirectory(this.#blobFolder)) return undefined;
+    const path = join(this.#blobFolder, name);
+    try {
+      const details = await lstat(path);
+      return details.isFile() ? { size: details.size, mimeType: mimeTypeForBlob(name), path } : undefined;
+    } catch (error) {
+      if (hasCode(error, "ENOENT") || hasCode(error, "ENOTDIR")) return undefined;
+      throw error;
+    }
+  }
+
+  async #streamBlob(uri: string, range?: BlobRange): Promise<ReadableStream<Uint8Array> | undefined> {
+    await this.#ensureReady();
+    const name = blobNameFromUri(uri);
+    if (name === undefined || !await isDirectory(this.#blobFolder)) return undefined;
+    // Read caller-controlled offsets before opening a file: an accessor may throw.
+    const start = range === undefined ? 0 : range?.start;
+    const requestedEnd = range?.end;
+    const file = await openRegularFile(join(this.#blobFolder, name));
+    if (file === undefined) return undefined;
+    const end = range === undefined ? file.size : requestedEnd;
+    if (typeof start !== "number" || typeof end !== "number"
+      || !Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+      || start < 0 || end < start || end > file.size) {
+      await file.handle.close();
+      return refuse("range: must contain integer offsets with 0 <= start <= end <= blob size", uri);
+    }
+    return streamFile(file.handle, start, end);
+  }
+}
+
+/** Copies one chunk before asynchronous writes can observe caller mutations. */
+async function* snapshotBlobChunks(chunks: AsyncIterable<Uint8Array>): AsyncGenerator<Buffer> {
+  for await (const chunk of chunks) {
+    if (!(chunk instanceof Uint8Array)) refuse("chunks: each chunk must be a Uint8Array");
+    yield Buffer.from(chunk);
   }
 }
 
@@ -962,7 +1013,7 @@ async function deleteUnheldBlobs(
   const held = await blobsHeldInStore(dataFolder, typeFolder);
   if (held === undefined) return;
   await deleteBlobUris(
-    join(dataFolder, "_blobs"),
+    join(dataFolder, "blobs"),
     [...candidates].filter((uri) => !held.has(uri)),
   );
 }
@@ -999,7 +1050,7 @@ async function blobsHeldInStore(
 
     let recordEntries;
     try {
-      recordEntries = await recognizedRecordEntries(join(dataFolder, type));
+      recordEntries = await recognizedRecordEntries(recordFolder(dataFolder, type));
     } catch (error) {
       if (hasErrorCode(error)) return undefined;
       throw error;
@@ -1007,7 +1058,7 @@ async function blobsHeldInStore(
     for (const entry of recordEntries) {
       let record: ReadResult<unknown>;
       try {
-        record = await readJson(join(dataFolder, type, entry.name), "record");
+        record = await readJson(join(recordFolder(dataFolder, type), entry.name), "record");
       } catch (error) {
         if (hasErrorCode(error)) return undefined;
         throw error;
@@ -1073,13 +1124,13 @@ async function invalidRecords(
   schema: PreparedSchema,
 ): Promise<AutofileProblem[]> {
   const errors: AutofileProblem[] = [];
-  const entries = await recognizedRecordEntries(join(dataFolder, type));
+  const entries = await recognizedRecordEntries(recordFolder(dataFolder, type));
   for (const entry of entries) {
     const key = entry.name.slice(0, -".json".length);
     const uri = recordUri(type, key);
     let record: ReadResult<StoredRecord>;
     try {
-      record = await readStoredRecord(join(dataFolder, type, entry.name));
+      record = await readStoredRecord(join(recordFolder(dataFolder, type), entry.name));
     } catch (error) {
       errors.push({ uri, message: recordReadError(error) });
       continue;
@@ -1105,7 +1156,7 @@ async function readDeclaration(folder: string, type: string): Promise<ReadResult
 }
 
 async function readStoredRecord(path: string): Promise<ReadResult<StoredRecord>> {
-  if (!await isDirectory(dirname(path))) return { status: "missing" };
+  if (!await isDirectory(dirname(dirname(path))) || !await isDirectory(dirname(path))) return { status: "missing" };
   const result = await readJson(path, "record");
   if (result.status !== "found") return result;
   if (!isStoredRecord(result.value)) {
@@ -1185,11 +1236,11 @@ function parseRecordUri(uri: string): { type: string; key: string } | undefined 
 }
 
 function recordUri(type: string, key: string): string {
-  return `autofile:///${type}/${key}`;
+  return `autofile:///records/${type}/${key}`;
 }
 
 function typeUri(type: string): string {
-  return `autofile:///_types/${type}`;
+  return `autofile:///types/${type}`;
 }
 
 function mimeTypeForBlob(name: string): string {
@@ -1197,7 +1248,11 @@ function mimeTypeForBlob(name: string): string {
 }
 
 function recordPath(dataFolder: string, type: string, key: string): string {
-  return join(dataFolder, type, `${key}.json`);
+  return join(recordFolder(dataFolder, type), `${key}.json`);
+}
+
+function recordFolder(dataFolder: string, type: string): string {
+  return join(dataFolder, "records", type);
 }
 
 function encodeRecordCursor(uri: string): string {
@@ -1346,6 +1401,7 @@ function recordReadRefusal(uri: string, result: ReadResult<StoredRecord>): never
 }
 
 async function recognizedRecordEntries(folder: string) {
+  if (!await isDirectory(dirname(folder))) return [];
   return (await readDirectory(folder))
     .filter((entry) => {
       if (!entry.isFile() || !entry.name.endsWith(".json")) return false;
@@ -1419,16 +1475,43 @@ async function openRegularFile(path: string): Promise<OpenedRegularFile | undefi
   }
 }
 
-async function readRegularFile(
-  path: string,
-  maximumBytes = Number.POSITIVE_INFINITY,
-): Promise<Buffer | undefined> {
+/** Keeps a file open only while a bounded, backpressured read is active. */
+function streamFile(handle: FileHandle, start: number, end: number): ReadableStream<Uint8Array> {
+  let position = start;
+  let closing: Promise<void> | undefined;
+  const close = () => closing ??= handle.close().catch(() => { throw new Error("Storage operation failed"); });
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        if (position === end) {
+          await close();
+          controller.close();
+          return;
+        }
+        const bytes = Buffer.allocUnsafe(Math.min(64 * 1024, end - position));
+        const { bytesRead } = await handle.read(bytes, 0, bytes.length, position);
+        if (closing !== undefined) return;
+        if (bytesRead === 0) {
+          await close();
+          controller.close();
+          return;
+        }
+        position += bytesRead;
+        controller.enqueue(bytes.subarray(0, bytesRead));
+      } catch {
+        await close();
+        controller.error(new Error("Storage operation failed"));
+      }
+    },
+    cancel: () => close(),
+  });
+}
+
+async function readRegularFile(path: string): Promise<Buffer | undefined> {
   const file = await openRegularFile(path);
   if (file === undefined) return undefined;
   try {
-    if (file.size > maximumBytes) return undefined;
-    const bytes = await file.handle.readFile();
-    return bytes.byteLength <= maximumBytes ? bytes : undefined;
+    return await file.handle.readFile();
   } finally {
     await file.handle.close();
   }

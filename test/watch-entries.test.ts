@@ -48,12 +48,12 @@ test("watch ignores record and declaration symlink creation, replacement, and re
       await writeFile(join(root, `${name}-type.json`), JSON.stringify(definition));
     }
     await store.watch((batch) => { changes.push(...batch); }, { onError: (error) => { errors.push(error); } });
-    const linkedRecord = join(folder, "tasks", "linked.json");
-    const linkedType = join(folder, "_types", "linked.json");
+    const linkedRecord = join(folder, "records", "tasks", "linked.json");
+    const linkedType = join(folder, "types", "linked.json");
     await symlink(join(root, "first-record.json"), linkedRecord);
     await symlink(join(root, "first-type.json"), linkedType);
     await delay(400);
-    assert.equal(await store.records.get("autofile:///tasks/linked"), undefined);
+    assert.equal(await store.records.get("autofile:///records/tasks/linked"), undefined);
     assert.equal(await store.types.get("linked"), undefined);
     assert.deepEqual(changes, [], "symlink creation produced public changes");
 
@@ -91,11 +91,11 @@ test("watch never reports initially ignored entries when their type folder is re
   const changes: ChangeEvent[] = [];
   try {
     await writeFile(join(root, "record.json"), record);
-    await symlink(join(root, "record.json"), join(folder, "tasks", "linked.json"));
-    await mkdir(join(folder, "tasks", "directory.json"));
+    await symlink(join(root, "record.json"), join(folder, "records", "tasks", "linked.json"));
+    await mkdir(join(folder, "records", "tasks", "directory.json"));
     const existing = await store.records.create("tasks", {}, { key: "existing" });
     await store.watch((batch) => { changes.push(...batch); });
-    await rm(join(folder, "tasks"), { recursive: true });
+    await rm(join(folder, "records", "tasks"), { recursive: true });
     await waitForChange(changes, { uri: existing.uri, kind: "deleted" });
     await delay(400);
     assert.deepEqual(changes, [{ uri: existing.uri, kind: "deleted" }]);
@@ -117,18 +117,18 @@ test("replacing a recognized record or declaration with a symlink reports its de
     await store.watch((batch) => { changes.push(...batch); });
     const recordReplacement = join(root, "record-replacement");
     await symlink(join(root, "record.json"), recordReplacement);
-    await rename(recordReplacement, join(folder, "tasks", "existing.json"));
+    await rename(recordReplacement, join(folder, "records", "tasks", "existing.json"));
     await waitForChange(changes, { uri: existing.uri, kind: "deleted" });
     assert.equal(await store.records.get(existing.uri), undefined);
 
     const declarationReplacement = join(root, "type-replacement");
     await symlink(join(root, "type.json"), declarationReplacement);
-    await rename(declarationReplacement, join(folder, "_types", "tasks.json"));
-    await waitForChange(changes, { uri: "autofile:///_types/tasks", kind: "deleted" });
+    await rename(declarationReplacement, join(folder, "types", "tasks.json"));
+    await waitForChange(changes, { uri: "autofile:///types/tasks", kind: "deleted" });
     assert.equal(await store.types.get("tasks"), undefined);
     assert.deepEqual(changes, [
       { uri: existing.uri, kind: "deleted" },
-      { uri: "autofile:///_types/tasks", kind: "deleted" },
+      { uri: "autofile:///types/tasks", kind: "deleted" },
     ]);
   } finally {
     await store.close();
@@ -143,8 +143,8 @@ test("replacing ignored symlinks with regular files starts record and declaratio
   const changes: ChangeEvent[] = [];
   const errors: Error[] = [];
   const entries = [
-    { path: join(folder, "tasks", "linked.json"), content: record, uri: "autofile:///tasks/linked" },
-    { path: join(folder, "_types", "linked.json"), content: JSON.stringify(definition), uri: "autofile:///_types/linked" },
+    { path: join(folder, "records", "tasks", "linked.json"), content: record, uri: "autofile:///records/tasks/linked" },
+    { path: join(folder, "types", "linked.json"), content: JSON.stringify(definition), uri: "autofile:///types/linked" },
   ];
   try {
     await writeFile(join(root, "target.json"), "{}");
@@ -159,7 +159,7 @@ test("replacing ignored symlinks with regular files starts record and declaratio
       await writeFile(entry.path, `${entry.content}\n`);
       await waitForChange(changes, { uri: entry.uri, kind: "changed" });
     }
-    assert.notEqual(await store.records.get("autofile:///tasks/linked"), undefined);
+    assert.notEqual(await store.records.get("autofile:///records/tasks/linked"), undefined);
     assert.notEqual(await store.types.get("linked"), undefined);
     assert.deepEqual(errors, []);
   } finally {

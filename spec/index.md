@@ -6,7 +6,9 @@ Autofile is a data store for agents. It keeps information as typed records with 
 
 ## Storage independence
 
-The tools, resources, HTTP interface and library describe records, types and changes. They must not depend on how those values are stored. Replacing the storage implementation with SQLite or another database must leave those interfaces unchanged. Clients treat record, type and attachment addresses as opaque: they keep and reuse them without deriving storage details from them. An address may resemble a storage path, but clients must not use that resemblance to locate or interpret stored data.
+The tools, resources, HTTP interface and library describe records, types and changes. They must not depend on how those values are stored. Replacing the storage implementation with SQLite or another database must leave those interfaces unchanged.
+
+Addresses are paths in one tree: records under `records/`, type declarations under `types/` and attachments under `blobs/`, as described in [URIs](#uris). The folder store lays out its data folder with the same paths, so an address also says where the value is in that folder. Another implementation keeps the same addresses however it stores the values. Clients use the interfaces to read and write; they do not open stored files by building paths from addresses. Where a client may read a stored file directly, Autofile gives the path explicitly, as described in [Reading blobs](#reading-blobs).
 
 The current implementation stores data in a folder. [Storage](storage.md) specifies that format, including ownership, direct edits, synchronization, locking and recovery. [Implementation](implementation.md) describes the code and libraries that implement these specifications.
 
@@ -18,15 +20,15 @@ A record has a type, a key, a URI, and the times it was created and last changed
 
 ```json
 {
-  "uri": "autofile:///contact/priya-narayan",
+  "uri": "autofile:///records/contact/priya-narayan",
   "type": "contact",
   "key": "priya-narayan",
   "createdAt": "2026-10-07T09:14:00Z",
   "updatedAt": "2026-10-07T09:20:00Z",
   "value": {
     "name": "Priya Narayan",
-    "employer": "autofile:///organization/acme",
-    "photo": "autofile:///_blobs/9f86d081…0a08.jpg"
+    "employer": "autofile:///records/organization/acme",
+    "photo": "autofile:///blobs/9f86d081…0a08.jpg"
   }
 }
 ```
@@ -35,13 +37,21 @@ Autofile sets `createdAt` when it creates the record and `updatedAt` when it wri
 
 ### URIs
 
-The URI of a record is `autofile:///<type>/<key>`. For example, the contact with key `priya-narayan` has the URI `autofile:///contact/priya-narayan`. The type and key together identify one record within a store. The URI does not identify a storage location. Autofile serves each record as an MCP resource at that URI.
+Every address in a store is an `autofile:` URI whose path starts with the kind of value it names:
+
+| Value | URI |
+| --- | --- |
+| Record | `autofile:///records/<type>/<key>` |
+| Type declaration | `autofile:///types/<type>` |
+| Blob | `autofile:///blobs/<hash>.<ext>` |
+
+For example, the contact with key `priya-narayan` has the URI `autofile:///records/contact/priya-narayan`. The type and key together identify one record within a store. Autofile serves each record as an MCP resource at that URI.
 
 The URI has three slashes because the authority is empty. Addresses are scoped to one store; the URI does not name a server or a store.
 
 ### Keys
 
-The key of a record is the last part of its URI: `priya-narayan` in `autofile:///contact/priya-narayan`. The key is separate from the fields in `value`.
+The key of a record is the last part of its URI: `priya-narayan` in `autofile:///records/contact/priya-narayan`. The key is separate from the fields in `value`.
 
 [`create_record`](#create_record) takes an optional key:
 
@@ -55,7 +65,7 @@ A key cannot be changed, because changing it would change the URI of the record.
 A link is a field whose value is a full URI. The schema of a type marks each link field with `"format": "uri"`, the JSON Schema format for a full URI, and a link field holds only links. A `pattern` limits a field to links to records of one type:
 
 ```json
-"employer": { "type": "string", "format": "uri", "pattern": "^autofile:///organization/" }
+"employer": { "type": "string", "format": "uri", "pattern": "^autofile:///records/organization/" }
 ```
 
 A link to an `autofile:` URI always points to a record that exists, as a foreign key does in a database:
@@ -73,19 +83,32 @@ The schema of a type marks each blob field with `"format": "blob"`, a format Aut
 "scan": { "type": "string", "format": "blob" }
 ```
 
-A blob field holds an opaque URI of the form `autofile:///_blobs/<hash>.<ext>`, such as `autofile:///_blobs/9f86d081…0a08.pdf` (abbreviated here). The extension is omitted when unknown. Clients use the returned URI to read the attachment without interpreting its identifier. A type that needs an attachment name declares a field for it.
+A blob field holds a URI of the form `autofile:///blobs/<hash>.<ext>`, such as `autofile:///blobs/9f86d081…0a08.pdf` (abbreviated here). The extension is omitted when unknown. Clients use the returned URI to read the attachment without interpreting the hash or extension. A type that needs an attachment name declares a field for it.
 
 Clients upload attachment bytes before writing a record. The library method `blobs.put(bytes, mediaType)` and the MCP tool [`upload_blob`](#upload_blob) return the attachment URI. The client puts that URI in a blob field when it creates or updates a record. Equal contents may share one stored attachment. Autofile may normalize the declared media type and uses `application/octet-stream` when reading media types it does not recognize.
 
-A blob field accepts only the URI of an attachment that exists. Any record may hold that URI, including several records at once. Record writes accept neither data URIs nor local paths in blob fields. Schema constraints apply to the actual attachment URI, so a field constrained to end in `.pdf` accepts an uploaded PDF address.
+A blob field accepts only the URI of an attachment that exists. Record writes check only that it exists; they never read its bytes or check its size, so a record holding a blob of any size can be created and updated through every interface. Any record may hold that URI, including several records at once. Record writes accept neither data URIs nor local paths in blob fields. Schema constraints apply to the actual attachment URI, so a field constrained to end in `.pdf` accepts an uploaded PDF address.
 
 The library accepts bytes as a `Uint8Array`. The MCP upload tool accepts base64 bytes and a media type. A media type has a type and subtype, such as `application/pdf`, without parameters. Over stdio the upload tool also accepts an absolute local file path, which the adapter reads before passing bytes to the library. The path is interpreted on the machine running Autofile, with the permissions of that process. HTTP refuses this input. The library never opens a caller-supplied attachment path.
 
 Uploading and writing a record are separate operations. A refused record write leaves the uploaded attachment available for a later attempt.
 
-A blob can be at most 7 MiB (7,340,032 bytes). Reading a blob returns it as base64 in one MCP message, and clients built on the MCP TypeScript SDK accept messages of up to 10 MiB, which a blob of 7 MiB fits once encoded, with room for the rest of the message. A larger attachment is refused with a message giving its size and the limit.
+A blob can be any size. Uploading through MCP with base64 is limited by the size of one MCP message, as described in [`upload_blob`](#upload_blob); the library and uploads of a local file over stdio are not.
 
-Clients keep the URI returned by an upload or read it from a record that holds the attachment. There is no blob enumeration. Library callers read one with `blobs.get(uri)`; MCP clients read its URI with `resources/read`.
+Clients keep the URI returned by an upload or read it from a record that holds the attachment. There is no blob enumeration.
+
+#### Reading blobs
+
+A blob has one address and two ways to be read: through MCP and, when Autofile is served over HTTP, as a plain HTTP download. Library callers use the [blob methods](#library-api).
+
+MCP clients read a blob with `resources/read`, which returns its bytes as base64 in one MCP message. This works for blobs of up to 7 MiB (7,340,032 bytes), the inline limit: clients built on the MCP TypeScript SDK accept messages of up to 10 MiB, which a blob of 7 MiB fits once encoded, with room for the rest of the message. Models in hosts such as Claude and ChatGPT can see a small image read this way.
+
+A larger blob makes `resources/read` fail with an error that gives the size of the blob, the inline limit and where to get the bytes instead, as described in [Resources](#resources):
+
+- Over HTTP, the blob's URL. `autofile serve` serves each blob at `blobs/<hash>.<ext>` next to the MCP endpoint, as described in [Serving over HTTP](#serving-over-http).
+- Over stdio, the absolute path of a local file holding the bytes, on the machine running Autofile. The file is read-only and remains valid while the blob exists. Clients read it and do not change, move or delete it. The folder store always has such a file. A storage implementation without local files would have to provide one, for example as a read-only copy; this specification does not yet define how.
+
+#### Deleting blobs
 
 After each update or delete, Autofile deletes every blob that the previous version of the record held and that no record still holds. A record that matches its type holds the blobs in its blob fields. A record that does not match its type holds every blob whose URI appears in it as a string value, because the schema of its type no longer says which of its fields are blob fields. Its blobs are therefore kept until it is fixed or deleted, and are then deleted if nothing else holds them. While any record cannot be read, Autofile deletes no blobs, because that record may hold one.
 
@@ -93,7 +116,7 @@ Cleanup of uploads that no record has held is deferred; those uploads remain sto
 
 ## Types
 
-A type has a name and a declaration that describes its records. The URI of a declaration is `autofile:///_types/<type>`, such as `autofile:///_types/contact`. Autofile serves each declaration as an MCP resource.
+A type has a name and a declaration that describes its records. The URI of a declaration is `autofile:///types/<type>`, such as `autofile:///types/contact`. Autofile serves each declaration as an MCP resource.
 
 A declaration has these fields:
 
@@ -114,7 +137,7 @@ A declaration has these fields:
     "required": ["name"],
     "properties": {
       "name": { "type": "string", "description": "Full name as the person uses it." },
-      "employer": { "type": "string", "format": "uri", "pattern": "^autofile:///organization/" }
+      "employer": { "type": "string", "format": "uri", "pattern": "^autofile:///records/organization/" }
     }
   }
 }
@@ -122,7 +145,7 @@ A declaration has these fields:
 
 Schemas use JSON Schema 2020-12, the version MCP assumes when a schema does not name one. Autofile checks the `format` keyword, which JSON Schema validators skip unless configured to check it, and refuses a schema that uses a format it does not know, since that format would go unchecked. A value marked with `"format": "uri"` or `"format": "blob"` must be a string. A `$ref` in a schema may point only within that schema, so checking a record needs no external schema.
 
-Type names use lowercase letters, digits and hyphens, and start with a letter. The `_types` and `_blobs` address prefixes therefore never clash with record types.
+Type names use lowercase letters, digits and hyphens, and start with a letter.
 
 ### Changing types
 
@@ -140,7 +163,7 @@ Autofile provides the library interface below and a set of tools and resources a
 
 The ES module package `@telepath-computer/autofile` exports `Autofile` and `AutofileError`, together with their TypeScript types. Importing it starts no server or watcher. The `autofile` command remains available.
 
-`new Autofile({ folder })` opens a store using the current implementation. `folder` is a path, as described in [Storage](storage.md#folders). Construction does no I/O. The first operation initializes the store if needed, and concurrent operations wait for that setup. Record, type and attachment operations expose no storage paths or handles.
+`new Autofile({ folder })` opens a store using the current implementation. `folder` is a path, as described in [Storage](storage.md#folders). Construction does no I/O. The first operation initializes the store if needed, and concurrent operations wait for that setup. Record, type and attachment operations expose no storage handles, and no storage paths except the local blob path from `blobs.stat`.
 
 The class provides these asynchronous methods:
 
@@ -156,8 +179,11 @@ The class provides these asynchronous methods:
 | `types.create(name, definition)` | The new `TypeDeclaration`. |
 | `types.update(name, changes)` | The updated `TypeDeclaration`. Accepts any subset of the definition; `title: null` removes the type title and `titleField: null` removes the record title field. Existing records stay as they are; `problems` reports records that cannot be read or do not match the new schema. |
 | `types.delete(name)` | No value. Refused while the type has stored data. |
-| `blobs.put(bytes, mediaType)` | The attachment URI as a string. `bytes` is a `Uint8Array`; `mediaType` is a string such as `application/pdf`. Copies the bytes before asynchronous work, applies the size limit, and stores them for use in records. |
-| `blobs.get(uri)` | `{ bytes: Uint8Array, mimeType: string }`, or `undefined` when the attachment is absent or its contents cannot be accepted. |
+| `blobs.put(bytes, mediaType)` | The attachment URI as a string. `bytes` is a `Uint8Array`; `mediaType` is a string such as `application/pdf`. Copies the bytes before asynchronous work and stores them for use in records. |
+| `blobs.putStream(chunks, mediaType)` | The attachment URI as a string. `chunks` is an `AsyncIterable<Uint8Array>`. Consumes and stores chunks in order without buffering the whole attachment. Used for stdio path uploads. A failed upload leaves no partial blob. |
+| `blobs.get(uri)` | `{ bytes: Uint8Array, mimeType: string }`, or `undefined` when the attachment is absent or its contents cannot be accepted. Loads the whole attachment into memory; use `blobs.stream` for large ones. |
+| `blobs.stat(uri)` | `{ size: number, mimeType: string, path?: string }`, or `undefined` when the attachment is absent. `size` is in bytes. `path` is the absolute path of a read-only local file holding the bytes, present when the storage implementation keeps one, as the folder store always does; callers read it and do not change it. |
+| `blobs.stream(uri, range?)` | A `ReadableStream<Uint8Array>` of the bytes, or `undefined` when the attachment is absent. `range` is `{ start, end }`, byte offsets with `end` exclusive, as in `Uint8Array.subarray`; omitted, the stream holds every byte. A range outside the attachment is refused with `AutofileError`. |
 | `watch(onChange, options?)` | A function returning a promise that stops this subscription. |
 | `close()` | No value. Stops the watcher and all subscriptions; the instance cannot be used afterwards. Calling it again is harmless. |
 
@@ -191,18 +217,19 @@ The last line names the types that exist when the client connects, without their
 
 ### Resources
 
-Records and type declarations are listed as MCP resources:
+Records and type declarations are listed as MCP resources, and blobs can be read as resources without being listed:
 
 | Resource | URI | `name` | `mimeType` | Contents from `resources/read` |
 | --- | --- | --- | --- | --- |
-| Record | `autofile:///<type>/<key>` | `<type>: <key>` | `application/json` | The complete `AutofileRecord`, serialized in `text` |
-| Type declaration | `autofile:///_types/<type>` | `Type: <type>` | `application/json` | The complete `TypeDeclaration`, serialized in `text` |
+| Record | `autofile:///records/<type>/<key>` | `<type>: <key>` | `application/json` | The complete `AutofileRecord`, serialized in `text` |
+| Type declaration | `autofile:///types/<type>` | `Type: <type>` | `application/json` | The complete `TypeDeclaration`, serialized in `text` |
+| Blob | `autofile:///blobs/<hash>.<ext>` | not listed | The media type of the blob | The bytes as base64 in `blob`, up to the inline limit |
 
 MCP requires a `name` for every resource and leaves `title` optional. Clients show the name when there is no title. A record with a string in its declared title field is listed with that title. A type is listed with its description and, when declared, its `title`. Listings contain no sizes or modification times; record timestamps are part of the record itself. Entries in `resources/list` look like this:
 
 ```json
-{ "uri": "autofile:///contact/priya-narayan", "name": "contact: priya-narayan", "title": "Priya Narayan", "mimeType": "application/json" }
-{ "uri": "autofile:///_types/contact", "name": "Type: contact", "title": "Contact", "mimeType": "application/json", "description": "People the user knows or deals with, one record per person." }
+{ "uri": "autofile:///records/contact/priya-narayan", "name": "contact: priya-narayan", "title": "Priya Narayan", "mimeType": "application/json" }
+{ "uri": "autofile:///types/contact", "name": "Type: contact", "title": "Contact", "mimeType": "application/json", "description": "People the user knows or deals with, one record per person." }
 ```
 
 `resources/list` returns records and types, ordered by URI, a page at a time. It includes readable records that do not match their schema. It serves clients that let a person pick a resource; agents use the [tools](#tools). Blobs are never listed, whether or not a record holds them. A client gets an attachment URI from an upload or a record and reads it with `resources/read`:
@@ -210,12 +237,24 @@ MCP requires a `name` for every resource and leaves `title` optional. Clients sh
 ```json
 {
   "contents": [
-    { "uri": "autofile:///_blobs/9f86d081…0a08.pdf", "mimeType": "application/pdf", "blob": "JVBERi0xLjcK…" }
+    { "uri": "autofile:///blobs/9f86d081…0a08.pdf", "mimeType": "application/pdf", "blob": "JVBERi0xLjcK…" }
   ],
   "ttlMs": 0,
   "cacheScope": "private"
 }
 ```
+
+A blob larger than the inline limit described in [Reading blobs](#reading-blobs) produces MCP error `-32602` with a message giving its size, the limit and where to get the bytes, and the same facts in `data`. Over HTTP, `data.url` is the URL of the blob as a reference relative to the MCP endpoint:
+
+```json
+{
+  "code": -32602,
+  "message": "The blob is 21,734,512 bytes, more than the 7,340,032 bytes resources/read returns. Download it with HTTP GET from blobs/9f86d081…0a08.jpg, relative to the MCP endpoint URL.",
+  "data": { "uri": "autofile:///blobs/9f86d081…0a08.jpg", "size": 21734512, "limit": 7340032, "url": "blobs/9f86d081…0a08.jpg" }
+}
+```
+
+The URL is relative because Autofile cannot know the address its clients reach it at, for example when a proxy serves it under a path prefix. Resolved against the endpoint `http://example.com/autofile/mcp`, it gives `http://example.com/autofile/blobs/9f86d081…0a08.jpg`. Over stdio, `data` has `path` in place of `url`, and the message names the file.
 
 Reading a record or type returns the same shape with `text` in place of `blob`. The text is JSON made from the public value, with object keys sorted at every depth, two-space indentation and a final newline. Array order is preserved. A record includes its identity, timestamps, value, optional title and any validation problems. A missing resource, or a record or type that cannot be returned as a readable value, produces MCP error `-32602`. Unexpected storage failures produce a protocol error.
 
@@ -224,7 +263,7 @@ Results from `resources/list` and `resources/read` carry `ttlMs: 0` and `cacheSc
 A client subscribes by sending `subscriptions/listen` with record or type URIs in `resourceSubscriptions`. When a record or type is created, changed or deleted, Autofile sends `notifications/resources/updated` to clients subscribed to that exact URI. There are no parent, folder or root resources. For a changed task:
 
 ```json
-{ "method": "notifications/resources/updated", "params": { "uri": "autofile:///task/book-the-dentist" } }
+{ "method": "notifications/resources/updated", "params": { "uri": "autofile:///records/task/book-the-dentist" } }
 ```
 
 When what `resources/list` returns changes, because a record or type is created or deleted or a title or description changes, Autofile sends `notifications/resources/list_changed` to every client listening with `resourcesListChanged`.
@@ -236,7 +275,7 @@ Each tool takes its arguments as one JSON object and returns its result as `stru
 ```json
 {
   "errors": [
-    { "uri": "autofile:///task/3jzfcijpj2z2b", "message": "status: must be one of the allowed values" },
+    { "uri": "autofile:///records/task/3jzfcijpj2z2b", "message": "status: must be one of the allowed values" },
     { "message": "where: the operator $lt is not supported" }
   ]
 }
@@ -267,7 +306,7 @@ Results are ordered by URI across the selected types. A page considers records i
 {
   "records": [
     {
-      "uri": "autofile:///task/3jzfcijpj2z2a",
+      "uri": "autofile:///records/task/3jzfcijpj2z2a",
       "title": "Book the dentist",
       "createdAt": "2026-10-07T09:14:00Z",
       "updatedAt": "2026-10-07T09:14:00Z",
@@ -275,7 +314,7 @@ Results are ordered by URI across the selected types. A page considers records i
     }
   ],
   "errors": [
-    { "uri": "autofile:///task/3jzfcijpj2z2b", "message": "status: must be one of the allowed values" }
+    { "uri": "autofile:///records/task/3jzfcijpj2z2b", "message": "status: must be one of the allowed values" }
   ],
   "cursor": "…"
 }
@@ -291,7 +330,7 @@ Returns one record, in the same shape as an item of `records` from [`find_record
 
 ```json
 {
-  "uri": "autofile:///task/3jzfcijpj2z2b",
+  "uri": "autofile:///records/task/3jzfcijpj2z2b",
   "title": "Call the bank",
   "createdAt": "2026-10-07T09:14:00Z",
   "updatedAt": "2026-10-07T09:14:00Z",
@@ -324,7 +363,7 @@ Changes a record and returns `{ "uri": "…" }`. Refused if the result does not 
 | `patch` | object, required | A [JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396): fields in the patch are set, a field set to `null` is removed, nested objects are merged, and arrays are replaced whole. Blob fields hold existing attachment URIs, as described in [Blobs](#blobs). |
 
 ```json
-{ "uri": "autofile:///task/book-the-dentist", "patch": { "status": "complete" } }
+{ "uri": "autofile:///records/task/book-the-dentist", "patch": { "status": "complete" } }
 ```
 
 #### upload_blob
@@ -337,7 +376,7 @@ Uploads attachment bytes and returns `{ "uri": "…" }`. Use that URI in a blob 
 | `mediaType` | string | The media type, such as `application/pdf`. Required with `base64`; with `path`, overrides the media type inferred from the file extension. |
 | `path` | string | An absolute path to a regular local file. Accepted only over stdio. |
 
-Supply exactly one of `base64` and `path`. A path with an unknown extension uses `application/octet-stream` unless `mediaType` is given. Invalid base64, unreadable files, HTTP path inputs and attachments over the [size limit](#blobs) are refused.
+Supply exactly one of `base64` and `path`. A path with an unknown extension uses `application/octet-stream` unless `mediaType` is given. Invalid base64, unreadable files and HTTP path inputs are refused. A base64 upload has to fit in one MCP message, so it is limited to about 7 MiB of bytes, as for [reading](#reading-blobs); a larger file can be uploaded over stdio with `path`.
 
 ```json
 { "base64": "SGVsbG8=", "mediaType": "text/plain" }
@@ -360,8 +399,8 @@ Returns every type, ordered by name, with the URI of its declaration, its descri
 ```json
 {
   "types": [
-    { "uri": "autofile:///_types/contact", "type": "contact", "title": "Contact", "description": "People the user knows or deals with, one record per person." },
-    { "uri": "autofile:///_types/journal-entry", "type": "journal-entry", "title": "Journal entry", "description": "The user's journal, one entry per day." }
+    { "uri": "autofile:///types/contact", "type": "contact", "title": "Contact", "description": "People the user knows or deals with, one record per person." },
+    { "uri": "autofile:///types/journal-entry", "type": "journal-entry", "title": "Journal entry", "description": "The user's journal, one entry per day." }
   ]
 }
 ```
@@ -376,7 +415,7 @@ Returns the declaration of a type with its URI added. Refused if the type does n
 
 ```json
 {
-  "uri": "autofile:///_types/contact",
+  "uri": "autofile:///types/contact",
   "description": "People the user knows or deals with, one record per person.",
   "title": "Contact",
   "titleField": "name",
@@ -386,7 +425,7 @@ Returns the declaration of a type with its URI added. Refused if the type does n
 
 #### create_type
 
-Declares a type and returns `{ "uri": "autofile:///_types/<type>" }`. Refused if the type exists, the name breaks the rule in [Types](#types), a supplied `title` is not a non-empty string, or the schema is not one Autofile accepts, as described in [Types](#types).
+Declares a type and returns `{ "uri": "autofile:///types/<type>" }`. Refused if the type exists, the name breaks the rule in [Types](#types), a supplied `title` is not a non-empty string, or the schema is not one Autofile accepts, as described in [Types](#types).
 
 | Argument | Type | Meaning |
 | --- | --- | --- |
@@ -412,9 +451,9 @@ Replaces the description, schema, title field or title of a type, or any of them
 
 ```json
 {
-  "uri": "autofile:///_types/contact",
+  "uri": "autofile:///types/contact",
   "errors": [
-    { "uri": "autofile:///contact/priya-narayan", "message": "employer: must be a full URI" }
+    { "uri": "autofile:///records/contact/priya-narayan", "message": "employer: must be a full URI" }
   ]
 }
 ```
@@ -463,6 +502,20 @@ Changing `storage` selects a store without moving records. A running process kee
 `autofile serve` runs the same MCP server over the Streamable HTTP transport of MCP 2026-07-28, at the endpoint `/mcp`: with the defaults, `http://127.0.0.1:7319/mcp`. It serves the same tools and resources as stdio.
 
 Autofile does not authenticate HTTP clients, so anything that can reach its address can read and write the store. It listens on `127.0.0.1` by default, as MCP advises for a local server. As MCP requires, it checks the `Origin` header of every request, so that a website open in a browser cannot reach a local Autofile by pointing its own domain at the local machine (DNS rebinding). A request with an `Origin` header is refused with HTTP 403 unless the origin is on localhost (`http://localhost`, `http://127.0.0.1` or `http://[::1]`, with any port) or listed in `http.origins`. Requests without an `Origin` header, which clients other than browsers send, are not affected. Autofile also refuses with HTTP 403 a request whose `Host` header names a host other than `localhost`, `127.0.0.1`, `[::1]` or the host of an origin in `http.origins`, whatever the port, so a request that reaches Autofile through a rebound domain name is refused even without an `Origin` header.
+
+#### Blob downloads
+
+`autofile serve` also serves each blob at `/blobs/<hash>.<ext>`, next to the endpoint: with the defaults, `http://127.0.0.1:7319/blobs/<hash>.<ext>`. Records and types are not served this way. An unknown blob gets HTTP 404, and methods other than `GET`, `HEAD` and `OPTIONS` get HTTP 405.
+
+`GET` returns the bytes with the media type of the blob and `Content-Length`, streamed so that a blob of any size can be downloaded. `HEAD` returns the same headers without the bytes.
+
+Partial downloads follow [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html#section-14). Responses carry `Accept-Ranges: bytes`. A `GET` whose `Range` header asks for one range in any of the forms `bytes=<first>-<last>`, `bytes=<first>-` or `bytes=-<length>` gets HTTP 206 with those bytes and a `Content-Range` header. Offsets are inclusive, and a range that runs past the end of the blob is shortened to end there. A range that starts at or after the end of the blob, or a suffix of length 0, gets HTTP 416 with `Content-Range: bytes */<size>`. A `Range` header with several ranges or another unit, or on a `HEAD` request, is ignored and the whole blob is returned.
+
+Responses carry an `ETag` made from the hash and `Cache-Control: private, max-age=31536000, immutable`, since the bytes at a blob address never change. A `GET` or `HEAD` with an `If-None-Match` header holding that `ETag` gets HTTP 304.
+
+A blob may be a web page, an SVG image or another document that can run scripts, and it is served from the same origin as the MCP endpoint. So that opening such a blob in a browser cannot use that origin to read or change the store, every blob response carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`. The browser then treats the document as coming from a unique origin of its own, with scripts disabled. Images, audio and video still display as usual.
+
+The blob route applies the same `Origin` and `Host` checks as the endpoint. To a browser from an accepted origin it sends `Access-Control-Allow-Origin` with that origin, and exposes the `Content-Length`, `Content-Range`, `Accept-Ranges` and `ETag` headers to its scripts. It answers a CORS preflight `OPTIONS` request with HTTP 204, allowing the methods `GET` and `HEAD` and the request headers `Range` and `If-None-Match`.
 
 ### Processes
 

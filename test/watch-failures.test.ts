@@ -30,7 +30,7 @@ for (const knownType of [true, false]) {
     else process.env.AUTOFILE_HOME = previousHome;
     const originalOpen = fsPromises.open;
     const definition = { description: "Initial description", schema: { type: "object" } };
-    const declarations = join(root, "data", "_types");
+    const declarations = join(root, "data", "types");
     const failedPath = join(declarations, "middle.json");
     const batches: ChangeEvent[][] = [];
     const errors: Error[] = [];
@@ -39,7 +39,7 @@ for (const knownType of [true, false]) {
       for (const type of ["before", "after", "unrelated", ...(knownType ? ["middle"] : [])]) {
         await store.types.create(type, definition);
       }
-      await mkdir(join(root, "data", "middle"), { recursive: true });
+      await mkdir(join(root, "data", "records", "middle"), { recursive: true });
       await store.watch((changes) => { batches.push(changes); }, { onError: (error) => { errors.push(error); } });
       fsPromises.open = (async (...args: Parameters<typeof originalOpen>) => {
         const handle = await originalOpen(...args);
@@ -60,16 +60,16 @@ for (const knownType of [true, false]) {
       }
       const record = { createdAt: "2026-10-26T00:00:00Z", updatedAt: "2026-10-26T00:00:00Z", value: {} };
       for (const type of ["middle", "unrelated"]) {
-        writeFileSync(join(root, "data", type, "first.json"), JSON.stringify(record));
+        writeFileSync(join(root, "data", "records", type, "first.json"), JSON.stringify(record));
       }
 
       await waitFor(() => errors.length > 0, "declaration read failure was not publicly reported");
-      await waitFor(() => batches.some((batch) => batch.some(({ uri }) => uri === "autofile:///unrelated/first")),
+      await waitFor(() => batches.some((batch) => batch.some(({ uri }) => uri === "autofile:///records/unrelated/first")),
         "declaration read failure discarded the unrelated record notice");
-      const failedBatch = batches.find((batch) => batch.some(({ uri }) => uri === "autofile:///unrelated/first"))!;
+      const failedBatch = batches.find((batch) => batch.some(({ uri }) => uri === "autofile:///records/unrelated/first"))!;
       assert.deepEqual(new Set(failedBatch.map(({ uri }) => uri)), new Set([
-        "autofile:///_types/before", "autofile:///_types/middle", "autofile:///_types/after",
-        "autofile:///middle/first", "autofile:///unrelated/first",
+        "autofile:///types/before", "autofile:///types/middle", "autofile:///types/after",
+        "autofile:///records/middle/first", "autofile:///records/unrelated/first",
       ]));
       for (const error of errors) {
         assert.equal(error.message, "Change monitoring failed");
@@ -80,17 +80,17 @@ for (const knownType of [true, false]) {
 
       // A failed refresh must not evict an already known type from later batches.
       if (knownType) {
-        writeFileSync(join(root, "data", "middle", "cached.json"), JSON.stringify(record));
-        await waitFor(() => batches.flat().some(({ uri }) => uri === "autofile:///middle/cached"),
+        writeFileSync(join(root, "data", "records", "middle", "cached.json"), JSON.stringify(record));
+        await waitFor(() => batches.flat().some(({ uri }) => uri === "autofile:///records/middle/cached"),
           "failed declaration refresh discarded the known type");
       }
 
       failing = false;
       writeFileSync(failedPath, JSON.stringify({ ...definition, description: "Recovered" }));
-      await waitFor(() => batches.flat().filter(({ uri }) => uri === "autofile:///_types/middle").length === 2,
+      await waitFor(() => batches.flat().filter(({ uri }) => uri === "autofile:///types/middle").length === 2,
         "declaration monitoring did not recover");
-      writeFileSync(join(root, "data", "middle", "recovered.json"), JSON.stringify(record));
-      await waitFor(() => batches.flat().some(({ uri }) => uri === "autofile:///middle/recovered"),
+      writeFileSync(join(root, "data", "records", "middle", "recovered.json"), JSON.stringify(record));
+      await waitFor(() => batches.flat().some(({ uri }) => uri === "autofile:///records/middle/recovered"),
         "record monitoring did not recover");
       assert.equal(errors.length, 1);
     } finally {

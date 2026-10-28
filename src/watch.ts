@@ -156,31 +156,28 @@ function resourceUriForPath(root: string, path: string): string | undefined {
   const localPath = relative(root, resolve(path));
   if (localPath === "" || localPath === ".." || isAbsolute(localPath)) return undefined;
   const parts = localPath.split(sep);
-  if (parts.length !== 2 || parts.some((part) => part.startsWith("."))) return undefined;
-  const [folder, name] = parts;
-  if (folder === undefined || name === undefined) return undefined;
-  if (!name.endsWith(".json")) return undefined;
-  const resourceName = name.slice(0, -".json".length);
-  if (folder === "_types") {
-    return typeNamePattern.test(resourceName)
-      ? `autofile:///_types/${resourceName}`
-      : undefined;
+  if (parts.some((part) => part.startsWith("."))) return undefined;
+  if (parts[0] === "types" && parts.length === 2) {
+    const name = parts[1]!;
+    const type = name.slice(0, -".json".length);
+    return name.endsWith(".json") && typeNamePattern.test(type) ? `autofile:///types/${type}` : undefined;
   }
-  return typeNamePattern.test(folder) && keyPattern.test(resourceName)
-    ? `autofile:///${folder}/${resourceName}`
+  if (parts[0] !== "records" || parts.length !== 3) return undefined;
+  const [, type, name] = parts;
+  if (type === undefined || name === undefined || !name.endsWith(".json")) return undefined;
+  const key = name.slice(0, -".json".length);
+  return typeNamePattern.test(type) && keyPattern.test(key)
+    ? `autofile:///records/${type}/${key}`
     : undefined;
 }
 
 function resourceFolderForDirectory(root: string, path: string): string | undefined {
   const localPath = relative(root, resolve(path));
   if (localPath === "") return "";
-  if (localPath === ".." || isAbsolute(localPath)) return undefined;
   const parts = localPath.split(sep);
-  if (parts.length !== 1) return undefined;
-  const folder = parts[0];
-  return folder !== undefined
-    && (folder === "_types" || typeNamePattern.test(folder))
-    ? folder
+  if (parts.length === 1 && (parts[0] === "types" || parts[0] === "records")) return parts[0];
+  return parts.length === 2 && parts[0] === "records" && typeNamePattern.test(parts[1]!)
+    ? parts.join("/")
     : undefined;
 }
 
@@ -188,10 +185,10 @@ function isIgnoredWatchPath(stableParent: string, root: string, path: string): b
   const resolvedPath = resolve(path);
   if (resolvedPath === stableParent || resolvedPath === root) return false;
   const localPath = relative(root, resolvedPath);
-  return localPath === ".."
-    || isAbsolute(localPath)
-    || localPath.split(sep)[0] === "_blobs"
-    || localPath.split(sep).some((part) => part.startsWith("."));
+  const parts = localPath.split(sep);
+  if (isAbsolute(localPath) || parts.some((part) => part.startsWith("."))) return true;
+  const [folder] = parts;
+  return folder !== "records" && folder !== "types";
 }
 
 function toError(error: unknown): Error {

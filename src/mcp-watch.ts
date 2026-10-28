@@ -87,8 +87,8 @@ export async function watchResources(
       const type = declarationType(uri);
       if (type === undefined || affectedTypes.has(type) || failedUris.has(uri)) continue;
       affectedTypes.add(type);
-      const declarationUri = `autofile:///_types/${type}`;
-      const recordPrefix = `autofile:///${type}/`;
+      const declarationUri = `autofile:///types/${type}`;
+      const recordPrefix = `autofile:///records/${type}/`;
       const listed = await readSafely(() => resources.listTypeResources(type));
       if (listed === readFailed) {
         const affectedUris = new Set([...cache.keys(), ...batch.keys()]);
@@ -193,7 +193,7 @@ function resourceMetadata(resource: StoreResource): ResourceMetadata {
 }
 
 function declarationType(uri: string): string | undefined {
-  const match = /^autofile:\/\/\/_types\/([a-z][a-z0-9-]*)$/u.exec(uri);
+  const match = /^autofile:\/\/\/types\/([a-z][a-z0-9-]*)$/u.exec(uri);
   return match?.[1];
 }
 

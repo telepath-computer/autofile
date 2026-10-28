@@ -135,9 +135,9 @@ async function createFixture(options: {
     await store.createRecord({ type: "tasks", key, record });
   }
   for (const [key, record] of Object.entries(options.recordFiles ?? {})) {
-    await mkdir(join(dataFolder, "tasks"), { recursive: true });
+    await mkdir(join(dataFolder, "records", "tasks"), { recursive: true });
     await writeFile(
-      join(dataFolder, "tasks", `${key}.json`),
+      join(dataFolder, "records", "tasks", `${key}.json`),
       storedRecord(record.title, record.status),
     );
   }
@@ -171,7 +171,7 @@ test("folder watching reports recognized file changes without reading their cont
   timeout: 30_000,
 }, async () => {
   const dataFolder = join(await temp(), "data");
-  await mkdir(join(dataFolder, "undeclared"), { recursive: true });
+  await mkdir(join(dataFolder, "records", "undeclared"), { recursive: true });
   const changes = createChangeLog();
   const errors: Error[] = [];
   const watcher = await watchFolder(dataFolder, (batch) => {
@@ -181,19 +181,19 @@ test("folder watching reports recognized file changes without reading their cont
     }
   }, (error) => errors.push(error));
   try {
-    await mkdir(join(dataFolder, "_blobs"));
-    await writeFile(join(dataFolder, "_blobs", `${"a".repeat(64)}.txt`), "ignored attachment");
-    const path = join(dataFolder, "undeclared", "broken.json");
+    await mkdir(join(dataFolder, "blobs"));
+    await writeFile(join(dataFolder, "blobs", `${"a".repeat(64)}.txt`), "ignored attachment");
+    const path = join(dataFolder, "records", "undeclared", "broken.json");
     await writeFile(path, "not JSON");
     await waitForChanges(changes, 0, [{
-      uri: "autofile:///undeclared/broken",
+      uri: "autofile:///records/undeclared/broken",
       kind: "created",
       listChanged: false,
     }], "physical file creation was filtered by its contents");
     const start = changes.changes.length;
     await unlink(path);
     await waitForChanges(changes, start, [{
-      uri: "autofile:///undeclared/broken",
+      uri: "autofile:///records/undeclared/broken",
       kind: "deleted",
       listChanged: false,
     }], "physical file deletion was not reported");
@@ -212,10 +212,10 @@ test("the watcher maps record and declaration changes", {
   const { changes, dataFolder, errors, store, watcher } = fixture;
   try {
     let start = changes.changes.length;
-    const recordPath = join(dataFolder, "tasks", "created.json");
+    const recordPath = join(dataFolder, "records", "tasks", "created.json");
     await writeFile(recordPath, storedRecord("Created", "active"));
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/created",
+      uri: "autofile:///records/tasks/created",
       kind: "created",
       listChanged: true,
     }], "record creation was not reported");
@@ -223,7 +223,7 @@ test("the watcher maps record and declaration changes", {
     start = changes.changes.length;
     await writeFile(recordPath, storedRecord("Created", "complete", 1));
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/created",
+      uri: "autofile:///records/tasks/created",
       kind: "changed",
       listChanged: false,
     }], "record content change was not reported");
@@ -231,7 +231,7 @@ test("the watcher maps record and declaration changes", {
     start = changes.changes.length;
     await writeFile(recordPath, storedRecord("Renamed", "complete", 2));
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/created",
+      uri: "autofile:///records/tasks/created",
       kind: "changed",
       listChanged: true,
     }], "record title change did not change the resource list");
@@ -239,7 +239,7 @@ test("the watcher maps record and declaration changes", {
     start = changes.changes.length;
     await unlink(recordPath);
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/created",
+      uri: "autofile:///records/tasks/created",
       kind: "deleted",
       listChanged: true,
     }], "record deletion was not reported");
@@ -252,7 +252,7 @@ test("the watcher maps record and declaration changes", {
       schema: taskSchema,
     });
     await waitForChanges(changes, start, [{
-      uri: "autofile:///_types/notes",
+      uri: "autofile:///types/notes",
       kind: "created",
       listChanged: true,
     }], "declaration creation was not reported");
@@ -260,7 +260,7 @@ test("the watcher maps record and declaration changes", {
     start = changes.changes.length;
     await store.updateType({ type: "notes", description: "Changed notes." });
     await waitForChanges(changes, start, [{
-      uri: "autofile:///_types/notes",
+      uri: "autofile:///types/notes",
       kind: "changed",
       listChanged: true,
     }], "declaration description change did not change the resource list");
@@ -268,7 +268,7 @@ test("the watcher maps record and declaration changes", {
     start = changes.changes.length;
     await store.updateType({ type: "notes", title: "Note" });
     await waitForChanges(changes, start, [{
-      uri: "autofile:///_types/notes",
+      uri: "autofile:///types/notes",
       kind: "changed",
       listChanged: true,
     }], "declaration title change did not change the resource list");
@@ -276,7 +276,7 @@ test("the watcher maps record and declaration changes", {
     start = changes.changes.length;
     await store.deleteType({ type: "notes" });
     await waitForChanges(changes, start, [{
-      uri: "autofile:///_types/notes",
+      uri: "autofile:///types/notes",
       kind: "deleted",
       listChanged: true,
     }], "declaration deletion was not reported");
@@ -295,13 +295,13 @@ test("unattached blobs do not produce resource notices", {
   try {
     const start = changes.changes.length;
     const blobName = `${"b".repeat(64)}.txt`;
-    await mkdir(join(dataFolder, "_blobs"), { recursive: true });
-    await writeFile(join(dataFolder, "_blobs", blobName), "unattached contents");
+    await mkdir(join(dataFolder, "blobs"), { recursive: true });
+    await writeFile(join(dataFolder, "blobs", blobName), "unattached contents");
     await store.createRecord({
       type: "tasks", key: "after-blob", record: { title: "After blob", status: "active" },
     });
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/after-blob",
+      uri: "autofile:///records/tasks/after-blob",
       kind: "created",
       listChanged: true,
     }], "an unattached blob produced a resource notice");
@@ -323,7 +323,7 @@ test("a titleField change updates the resource list", {
     const start = changes.changes.length;
     await store.updateType({ type: "tasks", titleField: "status" });
     await waitForChanges(changes, start, [{
-      uri: "autofile:///_types/tasks",
+      uri: "autofile:///types/tasks",
       kind: "changed",
       listChanged: true,
     }], "changing titleField did not change the resource list");
@@ -340,12 +340,12 @@ test("record validity changes update the resource list", {
     records: { changing: { title: "Before", status: "active" } },
   });
   const { changes, dataFolder, watcher } = fixture;
-  const recordPath = join(dataFolder, "tasks", "changing.json");
+  const recordPath = join(dataFolder, "records", "tasks", "changing.json");
   try {
     let start = changes.changes.length;
     await writeFile(recordPath, "{\n");
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/changing",
+      uri: "autofile:///records/tasks/changing",
       kind: "changed",
       listChanged: true,
     }], "a record that stopped being listable did not change the resource list");
@@ -353,7 +353,7 @@ test("record validity changes update the resource list", {
     start = changes.changes.length;
     await writeFile(recordPath, storedRecord("After", "complete", 1));
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/changing",
+      uri: "autofile:///records/tasks/changing",
       kind: "changed",
       listChanged: true,
     }], "a record that became listable did not change the resource list");
@@ -366,7 +366,7 @@ test("a failed focused read of a new resource emits a hint and marks its metadat
   timeout: 30_000,
 }, async () => {
   let failNextRead = true;
-  const uri = "autofile:///tasks/created";
+  const uri = "autofile:///records/tasks/created";
   const fixture = await createFixture({
     records: { existing: { title: "Existing", status: "active" } },
     watchedResources: (store) => new Proxy(store, {
@@ -385,7 +385,7 @@ test("a failed focused read of a new resource emits a hint and marks its metadat
     }),
   });
   const { changes, dataFolder, errors, watcher } = fixture;
-  const path = join(dataFolder, "tasks", "created.json");
+  const path = join(dataFolder, "records", "tasks", "created.json");
   try {
     let start = changes.changes.length;
     await writeFile(path, storedRecord("First title", "active"));
@@ -421,7 +421,7 @@ test("a failed focused read of a title change emits a hint and marks its metadat
       get(target, property, receiver) {
         if (property === "getResourceMetadata") {
           return async (uri: string) => {
-            if (uri === "autofile:///tasks/flaky" && failNextRead) {
+            if (uri === "autofile:///records/tasks/flaky" && failNextRead) {
               failNextRead = false;
               throw new Error("metadata temporarily unavailable");
             }
@@ -433,12 +433,12 @@ test("a failed focused read of a title change emits a hint and marks its metadat
     }),
   });
   const { changes, dataFolder, errors, watcher } = fixture;
-  const path = join(dataFolder, "tasks", "flaky.json");
+  const path = join(dataFolder, "records", "tasks", "flaky.json");
   try {
     let start = changes.changes.length;
     await writeFile(path, storedRecord("First title", "complete", 1));
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/flaky",
+      uri: "autofile:///records/tasks/flaky",
       kind: "changed",
       listChanged: true,
     }], "a failed title read suppressed its resource-list hint");
@@ -447,7 +447,7 @@ test("a failed focused read of a title change emits a hint and marks its metadat
     start = changes.changes.length;
     await writeFile(path, storedRecord("Second title", "archived", 2));
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/flaky",
+      uri: "autofile:///records/tasks/flaky",
       kind: "changed",
       listChanged: true,
     }], "the next successful read did not replace the unknown cache entry");
@@ -466,7 +466,7 @@ test("a deletion after a failed focused read still emits a hint", {
       get(target, property, receiver) {
         if (property === "getResourceMetadata") {
           return async (uri: string) => {
-            if (uri === "autofile:///tasks/doomed" && failNextRead) {
+            if (uri === "autofile:///records/tasks/doomed" && failNextRead) {
               failNextRead = false;
               throw new Error("metadata temporarily unavailable");
             }
@@ -478,12 +478,12 @@ test("a deletion after a failed focused read still emits a hint", {
     }),
   });
   const { changes, dataFolder, errors, watcher } = fixture;
-  const path = join(dataFolder, "tasks", "doomed.json");
+  const path = join(dataFolder, "records", "tasks", "doomed.json");
   try {
     let start = changes.changes.length;
     await writeFile(path, storedRecord("Changed title", "complete", 1));
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/doomed",
+      uri: "autofile:///records/tasks/doomed",
       kind: "changed",
       listChanged: true,
     }], "the failed focused read suppressed its resource hint");
@@ -492,7 +492,7 @@ test("a deletion after a failed focused read still emits a hint", {
     start = changes.changes.length;
     await unlink(path);
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/doomed",
+      uri: "autofile:///records/tasks/doomed",
       kind: "deleted",
       listChanged: true,
     }], "deletion after a failed focused read was not reported");
@@ -527,7 +527,7 @@ test("a failed declaration read emits a hint and marks that type's metadata unkn
     let start = changes.changes.length;
     await store.updateType({ type: "tasks", titleField: "status" });
     await waitForChanges(changes, start, [{
-      uri: "autofile:///_types/tasks",
+      uri: "autofile:///types/tasks",
       kind: "changed",
       listChanged: true,
     }], "a failed type metadata read suppressed the declaration hint");
@@ -539,7 +539,7 @@ test("a failed declaration read emits a hint and marks that type's metadata unkn
     start = changes.changes.length;
     await store.updateType({ type: "tasks", titleField: "title" });
     await waitForChanges(changes, start, [{
-      uri: "autofile:///_types/tasks",
+      uri: "autofile:///types/tasks",
       kind: "changed",
       listChanged: true,
     }], "the next successful type read did not replace the unknown cache entries", waitTimeoutMs, true);
@@ -555,39 +555,39 @@ test("the watcher ignores every path Autofile does not read", {
   const { changes, dataFolder, errors, watcher } = fixture;
   try {
     await Promise.all([
-      mkdir(join(dataFolder, "tasks", "nested"), { recursive: true }),
-      mkdir(join(dataFolder, "undeclared"), { recursive: true }),
-      mkdir(join(dataFolder, "_blobs"), { recursive: true }),
+      mkdir(join(dataFolder, "records", "tasks", "nested"), { recursive: true }),
+      mkdir(join(dataFolder, "records", "undeclared"), { recursive: true }),
+      mkdir(join(dataFolder, "blobs"), { recursive: true }),
     ]);
     await Promise.all([
       writeFile(join(dirname(dataFolder), "outside.json"), "ignored"),
       writeFile(join(dataFolder, ".DS_Store"), "ignored"),
-      writeFile(join(dataFolder, "_types", "broken.json"), "{\n"),
-      writeFile(join(dataFolder, "tasks", ".draft.json"), storedRecord("Draft", "active")),
-      writeFile(join(dataFolder, "tasks", "Upper.json"), storedRecord("Upper", "active")),
-      writeFile(join(dataFolder, "tasks", "broken.json"), "{\n"),
-      writeFile(join(dataFolder, "tasks", "notes.txt"), "ignored"),
-      writeFile(join(dataFolder, "tasks", "nested", "extra.json"), storedRecord("Extra", "active")),
-      writeFile(join(dataFolder, "undeclared", "orphan.json"), storedRecord("Orphan", "active")),
-      writeFile(join(dataFolder, "_blobs", "not-a-hash.txt"), "ignored"),
+      writeFile(join(dataFolder, "types", "broken.json"), "{\n"),
+      writeFile(join(dataFolder, "records", "tasks", ".draft.json"), storedRecord("Draft", "active")),
+      writeFile(join(dataFolder, "records", "tasks", "Upper.json"), storedRecord("Upper", "active")),
+      writeFile(join(dataFolder, "records", "tasks", "broken.json"), "{\n"),
+      writeFile(join(dataFolder, "records", "tasks", "notes.txt"), "ignored"),
+      writeFile(join(dataFolder, "records", "tasks", "nested", "extra.json"), storedRecord("Extra", "active")),
+      writeFile(join(dataFolder, "records", "undeclared", "orphan.json"), storedRecord("Orphan", "active")),
+      writeFile(join(dataFolder, "blobs", "not-a-hash.txt"), "ignored"),
     ]);
 
     const start = changes.changes.length;
-    await writeFile(join(dataFolder, "tasks", "sentinel.json"), storedRecord("Sentinel", "active"));
+    await writeFile(join(dataFolder, "records", "tasks", "sentinel.json"), storedRecord("Sentinel", "active"));
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/sentinel",
+      uri: "autofile:///records/tasks/sentinel",
       kind: "created",
       listChanged: true,
     }], "the sentinel resource was not reported after ignored files");
     const ignoredUris = new Set([
-      "autofile:///tasks/.draft",
-      "autofile:///tasks/Upper",
-      "autofile:///tasks/broken",
-      "autofile:///tasks/notes",
-      "autofile:///tasks/nested/extra",
-      "autofile:///undeclared/orphan",
-      "autofile:///_types/broken",
-      "autofile:///_blobs/not-a-hash.txt",
+      "autofile:///records/tasks/.draft",
+      "autofile:///records/tasks/Upper",
+      "autofile:///records/tasks/broken",
+      "autofile:///records/tasks/notes",
+      "autofile:///records/tasks/nested/extra",
+      "autofile:///records/undeclared/orphan",
+      "autofile:///types/broken",
+      "autofile:///blobs/not-a-hash.txt",
     ]);
     assert.equal(
       changes.changes.some(({ uri }) => ignoredUris.has(uri)),
@@ -620,25 +620,25 @@ test("a declaration changes whether pre-existing record files appear in the reso
       schema: taskSchema,
     });
     await waitForChanges(changes, start, [
-      { uri: "autofile:///_types/tasks", kind: "created", listChanged: true },
-      { uri: "autofile:///tasks/alpha", kind: "created", listChanged: true },
-      { uri: "autofile:///tasks/bravo", kind: "created", listChanged: true },
+      { uri: "autofile:///types/tasks", kind: "created", listChanged: true },
+      { uri: "autofile:///records/tasks/alpha", kind: "created", listChanged: true },
+      { uri: "autofile:///records/tasks/bravo", kind: "created", listChanged: true },
     ], "declaration creation did not report the records that became resources");
     assert.deepEqual(
-      (await store.listResources()).filter(({ uri }) => uri.startsWith("autofile:///tasks/"))
+      (await store.listResources()).filter(({ uri }) => uri.startsWith("autofile:///records/tasks/"))
         .map(({ uri }) => uri),
-      ["autofile:///tasks/alpha", "autofile:///tasks/bravo"],
+      ["autofile:///records/tasks/alpha", "autofile:///records/tasks/bravo"],
     );
 
     start = changes.changes.length;
-    await unlink(join(dataFolder, "_types", "tasks.json"));
+    await unlink(join(dataFolder, "types", "tasks.json"));
     await waitForChanges(changes, start, [
-      { uri: "autofile:///_types/tasks", kind: "deleted", listChanged: true },
-      { uri: "autofile:///tasks/alpha", kind: "deleted", listChanged: true },
-      { uri: "autofile:///tasks/bravo", kind: "deleted", listChanged: true },
+      { uri: "autofile:///types/tasks", kind: "deleted", listChanged: true },
+      { uri: "autofile:///records/tasks/alpha", kind: "deleted", listChanged: true },
+      { uri: "autofile:///records/tasks/bravo", kind: "deleted", listChanged: true },
     ], "declaration deletion did not report the records that stopped being resources");
     assert.deepEqual(
-      (await store.listResources()).filter(({ uri }) => uri.startsWith("autofile:///tasks/")),
+      (await store.listResources()).filter(({ uri }) => uri.startsWith("autofile:///records/tasks/")),
       [],
     );
   } finally {
@@ -671,12 +671,12 @@ test("a burst of many resources is reported without another whole-store scan", {
     assert.equal(listResourcesCalls, 1);
     await Promise.all(restoredKeys.map(async (key, index) => {
       await writeFile(
-        join(dataFolder, "tasks", `${key}.json`),
+        join(dataFolder, "records", "tasks", `${key}.json`),
         storedRecord(`Restored ${String(index)}`, "active", index),
       );
     }));
     await waitForChanges(changes, 0, restoredKeys.map((key) => ({
-      uri: `autofile:///tasks/${key}`,
+      uri: `autofile:///records/tasks/${key}`,
       kind: "created" as const,
       listChanged: true,
     })), "a burst of restored resources was not fully reported");
@@ -684,22 +684,22 @@ test("a burst of many resources is reported without another whole-store scan", {
     let start = changes.changes.length;
     await Promise.all(declarationTypes.map(async (type) => {
       await writeFile(
-        join(dataFolder, "_types", `${type}.json`),
+        join(dataFolder, "types", `${type}.json`),
         storedDeclaration(`${type} records.`),
       );
     }));
     await waitForChanges(changes, start, declarationTypes.map((type) => ({
-      uri: `autofile:///_types/${type}`,
+      uri: `autofile:///types/${type}`,
       kind: "created" as const,
       listChanged: true,
     })), "a burst of declarations was not fully reported");
 
     start = changes.changes.length;
     await Promise.all(declarationTypes.map(async (type) => {
-      await unlink(join(dataFolder, "_types", `${type}.json`));
+      await unlink(join(dataFolder, "types", `${type}.json`));
     }));
     await waitForChanges(changes, start, declarationTypes.map((type) => ({
-      uri: `autofile:///_types/${type}`,
+      uri: `autofile:///types/${type}`,
       kind: "deleted" as const,
       listChanged: true,
     })), "a burst of declaration deletions was not fully reported");
@@ -707,22 +707,22 @@ test("a burst of many resources is reported without another whole-store scan", {
     start = changes.changes.length;
     await Promise.all(Array.from({ length: 8 }, async (_, index) => {
       await store.updateRecord({
-        uri: "autofile:///tasks/atomic",
+        uri: "autofile:///records/tasks/atomic",
         patch: { status: `replacement-${String(index)}` },
       });
     }));
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/atomic",
+      uri: "autofile:///records/tasks/atomic",
       kind: "changed",
       listChanged: false,
     }], "repeated atomic replacements did not produce a settled resource hint");
 
-    await writeFile(join(dataFolder, "tasks", "ephemeral.json"), storedRecord("Gone", "soon"));
-    await unlink(join(dataFolder, "tasks", "ephemeral.json"));
+    await writeFile(join(dataFolder, "records", "tasks", "ephemeral.json"), storedRecord("Gone", "soon"));
+    await unlink(join(dataFolder, "records", "tasks", "ephemeral.json"));
     start = changes.changes.length;
-    await writeFile(join(dataFolder, "tasks", "after-burst.json"), storedRecord("After", "active"));
+    await writeFile(join(dataFolder, "records", "tasks", "after-burst.json"), storedRecord("After", "active"));
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/after-burst",
+      uri: "autofile:///records/tasks/after-burst",
       kind: "created",
       listChanged: true,
     }], "watching did not continue after a rapid create and delete", waitTimeoutMs, true);
@@ -744,18 +744,18 @@ test("the watcher resumes after a type folder is deleted and recreated", {
   const { changes, dataFolder, watcher } = fixture;
   try {
     let start = changes.changes.length;
-    await rm(join(dataFolder, "tasks"), { recursive: true });
+    await rm(join(dataFolder, "records", "tasks"), { recursive: true });
     await waitForChanges(changes, start, ["alpha", "bravo"].map((key) => ({
-      uri: `autofile:///tasks/${key}`,
+      uri: `autofile:///records/tasks/${key}`,
       kind: "deleted" as const,
       listChanged: true,
     })), "type-folder deletion did not report its records");
 
     start = changes.changes.length;
-    await mkdir(join(dataFolder, "tasks"));
-    await writeFile(join(dataFolder, "tasks", "reborn.json"), storedRecord("Reborn", "active"));
+    await mkdir(join(dataFolder, "records", "tasks"));
+    await writeFile(join(dataFolder, "records", "tasks", "reborn.json"), storedRecord("Reborn", "active"));
     await waitForChanges(changes, start, [{
-      uri: "autofile:///tasks/reborn",
+      uri: "autofile:///records/tasks/reborn",
       kind: "created",
       listChanged: true,
     }], "the recreated type folder was no longer watched");
@@ -775,8 +775,8 @@ test("the watcher resumes after the data folder is deleted and recreated", {
     let start = changes.changes.length;
     await rm(dataFolder, { recursive: true });
     await waitForChanges(changes, start, [
-      { uri: "autofile:///_types/tasks", kind: "deleted", listChanged: true },
-      { uri: "autofile:///tasks/existing", kind: "deleted", listChanged: true },
+      { uri: "autofile:///types/tasks", kind: "deleted", listChanged: true },
+      { uri: "autofile:///records/tasks/existing", kind: "deleted", listChanged: true },
     ], "data-folder deletion did not report its resources");
 
     start = changes.changes.length;
@@ -792,8 +792,8 @@ test("the watcher resumes after the data folder is deleted and recreated", {
       record: { title: "New", status: "active" },
     });
     await waitForChanges(changes, start, [
-      { uri: "autofile:///_types/reborn", kind: "created", listChanged: true },
-      { uri: "autofile:///reborn/new", kind: "created", listChanged: true },
+      { uri: "autofile:///types/reborn", kind: "created", listChanged: true },
+      { uri: "autofile:///records/reborn/new", kind: "created", listChanged: true },
     ], "notices stopped after data-folder recreation");
     assert.deepEqual(errors, []);
   } finally {

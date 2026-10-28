@@ -113,7 +113,7 @@ async function runStdio(): Promise<void> {
     throw error;
   });
   handle = serveStdio(async () => {
-    const server = await buildServer(store);
+    const server = await buildServer(store, { blobLocation: "stdio" });
     connectedServer = server;
     return server;
   }, {

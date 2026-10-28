@@ -45,13 +45,13 @@ test("numeric schemas cannot persist NaN, infinities, or negative zero as change
     schema: { type: "object", required: ["reading"], properties: { reading: { type: "number" } } },
   });
   const record = await store.records.create("numbers", { reading: 12 }, { key: "kept" });
-  const path = join(root, "data", "numbers", "kept.json");
+  const path = join(root, "data", "records", "numbers", "kept.json");
   const previous = await readFile(path, "utf8");
   for (const reading of [NaN, Infinity, -Infinity, -0]) {
     await assert.rejects(store.records.create("numbers", { reading }, { key: "refused" }), isJsonRefusal);
     await assert.rejects(store.records.update(record.uri, { reading }), isJsonRefusal);
     assert.equal(await readFile(path, "utf8"), previous);
-    assert.deepEqual(await readdir(join(root, "data", "numbers")), ["kept.json"]);
+    assert.deepEqual(await readdir(join(root, "data", "records", "numbers")), ["kept.json"]);
     assert.deepEqual(await store.records.get(record.uri), record);
   }
 });
@@ -63,7 +63,7 @@ test("updates refuse nonfinite values retained from external JSON without rewrit
     schema: { type: "object", properties: { reading: { type: "number" }, note: { type: "string" } } },
   });
   const record = await store.records.create("numbers", { reading: 12 }, { key: "external" });
-  const path = join(root, "data", "numbers", "external.json");
+  const path = join(root, "data", "records", "numbers", "external.json");
   const original = await readFile(path, "utf8");
   for (const literal of ["1e400", "-1e400", "-0"]) {
     const external = original.replace('"reading": 12', `"reading": ${literal}`);
@@ -122,14 +122,14 @@ test("create and update refuse every lossy input without changing record files",
   const { root, store } = await fixture();
   await store.types.create("notes", { description: "Plain data.", schema: { type: "object" } });
   const record = await store.records.create("notes", { name: "Kept", nested: { reading: 12 } }, { key: "kept" });
-  const path = join(root, "data", "notes", "kept.json");
+  const path = join(root, "data", "records", "notes", "kept.json");
   const previous = await readFile(path, "utf8");
   for (const [index, [name, input]] of invalidInputs.entries()) {
     await t.test(name, async () => {
       await assert.rejects(store.records.create("notes", input() as JsonObject, { key: `refused-${index}` }), isJsonRefusal);
       await assert.rejects(store.records.update(record.uri, input() as JsonObject), isJsonRefusal);
       assert.equal(await readFile(path, "utf8"), previous);
-      assert.deepEqual(await readdir(join(root, "data", "notes")), ["kept.json"]);
+      assert.deepEqual(await readdir(join(root, "data", "records", "notes")), ["kept.json"]);
       assert.deepEqual(await store.records.get(record.uri), record);
     });
   }
@@ -146,7 +146,7 @@ test("input rejection never calls getters or toJSON and precedes storage initial
     { nested: Object.defineProperty({}, "toJSON", { get: run }) },
   ]) {
     await assert.rejects(store.records.create("notes", value as JsonObject), isJsonRefusal);
-    await assert.rejects(store.records.update("autofile:///notes/missing", value as JsonObject), isJsonRefusal);
+    await assert.rejects(store.records.update("autofile:///records/notes/missing", value as JsonObject), isJsonRefusal);
   }
   assert.equal(calls, 0);
   assert.deepEqual(await readdir(root), []);
@@ -158,13 +158,13 @@ test("raw JSON fragments cannot bypass ordinary JSON object serialization", asyn
   const { root, store } = await fixture();
   await store.types.create("notes", { description: "Plain data.", schema: { type: "object" } });
   const record = await store.records.create("notes", { reading: 12 }, { key: "kept" });
-  const path = join(root, "data", "notes", "kept.json");
+  const path = join(root, "data", "records", "notes", "kept.json");
   const previous = await readFile(path, "utf8");
   const value = { nested: json.rawJSON("123") } as JsonObject;
   await assert.rejects(store.records.create("notes", value, { key: "refused" }), isJsonRefusal);
   await assert.rejects(store.records.update(record.uri, value), isJsonRefusal);
   assert.equal(await readFile(path, "utf8"), previous);
-  assert.deepEqual(await readdir(join(root, "data", "notes")), ["kept.json"]);
+  assert.deepEqual(await readdir(join(root, "data", "records", "notes")), ["kept.json"]);
 });
 
 test("record writes snapshot validated input before callers can mutate it during I/O", async () => {
@@ -208,7 +208,7 @@ test("record writes preserve shared JSON values containing attachment addresses"
         ? await store.records.create("documents", value, { key: "created" })
         : await store.records.update((await store.records.create("documents", {}, { key: "updated" })).uri, value);
       const first = result.value.first as JsonObject;
-      assert.match(String(first.scan), /^autofile:\/\/\/_blobs\//u);
+      assert.match(String(first.scan), /^autofile:\/\/\/blobs\//u);
       assert.deepEqual(result.value.second, { scan: attachment });
       assert.deepEqual(value, { first: { scan: attachment }, second: { scan: attachment } });
       assert.equal(value.first, value.second);

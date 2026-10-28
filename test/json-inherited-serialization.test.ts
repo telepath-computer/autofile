@@ -34,7 +34,7 @@ import { Autofile, AutofileError } from "@telepath-computer/autofile";
           Object.defineProperty(prototype, "toJSON", { ...descriptor, configurable: true });
           const value = { nested: [1] };
           await assert.rejects(store.records.create("notes", value), isRefusal);
-          await assert.rejects(store.records.update("autofile:///notes/missing", value), isRefusal);
+          await assert.rejects(store.records.update("autofile:///records/notes/missing", value), isRefusal);
         }
       } finally {
         if (original === undefined) delete prototype.toJSON;
