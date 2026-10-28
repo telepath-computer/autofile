@@ -4,6 +4,8 @@ export { Autofile, AutofileError } from "./store.js";
 export type {
   AutofileProblem,
   AutofileRecord,
+  BlobRange,
+  BlobStat,
   ChangeEvent,
   RecordQuery,
   RecordQueryResult,

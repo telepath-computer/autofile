@@ -60,7 +60,7 @@ async function createTasksType(store: Store): Promise<void> {
     description: "Things to do.",
     titleField: "title",
     schema: taskSchema,
-  }), { uri: "autofile:///_types/tasks" });
+  }), { uri: "autofile:///types/tasks" });
 }
 
 async function createDocumentsType(store: Store): Promise<void> {
@@ -86,17 +86,17 @@ async function createDocumentsType(store: Store): Promise<void> {
       },
       additionalProperties: false,
     },
-  }), { uri: "autofile:///_types/documents" });
+  }), { uri: "autofile:///types/documents" });
 }
 
 function expectedBlobUri(bytes: Buffer, extension?: string): string {
   const digest = createHash("sha256").update(bytes).digest("hex");
-  return `autofile:///_blobs/${digest}${extension === undefined ? "" : `.${extension}`}`;
+  return `autofile:///blobs/${digest}${extension === undefined ? "" : `.${extension}`}`;
 }
 
 async function storedBlobNames(dataFolder: string): Promise<string[]> {
   try {
-    return (await readdir(join(dataFolder, "_blobs"))).filter((name) => !name.startsWith("."));
+    return (await readdir(join(dataFolder, "blobs"))).filter((name) => !name.startsWith("."));
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
     throw error;
@@ -175,7 +175,7 @@ test("the fixture uses the data and lock locations resolved from AUTOFILE_HOME",
     await createTasksType(store);
 
     assert.equal((await stat(dataFolder)).isDirectory(), true);
-    assert.equal((await stat(join(dataFolder, "_types", "tasks.json"))).isFile(), true);
+    assert.equal((await stat(join(dataFolder, "types", "tasks.json"))).isFile(), true);
     assert.equal((await readdir(autofileHome)).includes("write.lock"), false);
   } finally {
     if (previousAutofileHome === undefined) delete process.env.AUTOFILE_HOME;
@@ -191,15 +191,15 @@ test("type operations persist exact declarations and list recognized files in na
     title: "Task",
     titleField: "title",
     schema: taskSchema,
-  }), { uri: "autofile:///_types/tasks" });
+  }), { uri: "autofile:///types/tasks" });
   assert.deepEqual(await store.createType({
     type: "contacts",
     description: "People.",
     schema: { type: "object" },
-  }), { uri: "autofile:///_types/contacts" });
+  }), { uri: "autofile:///types/contacts" });
 
   assert.equal(
-    await readFile(join(dataFolder, "_types", "tasks.json"), "utf8"),
+    await readFile(join(dataFolder, "types", "tasks.json"), "utf8"),
     `${JSON.stringify({
       description: "Things to do.",
       title: "Task",
@@ -208,7 +208,7 @@ test("type operations persist exact declarations and list recognized files in na
     }, null, 2)}\n`,
   );
   assert.deepEqual(await store.getType({ type: "tasks" }), {
-    uri: "autofile:///_types/tasks",
+    uri: "autofile:///types/tasks",
     description: "Things to do.",
     title: "Task",
     titleField: "title",
@@ -216,9 +216,9 @@ test("type operations persist exact declarations and list recognized files in na
   });
   assert.deepEqual(await store.listTypes({}), {
     types: [
-      { uri: "autofile:///_types/contacts", type: "contacts", description: "People." },
+      { uri: "autofile:///types/contacts", type: "contacts", description: "People." },
       {
-        uri: "autofile:///_types/tasks",
+        uri: "autofile:///types/tasks",
         type: "tasks",
         description: "Things to do.",
         title: "Task",
@@ -226,9 +226,9 @@ test("type operations persist exact declarations and list recognized files in na
     ],
   });
   assert.deepEqual(
-    (await store.listResources()).find(({ uri }) => uri === "autofile:///_types/tasks"),
+    (await store.listResources()).find(({ uri }) => uri === "autofile:///types/tasks"),
     {
-      uri: "autofile:///_types/tasks",
+      uri: "autofile:///types/tasks",
       name: "Type: tasks",
       title: "Task",
       mimeType: "application/json",
@@ -236,10 +236,10 @@ test("type operations persist exact declarations and list recognized files in na
     },
   );
 
-  await writeFile(join(dataFolder, "_types", ".draft.json"), "{}\n");
-  await writeFile(join(dataFolder, "_types", "Bad.json"), "{}\n");
-  await writeFile(join(dataFolder, "_types", "notes.txt"), "ignored\n");
-  await mkdir(join(dataFolder, "_types", "nested.json"));
+  await writeFile(join(dataFolder, "types", ".draft.json"), "{}\n");
+  await writeFile(join(dataFolder, "types", "Bad.json"), "{}\n");
+  await writeFile(join(dataFolder, "types", "notes.txt"), "ignored\n");
+  await mkdir(join(dataFolder, "types", "nested.json"));
   assert.equal((await store.listTypes({})).types.length, 2);
 });
 
@@ -272,7 +272,7 @@ test("type names, duplicate types, and missing types are refused as JSON errors"
   assert.match(errorMessages(await store.updateType({ type: "missing", description: "No." }))[0] ?? "", /does not exist/u);
   assert.match(errorMessages(await store.deleteType({ type: "missing" }))[0] ?? "", /does not exist/u);
 
-  await writeFile(join(dataFolder, "_types", "broken.json"), "{\n");
+  await writeFile(join(dataFolder, "types", "broken.json"), "{\n");
   assert.match(errorMessages(await store.getType({ type: "broken" }))[0] ?? "", /type declaration is unavailable/u);
 });
 
@@ -286,11 +286,11 @@ test("argument refusals name the argument that must be corrected", async () => {
     record: [] as unknown as JsonObject,
   }), { errors: [{ message: "record: must be a JSON object" }] });
   assert.deepEqual(await store.updateRecord({
-    uri: "autofile:///tasks/missing",
+    uri: "autofile:///records/tasks/missing",
     patch: [] as unknown as JsonObject,
   }), {
     errors: [{
-      uri: "autofile:///tasks/missing",
+      uri: "autofile:///records/tasks/missing",
       message: "patch: must be a JSON object",
     }],
   });
@@ -357,9 +357,9 @@ test("update_type preserves, replaces, and removes a type title", async () => {
   assert.deepEqual(await store.updateType({
     type: "journal-entries",
     description: "Dated journal entries.",
-  }), { uri: "autofile:///_types/journal-entries", errors: [] });
+  }), { uri: "autofile:///types/journal-entries", errors: [] });
   assert.deepEqual(await store.getType({ type: "journal-entries" }), {
-    uri: "autofile:///_types/journal-entries",
+    uri: "autofile:///types/journal-entries",
     description: "Dated journal entries.",
     title: "Journal entry",
     schema: { type: "object" },
@@ -368,16 +368,16 @@ test("update_type preserves, replaces, and removes a type title", async () => {
   assert.deepEqual(await store.updateType({
     type: "journal-entries",
     title: "Diary entry",
-  }), { uri: "autofile:///_types/journal-entries", errors: [] });
+  }), { uri: "autofile:///types/journal-entries", errors: [] });
   assert.deepEqual(await store.getType({ type: "journal-entries" }), {
-    uri: "autofile:///_types/journal-entries",
+    uri: "autofile:///types/journal-entries",
     description: "Dated journal entries.",
     title: "Diary entry",
     schema: { type: "object" },
   });
   assert.deepEqual(await store.listTypes({}), {
     types: [{
-      uri: "autofile:///_types/journal-entries",
+      uri: "autofile:///types/journal-entries",
       type: "journal-entries",
       description: "Dated journal entries.",
       title: "Diary entry",
@@ -387,15 +387,15 @@ test("update_type preserves, replaces, and removes a type title", async () => {
   assert.deepEqual(await store.updateType({
     type: "journal-entries",
     title: null,
-  }), { uri: "autofile:///_types/journal-entries", errors: [] });
+  }), { uri: "autofile:///types/journal-entries", errors: [] });
   assert.deepEqual(await store.getType({ type: "journal-entries" }), {
-    uri: "autofile:///_types/journal-entries",
+    uri: "autofile:///types/journal-entries",
     description: "Dated journal entries.",
     schema: { type: "object" },
   });
   assert.deepEqual(
     JSON.parse(await readFile(
-      join(dataFolder, "_types", "journal-entries.json"),
+      join(dataFolder, "types", "journal-entries.json"),
       "utf8",
     )) as unknown,
     {
@@ -424,12 +424,12 @@ test("schemas use draft 2020-12, internal refs, known formats, and readable vali
     type: "identities",
     description: "Online identities.",
     schema,
-  }), { uri: "autofile:///_types/identities" });
+  }), { uri: "autofile:///types/identities" });
   assert.deepEqual(await store.createRecord({
     type: "identities",
     key: "valid",
     record: { email: "person@example.com", website: "https://example.com/person" },
-  }), { uri: "autofile:///identities/valid" });
+  }), { uri: "autofile:///records/identities/valid" });
 
   assert.match(errorMessages(await store.createRecord({
     type: "identities",
@@ -455,7 +455,7 @@ test("schemas use draft 2020-12, internal refs, known formats, and readable vali
       $defs: { target: { $anchor: "target", type: "object" } },
       $ref: "#target",
     },
-  }), { uri: "autofile:///_types/anchor-data" });
+  }), { uri: "autofile:///types/anchor-data" });
 
   assert.deepEqual(await store.createType({
     type: "recursive",
@@ -465,7 +465,7 @@ test("schemas use draft 2020-12, internal refs, known formats, and readable vali
       type: "object",
       properties: { next: { $ref: "" } },
     },
-  }), { uri: "autofile:///_types/recursive" });
+  }), { uri: "autofile:///types/recursive" });
 });
 
 test("invalid schemas, unknown formats, external refs, and another dialect are refused", async () => {
@@ -510,7 +510,7 @@ test("invalid schemas, unknown formats, external refs, and another dialect are r
     schema: { type: "not-a-json-type" },
   }), {
     errors: [{
-      uri: "autofile:///_types/invalid-schema",
+      uri: "autofile:///types/invalid-schema",
       message: "schema.type: expected one of \"array\", \"boolean\", \"integer\", \"null\", \"number\", \"object\", or \"string\"",
     }],
   });
@@ -523,14 +523,14 @@ test("URI and blob formats on the root report their string requirement without a
       type,
       description: `Root values marked as ${format}.`,
       schema: { format },
-    }), { uri: `autofile:///_types/${type}` });
+    }), { uri: `autofile:///types/${type}` });
     assert.deepEqual(await store.createRecord({
       type,
       key: "object",
       record: {},
     }), {
       errors: [{
-        uri: `autofile:///${type}/object`,
+        uri: `autofile:///records/${type}/object`,
         message: "must be a string",
       }],
     });
@@ -554,9 +554,9 @@ test("record writes accept uploaded attachment URIs through nested refs, arrays,
         { file: await store.autofile.blobs.put(text, "text/plain") },
       ],
     },
-  }), { uri: "autofile:///documents/uploaded" });
+  }), { uri: "autofile:///records/documents/uploaded" });
 
-  const record = await store.getRecord({ uri: "autofile:///documents/uploaded" });
+  const record = await store.getRecord({ uri: "autofile:///records/documents/uploaded" });
   assert.ok("value" in record);
   assert.deepEqual(record.value, {
     file: expectedBlobUri(pdf, "pdf"),
@@ -571,7 +571,7 @@ test("record writes accept uploaded attachment URIs through nested refs, arrays,
     expectedBlobUri(text, "txt").split("/").at(-1),
   ].sort());
   assert.deepEqual(await readFile(
-    join(dataFolder, "_blobs", expectedBlobUri(pdf, "pdf").split("/").at(-1) ?? ""),
+    join(dataFolder, "blobs", expectedBlobUri(pdf, "pdf").split("/").at(-1) ?? ""),
   ), pdf);
 });
 
@@ -587,18 +587,18 @@ test("record writes share attachment URI inputs and retain existing attachments 
   const uri = expectedBlobUri(bytes, "bin");
   assert.deepEqual(await store.createRecord({
     type: "documents", key: "existing", record: { file: uri },
-  }), { uri: "autofile:///documents/existing" });
+  }), { uri: "autofile:///records/documents/existing" });
   assert.deepEqual(await store.updateRecord({
-    uri: "autofile:///documents/source",
+    uri: "autofile:///records/documents/source",
     patch: { file: uri, attachments: [uri] },
-  }), { uri: "autofile:///documents/source" });
+  }), { uri: "autofile:///records/documents/source" });
 
   const invalid: Array<[string, JsonValue, RegExp]> = [
     ["relative", "relative/file.pdf", /file/u],
     ["missing-path", join(root, "missing.pdf"), /blob|file|attachments/u],
-    ["missing-uri", `autofile:///_blobs/${"a".repeat(64)}.pdf`, /does not exist/u],
-    ["short-uri", "autofile:///_blobs/abcd.pdf", /file|blob/u],
-    ["uppercase-uri", `autofile:///_blobs/${"A".repeat(64)}.PDF`, /file|blob/u],
+    ["missing-uri", `autofile:///blobs/${"a".repeat(64)}.pdf`, /does not exist/u],
+    ["short-uri", "autofile:///blobs/abcd.pdf", /file|blob/u],
+    ["uppercase-uri", `autofile:///blobs/${"A".repeat(64)}.PDF`, /file|blob/u],
     ["not-base64", "data:application/pdf;base64,%%%", /file|blob/u],
     ["noncanonical-base64", "data:application/pdf;base64,AB==", /file|blob/u],
     ["not-base64-data", "data:application/pdf,AA==", /file|blob/u],
@@ -667,10 +667,10 @@ test("refused and duplicate record writes leave the blob folder unchanged", asyn
     key: "taken",
     record: { file: refusedUri },
   }))[0] ?? "", /already exists/u);
-  const recordPath = join(dataFolder, "documents", "taken.json");
+  const recordPath = join(dataFolder, "records", "documents", "taken.json");
   const recordBefore = await readFile(recordPath, "utf8");
   assert.match(errorMessages(await store.updateRecord({
-    uri: "autofile:///documents/taken",
+    uri: "autofile:///records/documents/taken",
     patch: {
       attachments: [
         refusedUri,
@@ -723,12 +723,12 @@ test("conditional attachment annotations check only the selected field and its b
   const uri = await store.autofile.blobs.put(Buffer.from("first"), "text/plain");
   assert.deepEqual(await store.createRecord({
     type: "conditional-blobs", key: "accepted", record: { first: uri, second: "data:text/plain;base64,U2Vjb25kCg==" },
-  }), { uri: "autofile:///conditional-blobs/accepted" });
-  const refusal = await store.updateRecord({ uri: "autofile:///conditional-blobs/accepted", patch: { first: "ordinary text" } });
+  }), { uri: "autofile:///records/conditional-blobs/accepted" });
+  const refusal = await store.updateRecord({ uri: "autofile:///records/conditional-blobs/accepted", patch: { first: "ordinary text" } });
   assert.match(errorMessages(refusal)[0] ?? "", /second/u);
 });
 
-test("blob size checks accept exactly 7 MiB", async () => {
+test("blob resources inline exactly 7 MiB", async () => {
   const { dataFolder, store } = await makeStore();
   await createDocumentsType(store);
   const bytes = Buffer.alloc(7_340_032);
@@ -736,44 +736,39 @@ test("blob size checks accept exactly 7 MiB", async () => {
     type: "documents",
     key: "exact",
     record: { file: await store.autofile.blobs.put(bytes, "application/octet-stream") },
-  }), { uri: "autofile:///documents/exact" });
+  }), { uri: "autofile:///records/documents/exact" });
   const blob = await store.readResource(expectedBlobUri(bytes, "bin"));
   assert.ok(blob !== undefined && "blob" in blob);
   assert.deepEqual(Buffer.from(blob.blob, "base64"), bytes);
   assert.equal((await storedBlobNames(dataFolder)).length, 1);
 });
 
-test("stored attachment reads reject oversized contents even when stat underreports", async () => {
+test("stored attachment reads report oversized metadata without opening bytes", async () => {
   const { dataFolder, store } = await makeStore();
   const name = `${"a".repeat(64)}.bin`;
-  const blobPath = join(dataFolder, "_blobs", name);
-  await mkdir(join(dataFolder, "_blobs"), { recursive: true });
+  const blobPath = join(dataFolder, "blobs", name);
+  await mkdir(join(dataFolder, "blobs"), { recursive: true });
   await writeFile(blobPath, Buffer.alloc(7_340_033));
-  let contentsRead = false;
+  let contentsOpened = false;
   const originalOpen = fsPromises.open;
   fsPromises.open = (async (...args: Parameters<typeof originalOpen>) => {
-    const handle = await originalOpen(...args);
-    if (args[0] !== blobPath) return handle;
-    return new Proxy(handle, {
-      get(target, property, receiver) {
-        if (property === "stat") {
-          return async () => Object.assign(await target.stat(), { size: 0 });
-        }
-        if (property === "readFile") {
-          return async () => {
-            contentsRead = true;
-            return target.readFile();
-          };
-        }
-        const value = Reflect.get(target, property, receiver) as unknown;
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
-  }) as typeof fsPromises.open;
+    if (args[0] === blobPath) {
+      contentsOpened = true;
+      throw new Error("An oversized MCP read must never open blob bytes");
+    }
+    return originalOpen(...args);
+  }) as typeof originalOpen;
   syncBuiltinESMExports();
   try {
-    assert.equal(await store.readResource(`autofile:///_blobs/${name}`), undefined);
-    assert.equal(contentsRead, true);
+    await assert.rejects(store.readResource(`autofile:///blobs/${name}`), (error: unknown) => {
+      assert.ok(error instanceof Error && "data" in error);
+      const data = error.data as { uri: string; size: number; limit: number };
+      assert.equal(data.uri, `autofile:///blobs/${name}`);
+      assert.equal(data.size, 7_340_033);
+      assert.equal(data.limit, 7_340_032);
+      return true;
+    });
+    assert.equal(contentsOpened, false);
   } finally {
     fsPromises.open = originalOpen;
     syncBuiltinESMExports();
@@ -801,9 +796,9 @@ test("blob media types survive attachment reads without standalone listings", as
     type: "documents",
     key: "extensions",
     record: { file: inputs[0]?.value ?? "", attachments },
-  }), { uri: "autofile:///documents/extensions" });
+  }), { uri: "autofile:///records/documents/extensions" });
   const expectedUris = inputs.map(({ bytes, extension }) => expectedBlobUri(bytes, extension));
-  const record = await store.getRecord({ uri: "autofile:///documents/extensions" });
+  const record = await store.getRecord({ uri: "autofile:///records/documents/extensions" });
   assert.ok("value" in record);
   assert.deepEqual(record.value, {
     file: expectedUris[0],
@@ -819,16 +814,12 @@ test("blob media types survive attachment reads without standalone listings", as
   }
 });
 
-test("explicit uploads refuse oversized bytes with their size and the limit", async () => {
+test("explicit uploads accept bytes above the MCP inline limit", async () => {
   const { dataFolder, store } = await makeStore();
-  const limit = 7_340_032;
-  await assert.rejects(store.autofile.blobs.put(Buffer.alloc(limit + 1), "application/octet-stream"), (error: unknown) => {
-    assert.ok(error instanceof Error);
-    assert.match(error.message, new RegExp(String(limit + 1), "u"));
-    assert.match(error.message, new RegExp(String(limit), "u"));
-    return true;
-  });
-  assert.deepEqual(await storedBlobNames(dataFolder), []);
+  const bytes = Buffer.alloc(7_340_033);
+  const uri = await store.autofile.blobs.put(bytes, "application/octet-stream");
+  assert.deepEqual(Buffer.from((await store.autofile.blobs.get(uri))!.bytes), bytes);
+  assert.equal((await storedBlobNames(dataFolder)).length, 1);
 });
 
 test("storing the same blob twice does not rewrite its file", async () => {
@@ -838,7 +829,7 @@ test("storing the same blob twice does not rewrite its file", async () => {
   const data = await store.autofile.blobs.put(bytes, "text/plain");
   await store.createRecord({ type: "documents", key: "one", record: { file: data } });
   const name = expectedBlobUri(bytes, "txt").split("/").at(-1) ?? "";
-  const blobPath = join(dataFolder, "_blobs", name);
+  const blobPath = join(dataFolder, "blobs", name);
   const oldTime = new Date("2020-01-01T00:00:00Z");
   await utimes(blobPath, oldTime, oldTime);
 
@@ -846,7 +837,7 @@ test("storing the same blob twice does not rewrite its file", async () => {
     type: "documents",
     key: "two",
     record: { file: await store.autofile.blobs.put(bytes, "text/plain") },
-  }), { uri: "autofile:///documents/two" });
+  }), { uri: "autofile:///records/documents/two" });
   assert.equal((await stat(blobPath)).mtime.toISOString(), oldTime.toISOString());
   assert.deepEqual(await storedBlobNames(dataFolder), [name]);
 });
@@ -865,16 +856,16 @@ test("updates and deletes collect replaced blobs only after their records stop h
   });
 
   assert.deepEqual(await store.updateRecord({
-    uri: "autofile:///documents/changed",
+    uri: "autofile:///records/documents/changed",
     patch: { file: await store.autofile.blobs.put(second, "text/plain") },
-  }), { uri: "autofile:///documents/changed" });
+  }), { uri: "autofile:///records/documents/changed" });
   assert.deepEqual(await storedBlobNames(dataFolder), [secondUri.split("/").at(-1)]);
-  const updated = await store.getRecord({ uri: "autofile:///documents/changed" });
+  const updated = await store.getRecord({ uri: "autofile:///records/documents/changed" });
   assert.ok("value" in updated);
   assert.equal(updated.value.file, secondUri);
 
-  assert.deepEqual(await store.deleteRecord({ uri: "autofile:///documents/changed" }), {
-    uri: "autofile:///documents/changed",
+  assert.deepEqual(await store.deleteRecord({ uri: "autofile:///records/documents/changed" }), {
+    uri: "autofile:///records/documents/changed",
   });
   assert.deepEqual(await storedBlobNames(dataFolder), []);
   assert.notEqual(firstUri, secondUri);
@@ -889,9 +880,9 @@ test("shared blobs remain until the last record holding them is deleted", async 
   await store.createRecord({ type: "documents", key: "one", record: { file: data } });
   await store.createRecord({ type: "documents", key: "two", record: { file: data } });
 
-  await store.deleteRecord({ uri: "autofile:///documents/one" });
+  await store.deleteRecord({ uri: "autofile:///records/documents/one" });
   assert.deepEqual(await storedBlobNames(dataFolder), [uri.split("/").at(-1)]);
-  await store.deleteRecord({ uri: "autofile:///documents/two" });
+  await store.deleteRecord({ uri: "autofile:///records/documents/two" });
   assert.deepEqual(await storedBlobNames(dataFolder), []);
 });
 
@@ -925,9 +916,9 @@ test("schema-invalid records retain every blob URI string, including nested arra
     },
   });
 
-  await store.deleteRecord({ uri: "autofile:///documents/owner" });
+  await store.deleteRecord({ uri: "autofile:///records/documents/owner" });
   assert.deepEqual(await storedBlobNames(dataFolder), [uri.split("/").at(-1)]);
-  await store.deleteRecord({ uri: "autofile:///notes/keeper" });
+  await store.deleteRecord({ uri: "autofile:///records/notes/keeper" });
   assert.deepEqual(await storedBlobNames(dataFolder), []);
 });
 
@@ -952,8 +943,8 @@ test("schema-valid records do not retain blob URIs outside annotated blob fields
     record: { nested: [{ value: uri }] },
   });
 
-  assert.deepEqual(await store.deleteRecord({ uri: "autofile:///documents/owner" }), {
-    uri: "autofile:///documents/owner",
+  assert.deepEqual(await store.deleteRecord({ uri: "autofile:///records/documents/owner" }), {
+    uri: "autofile:///records/documents/owner",
   });
   assert.deepEqual(await storedBlobNames(dataFolder), []);
 });
@@ -970,12 +961,12 @@ test("an unreadable record suppresses all blob deletion", async () => {
     key: "owner",
     record: { file: await store.autofile.blobs.put(previous, "text/plain") },
   });
-  await writeFile(join(dataFolder, "documents", "broken.json"), "{\n");
+  await writeFile(join(dataFolder, "records", "documents", "broken.json"), "{\n");
 
   assert.deepEqual(await store.updateRecord({
-    uri: "autofile:///documents/owner",
+    uri: "autofile:///records/documents/owner",
     patch: { file: await store.autofile.blobs.put(replacement, "text/plain") },
-  }), { uri: "autofile:///documents/owner" });
+  }), { uri: "autofile:///records/documents/owner" });
   assert.deepEqual((await storedBlobNames(dataFolder)).sort(), [
     previousUri.split("/").at(-1),
     replacementUri.split("/").at(-1),
@@ -992,9 +983,9 @@ test("blob writes precede record writes and unheld blob deletions happen last", 
     key: "ordered",
     record: { file: await store.autofile.blobs.put(first, "text/plain") },
   });
-  const firstPath = join(dataFolder, "_blobs", expectedBlobUri(first, "txt").split("/").at(-1) ?? "");
-  const secondPath = join(dataFolder, "_blobs", expectedBlobUri(second, "txt").split("/").at(-1) ?? "");
-  const recordPath = join(dataFolder, "documents", "ordered.json");
+  const firstPath = join(dataFolder, "blobs", expectedBlobUri(first, "txt").split("/").at(-1) ?? "");
+  const secondPath = join(dataFolder, "blobs", expectedBlobUri(second, "txt").split("/").at(-1) ?? "");
+  const recordPath = join(dataFolder, "records", "documents", "ordered.json");
   const operations: string[] = [];
   const originalRename = fsPromises.rename;
   const originalUnlink = fsPromises.unlink;
@@ -1010,9 +1001,9 @@ test("blob writes precede record writes and unheld blob deletions happen last", 
   syncBuiltinESMExports();
   try {
     assert.deepEqual(await store.updateRecord({
-      uri: "autofile:///documents/ordered",
+      uri: "autofile:///records/documents/ordered",
       patch: { file: await store.autofile.blobs.put(second, "text/plain") },
-    }), { uri: "autofile:///documents/ordered" });
+    }), { uri: "autofile:///records/documents/ordered" });
   } finally {
     fsPromises.rename = originalRename;
     fsPromises.unlink = originalUnlink;
@@ -1066,7 +1057,7 @@ test("explicit blob uploads wait for the same write lock as record writes", asyn
   await holder;
   const uri = await write;
   assert.equal(uri, expectedBlobUri(bytes, "txt"));
-  assert.deepEqual(await store.createRecord({ type: "documents", key: "waited", record: { file: uri } }), { uri: "autofile:///documents/waited" });
+  assert.deepEqual(await store.createRecord({ type: "documents", key: "waited", record: { file: uri } }), { uri: "autofile:///records/documents/waited" });
   assert.equal((await storedBlobNames(dataFolder)).length, 1);
 });
 
@@ -1108,21 +1099,21 @@ test("record writes check annotated link fields at every depth and ignore plain 
     key: "valid",
     record: {
       name: "Valid links",
-      employer: "autofile:///organizations/existing",
+      employer: "autofile:///records/organizations/existing",
       related: ["https://example.com/person"],
       details: { website: "mailto:person@example.com" },
-      markdown: "See [missing](autofile:///organizations/missing).",
+      markdown: "See [missing](autofile:///records/organizations/missing).",
     },
-  }), { uri: "autofile:///people/valid" });
+  }), { uri: "autofile:///records/people/valid" });
 
-  const danglingUri = "autofile:///organizations/missing";
+  const danglingUri = "autofile:///records/organizations/missing";
   assert.deepEqual(await store.createRecord({
     type: "people",
     key: "dangling-ref",
     record: { name: "Dangling ref", employer: danglingUri },
   }), {
     errors: [{
-      uri: "autofile:///people/dangling-ref",
+      uri: "autofile:///records/people/dangling-ref",
       message: `employer: links to a record that does not exist: ${danglingUri}`,
     }],
   });
@@ -1132,7 +1123,7 @@ test("record writes check annotated link fields at every depth and ignore plain 
     record: { name: "Dangling nested", details: { website: danglingUri } },
   }), {
     errors: [{
-      uri: "autofile:///people/dangling-nested",
+      uri: "autofile:///records/people/dangling-nested",
       message: `details.website: links to a record that does not exist: ${danglingUri}`,
     }],
   });
@@ -1151,22 +1142,22 @@ test("record writes check annotated link fields at every depth and ignore plain 
     record: { name: "Uppercase scheme", employer: uppercaseSchemeUri },
   }), {
     errors: [{
-      uri: "autofile:///people/uppercase-scheme",
+      uri: "autofile:///records/people/uppercase-scheme",
       message: `employer: links to a record that does not exist: ${uppercaseSchemeUri}`,
     }],
   });
   for (const key of ["dangling-ref", "dangling-nested"]) {
-    await assert.rejects(stat(join(dataFolder, "people", `${key}.json`)));
+    await assert.rejects(stat(join(dataFolder, "records", "people", `${key}.json`)));
   }
 
-  const validPath = join(dataFolder, "people", "valid.json");
+  const validPath = join(dataFolder, "records", "people", "valid.json");
   const before = await readFile(validPath, "utf8");
   assert.deepEqual(await store.updateRecord({
-    uri: "autofile:///people/valid",
+    uri: "autofile:///records/people/valid",
     patch: { related: [danglingUri] },
   }), {
     errors: [{
-      uri: "autofile:///people/valid",
+      uri: "autofile:///records/people/valid",
       message: `related.0: links to a record that does not exist: ${danglingUri}`,
     }],
   });
@@ -1191,7 +1182,7 @@ test("link refusals distinguish an empty property name from the record root", as
     },
   });
   await store.createRecord({ type: "targets", key: "existing", record: {} });
-  const missingUri = "autofile:///targets/missing";
+  const missingUri = "autofile:///records/targets/missing";
 
   assert.deepEqual(await store.createRecord({
     type: "empty-fields",
@@ -1199,7 +1190,7 @@ test("link refusals distinguish an empty property name from the record root", as
     record: { "": missingUri },
   }), {
     errors: [{
-      uri: "autofile:///empty-fields/create",
+      uri: "autofile:///records/empty-fields/create",
       message: `/: links to a record that does not exist: ${missingUri}`,
     }],
   });
@@ -1207,16 +1198,16 @@ test("link refusals distinguish an empty property name from the record root", as
   await store.createRecord({
     type: "empty-fields",
     key: "update",
-    record: { "": "autofile:///targets/existing" },
+    record: { "": "autofile:///records/targets/existing" },
   });
-  const path = join(dataFolder, "empty-fields", "update.json");
+  const path = join(dataFolder, "records", "empty-fields", "update.json");
   const before = await readFile(path, "utf8");
   assert.deepEqual(await store.updateRecord({
-    uri: "autofile:///empty-fields/update",
+    uri: "autofile:///records/empty-fields/update",
     patch: { "": missingUri },
   }), {
     errors: [{
-      uri: "autofile:///empty-fields/update",
+      uri: "autofile:///records/empty-fields/update",
       message: `/: links to a record that does not exist: ${missingUri}`,
     }],
   });
@@ -1225,8 +1216,8 @@ test("link refusals distinguish an empty property name from the record root", as
 
 test("only successful anyOf branches contribute link annotations", async () => {
   const { store } = await makeStore();
-  const targetUri = "autofile:///targets/existing";
-  const missingUri = "autofile:///targets/missing";
+  const targetUri = "autofile:///records/targets/existing";
+  const missingUri = "autofile:///records/targets/missing";
   await store.createType({
     type: "targets",
     description: "Link targets.",
@@ -1260,14 +1251,14 @@ test("only successful anyOf branches contribute link annotations", async () => {
     type: "choices",
     key: "failed-branch",
     record: { linked: "plain", notALink: missingUri },
-  }), { uri: "autofile:///choices/failed-branch" });
+  }), { uri: "autofile:///records/choices/failed-branch" });
   assert.deepEqual(await store.createRecord({
     type: "choices",
     key: "dangling",
     record: { linked: missingUri, notALink: targetUri },
   }), {
     errors: [{
-      uri: "autofile:///choices/dangling",
+      uri: "autofile:///records/choices/dangling",
       message: `linked: links to a record that does not exist: ${missingUri}`,
     }],
   });
@@ -1278,7 +1269,7 @@ test("only successful anyOf branches contribute link annotations", async () => {
   });
 
   assert.deepEqual(await store.deleteRecord({ uri: targetUri }), { uri: targetUri });
-  const cleaned = await store.getRecord({ uri: "autofile:///choices/cleanup" });
+  const cleaned = await store.getRecord({ uri: "autofile:///records/choices/cleanup" });
   assert.ok("value" in cleaned);
   assert.deepEqual(cleaned.value, { notALink: targetUri });
 });
@@ -1313,36 +1304,36 @@ test("a link target must be a record of a declared type but may fail its own sch
   assert.deepEqual(await store.createRecord({
     type: "sources",
     key: "schema-invalid-target",
-    record: { target: "autofile:///targets/invalid" },
-  }), { uri: "autofile:///sources/schema-invalid-target" });
+    record: { target: "autofile:///records/targets/invalid" },
+  }), { uri: "autofile:///records/sources/schema-invalid-target" });
 
-  await mkdir(join(dataFolder, "undeclared"));
-  await writeFile(join(dataFolder, "undeclared", "orphan.json"), `${JSON.stringify({
+  await mkdir(join(dataFolder, "records", "undeclared"));
+  await writeFile(join(dataFolder, "records", "undeclared", "orphan.json"), `${JSON.stringify({
     createdAt: "2026-10-07T09:14:00Z",
     updatedAt: "2026-10-07T09:14:00Z",
     value: {},
   }, null, 2)}\n`);
-  const undeclaredUri = "autofile:///undeclared/orphan";
+  const undeclaredUri = "autofile:///records/undeclared/orphan";
   assert.deepEqual(await store.createRecord({
     type: "sources",
     key: "undeclared-target",
     record: { target: undeclaredUri },
   }), {
     errors: [{
-      uri: "autofile:///sources/undeclared-target",
+      uri: "autofile:///records/sources/undeclared-target",
       message: `target: links to a record that does not exist: ${undeclaredUri}`,
     }],
   });
 
-  await writeFile(join(dataFolder, "targets", "malformed.json"), "{}\n");
-  const malformedUri = "autofile:///targets/malformed";
+  await writeFile(join(dataFolder, "records", "targets", "malformed.json"), "{}\n");
+  const malformedUri = "autofile:///records/targets/malformed";
   assert.deepEqual(await store.createRecord({
     type: "sources",
     key: "malformed-target",
     record: { target: malformedUri },
   }), {
     errors: [{
-      uri: "autofile:///sources/malformed-target",
+      uri: "autofile:///records/sources/malformed-target",
       message: `target: links to a record that does not exist: ${malformedUri}`,
     }],
   });
@@ -1365,9 +1356,9 @@ test("record writes report storage failures without operating-system details", a
       additionalProperties: false,
     },
   });
-  const targetUri = "autofile:///targets/denied";
-  const targetPath = join(dataFolder, "targets", "denied.json");
-  const updatedPath = join(dataFolder, "sources", "updated.json");
+  const targetUri = "autofile:///records/targets/denied";
+  const targetPath = join(dataFolder, "records", "targets", "denied.json");
+  const updatedPath = join(dataFolder, "records", "sources", "updated.json");
   await store.createRecord({ type: "targets", key: "denied", record: {} });
   await store.createRecord({
     type: "sources",
@@ -1395,7 +1386,7 @@ test("record writes report storage failures without operating-system details", a
     );
     await assert.rejects(
       store.updateRecord({
-        uri: "autofile:///sources/updated",
+        uri: "autofile:///records/sources/updated",
         patch: { target: targetUri },
       }),
       { message: "Storage operation failed" },
@@ -1404,7 +1395,7 @@ test("record writes report storage failures without operating-system details", a
     fsPromises.open = originalOpen;
     syncBuiltinESMExports();
   }
-  await assert.rejects(stat(join(dataFolder, "sources", "created.json")));
+  await assert.rejects(stat(join(dataFolder, "records", "sources", "created.json")));
   assert.equal(await readFile(updatedPath, "utf8"), beforeUpdate);
 });
 
@@ -1447,8 +1438,8 @@ test("delete_record removes annotated links from nested fields and arrays across
       additionalProperties: false,
     },
   });
-  const deletedUri = "autofile:///targets/deleted";
-  const keptUri = "autofile:///targets/kept";
+  const deletedUri = "autofile:///records/targets/deleted";
+  const keptUri = "autofile:///records/targets/kept";
   await store.createRecord({ type: "targets", key: "deleted", record: {} });
   await store.createRecord({ type: "targets", key: "kept", record: {} });
   await store.createRecord({
@@ -1467,15 +1458,15 @@ test("delete_record removes annotated links from nested fields and arrays across
     key: "one",
     record: { sponsor: deletedUri, references: [keptUri, deletedUri] },
   });
-  const contactBefore = await store.getRecord({ uri: "autofile:///contacts/one" });
-  const projectBefore = await store.getRecord({ uri: "autofile:///projects/one" });
+  const contactBefore = await store.getRecord({ uri: "autofile:///records/contacts/one" });
+  const projectBefore = await store.getRecord({ uri: "autofile:///records/projects/one" });
   assert.ok("createdAt" in contactBefore && "createdAt" in projectBefore);
   await delay(5);
 
   assert.deepEqual(await store.deleteRecord({ uri: deletedUri }), { uri: deletedUri });
   assert.match(errorMessages(await store.getRecord({ uri: deletedUri }))[0] ?? "", /does not exist/u);
-  const contactAfter = await store.getRecord({ uri: "autofile:///contacts/one" });
-  const projectAfter = await store.getRecord({ uri: "autofile:///projects/one" });
+  const contactAfter = await store.getRecord({ uri: "autofile:///records/contacts/one" });
+  const projectAfter = await store.getRecord({ uri: "autofile:///records/projects/one" });
   assert.ok("createdAt" in contactAfter && "createdAt" in projectAfter);
   assert.equal(contactAfter.createdAt, contactBefore.createdAt);
   assert.equal(projectAfter.createdAt, projectBefore.createdAt);
@@ -1518,24 +1509,24 @@ test("delete_record refuses every invalid link removal and changes no file", asy
       additionalProperties: false,
     },
   });
-  const targetUri = "autofile:///targets/required";
+  const targetUri = "autofile:///records/targets/required";
   await store.createRecord({ type: "targets", key: "required", record: {} });
   await store.createRecord({ type: "contacts", key: "one", record: { target: targetUri } });
   await store.createRecord({ type: "projects", key: "one", record: { target: targetUri } });
   await store.createRecord({ type: "notes", key: "removable", record: { target: targetUri } });
   const paths = [
-    join(dataFolder, "contacts", "one.json"),
-    join(dataFolder, "notes", "removable.json"),
-    join(dataFolder, "projects", "one.json"),
-    join(dataFolder, "targets", "required.json"),
+    join(dataFolder, "records", "contacts", "one.json"),
+    join(dataFolder, "records", "notes", "removable.json"),
+    join(dataFolder, "records", "projects", "one.json"),
+    join(dataFolder, "records", "targets", "required.json"),
   ];
   const before = await Promise.all(paths.map((path) => readFile(path, "utf8")));
 
   const result = await store.deleteRecord({ uri: targetUri });
   assert.ok("errors" in result);
   assert.deepEqual(result.errors.map(({ uri }) => uri), [
-    "autofile:///contacts/one",
-    "autofile:///projects/one",
+    "autofile:///records/contacts/one",
+    "autofile:///records/projects/one",
   ]);
   assert.ok(result.errors.every(({ message }) => message.includes("target")));
   assert.deepEqual(
@@ -1560,9 +1551,9 @@ test("delete_record writes changed records before deleting their target", async 
       additionalProperties: false,
     },
   });
-  const targetUri = "autofile:///targets/ordered";
-  const targetPath = join(dataFolder, "targets", "ordered.json");
-  const sourcePath = join(dataFolder, "sources", "one.json");
+  const targetUri = "autofile:///records/targets/ordered";
+  const targetPath = join(dataFolder, "records", "targets", "ordered.json");
+  const sourcePath = join(dataFolder, "records", "sources", "one.json");
   await store.createRecord({ type: "targets", key: "ordered", record: {} });
   await store.createRecord({ type: "sources", key: "one", record: { target: targetUri } });
 
@@ -1600,7 +1591,7 @@ test("delete_record is blocked by an invalid record holding the URI or an unread
     description: "Notes.",
     schema: { type: "object" },
   });
-  const targetUri = "autofile:///targets/blocked";
+  const targetUri = "autofile:///records/targets/blocked";
   await store.createRecord({ type: "targets", key: "blocked", record: {} });
   await store.createRecord({ type: "notes", key: "invalid", record: { text: targetUri } });
   await store.updateType({
@@ -1612,13 +1603,13 @@ test("delete_record is blocked by an invalid record holding the URI or an unread
       additionalProperties: false,
     },
   });
-  const targetPath = join(dataFolder, "targets", "blocked.json");
-  const invalidPath = join(dataFolder, "notes", "invalid.json");
+  const targetPath = join(dataFolder, "records", "targets", "blocked.json");
+  const invalidPath = join(dataFolder, "records", "notes", "invalid.json");
   const beforeInvalid = [await readFile(targetPath, "utf8"), await readFile(invalidPath, "utf8")];
 
   assert.deepEqual(await store.deleteRecord({ uri: targetUri }), {
     errors: [{
-      uri: "autofile:///notes/invalid",
+      uri: "autofile:///records/notes/invalid",
       message: `record does not match its type and holds ${targetUri} as a string value`,
     }],
   });
@@ -1627,13 +1618,13 @@ test("delete_record is blocked by an invalid record holding the URI or an unread
     beforeInvalid,
   );
 
-  await store.updateRecord({ uri: "autofile:///notes/invalid", patch: { text: null, fixed: true } });
-  const brokenPath = join(dataFolder, "notes", "broken.json");
+  await store.updateRecord({ uri: "autofile:///records/notes/invalid", patch: { text: null, fixed: true } });
+  const brokenPath = join(dataFolder, "records", "notes", "broken.json");
   await writeFile(brokenPath, "{\n");
   const beforeUnreadable = [await readFile(targetPath, "utf8"), await readFile(brokenPath, "utf8")];
   assert.deepEqual(await store.deleteRecord({ uri: targetUri }), {
     errors: [{
-      uri: "autofile:///notes/broken",
+      uri: "autofile:///records/notes/broken",
       message: "record is unavailable",
     }],
   });
@@ -1669,7 +1660,7 @@ test("delete_record is blocked by an invalid record holding the URI or an unread
     record: { target: targetUri },
   });
   await writeFile(targetPath, "{\n");
-  const requiredPath = join(dataFolder, "required-links", "blocked.json");
+  const requiredPath = join(dataFolder, "records", "required-links", "blocked.json");
   const beforeTargetBlockers = [
     await readFile(requiredPath, "utf8"),
     await readFile(targetPath, "utf8"),
@@ -1677,7 +1668,7 @@ test("delete_record is blocked by an invalid record holding the URI or an unread
   assert.deepEqual(await store.deleteRecord({ uri: targetUri }), {
     errors: [
       {
-        uri: "autofile:///required-links/blocked",
+        uri: "autofile:///records/required-links/blocked",
         message: "missing required property: target",
       },
       {
@@ -1699,8 +1690,8 @@ test("delete_record reports an operating-system refusal while reading its target
     description: "Link targets.",
     schema: { type: "object" },
   });
-  const uri = "autofile:///targets/denied";
-  const path = join(dataFolder, "targets", "denied.json");
+  const uri = "autofile:///records/targets/denied";
+  const path = join(dataFolder, "records", "targets", "denied.json");
   await store.createRecord({ type: "targets", key: "denied", record: {} });
   const before = await readFile(path, "utf8");
 
@@ -1731,18 +1722,18 @@ test("create_record writes the exact envelope and get_record returns it with its
     type: "tasks",
     key: "book-dentist",
     record: { title: "Book dentist", status: "active" },
-  }), { uri: "autofile:///tasks/book-dentist" });
-  const record = await store.getRecord({ uri: "autofile:///tasks/book-dentist" });
+  }), { uri: "autofile:///records/tasks/book-dentist" });
+  const record = await store.getRecord({ uri: "autofile:///records/tasks/book-dentist" });
   assert.ok("createdAt" in record);
   assert.match(record.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u);
   assert.equal(record.updatedAt, record.createdAt);
   assert.deepEqual(record.value, { title: "Book dentist", status: "active" });
   assert.equal(
-    await readFile(join(dataFolder, "tasks", "book-dentist.json"), "utf8"),
+    await readFile(join(dataFolder, "records", "tasks", "book-dentist.json"), "utf8"),
     `${JSON.stringify({ createdAt: record.createdAt, updatedAt: record.updatedAt, value: record.value }, null, 2)}\n`,
   );
   assert.deepEqual(record, {
-    uri: "autofile:///tasks/book-dentist",
+    uri: "autofile:///records/tasks/book-dentist",
     title: "Book dentist",
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -1753,8 +1744,8 @@ test("create_record writes the exact envelope and get_record returns it with its
 test("record files with legacy created and updated fields are invalid", async () => {
   const { dataFolder, store } = await makeStore();
   await createTasksType(store);
-  const uri = "autofile:///tasks/legacy-times";
-  await writeFile(join(dataFolder, "tasks", "legacy-times.json"), `${JSON.stringify({
+  const uri = "autofile:///records/tasks/legacy-times";
+  await writeFile(join(dataFolder, "records", "tasks", "legacy-times.json"), `${JSON.stringify({
     created: "2026-10-07T09:14:00Z",
     updated: "2026-10-07T09:14:00Z",
     value: { title: "Legacy times", status: "active" },
@@ -1826,7 +1817,7 @@ test("find_records combines recursive word search with MongoDB field matching", 
   });
   assert.ok("records" in wordsAndField);
   assert.deepEqual(wordsAndField.records.map(({ uri }) => uri), [
-    "autofile:///entries/alpha",
+    "autofile:///records/entries/alpha",
   ]);
   assert.deepEqual(wordsAndField.errors, []);
   assert.equal("cursor" in wordsAndField, false);
@@ -1834,17 +1825,17 @@ test("find_records combines recursive word search with MongoDB field matching", 
   const arrayEquality = await store.findRecords({ type: "entries", where: { tags: "health" } });
   assert.ok("records" in arrayEquality);
   assert.deepEqual(arrayEquality.records.map(({ uri }) => uri), [
-    "autofile:///entries/alpha",
-    "autofile:///entries/beta",
+    "autofile:///records/entries/alpha",
+    "autofile:///records/entries/beta",
   ]);
 
   const missingOrNull = await store.findRecords({ type: "entries", where: { optional: null } });
   assert.ok("records" in missingOrNull);
   assert.deepEqual(missingOrNull.records.map(({ uri }) => uri), [
-    "autofile:///entries/alpha",
-    "autofile:///entries/beta",
-    "autofile:///entries/gamma",
-    "autofile:///entries/omega",
+    "autofile:///records/entries/alpha",
+    "autofile:///records/entries/beta",
+    "autofile:///records/entries/gamma",
+    "autofile:///records/entries/omega",
   ]);
 
   const dottedField = await store.findRecords({
@@ -1853,7 +1844,7 @@ test("find_records combines recursive word search with MongoDB field matching", 
   });
   assert.ok("records" in dottedField);
   assert.deepEqual(dottedField.records.map(({ uri }) => uri), [
-    "autofile:///entries/beta",
+    "autofile:///records/entries/beta",
   ]);
 
   for (const q of ["priority", "42"]) {
@@ -1885,7 +1876,7 @@ test("find_records projects top-level fields after matching the whole record", a
   });
   assert.ok("records" in projected);
   assert.deepEqual(projected.records.map(({ uri, value }) => ({ uri, value })), [{
-    uri: "autofile:///tasks/matching",
+    uri: "autofile:///records/tasks/matching",
     value: { title: "Projected title" },
   }]);
   assert.deepEqual(projected.errors, []);
@@ -1905,22 +1896,22 @@ test("find_records reports only schema-invalid records that match the search", a
   });
   const timestamp = "2026-10-07T09:14:00Z";
   await Promise.all([
-    writeFile(join(dataFolder, "tasks", "invalid-filtered-by-q.json"), `${JSON.stringify({
+    writeFile(join(dataFolder, "records", "tasks", "invalid-filtered-by-q.json"), `${JSON.stringify({
       createdAt: timestamp,
       updatedAt: timestamp,
       value: { title: "Haystack", status: "complete", unexpected: true },
     }, null, 2)}\n`),
-    writeFile(join(dataFolder, "tasks", "invalid-filtered-by-where.json"), `${JSON.stringify({
+    writeFile(join(dataFolder, "records", "tasks", "invalid-filtered-by-where.json"), `${JSON.stringify({
       createdAt: timestamp,
       updatedAt: timestamp,
       value: { title: "Needle with the wrong status", status: "unknown" },
     }, null, 2)}\n`),
-    writeFile(join(dataFolder, "tasks", "invalid-matching.json"), `${JSON.stringify({
+    writeFile(join(dataFolder, "records", "tasks", "invalid-matching.json"), `${JSON.stringify({
       createdAt: timestamp,
       updatedAt: timestamp,
       value: { title: "Needle in an invalid record", status: "complete", unexpected: true },
     }, null, 2)}\n`),
-    writeFile(join(dataFolder, "tasks", "unreadable.json"), "{\n"),
+    writeFile(join(dataFolder, "records", "tasks", "unreadable.json"), "{\n"),
   ]);
 
   const result = await store.findRecords({
@@ -1931,12 +1922,12 @@ test("find_records reports only schema-invalid records that match the search", a
   });
   assert.ok("records" in result);
   assert.deepEqual(result.records.map(({ uri, value }) => ({ uri, value })), [{
-    uri: "autofile:///tasks/matching",
+    uri: "autofile:///records/tasks/matching",
     value: { title: "Needle" },
   }]);
   assert.deepEqual(result.errors.map(({ uri }) => uri), [
-    "autofile:///tasks/invalid-matching",
-    "autofile:///tasks/unreadable",
+    "autofile:///records/tasks/invalid-matching",
+    "autofile:///records/tasks/unreadable",
   ]);
   assert.match(result.errors[0]?.message ?? "", /unexpected|additional/u);
   assert.match(result.errors[1]?.message ?? "", /unavailable/u);
@@ -1981,11 +1972,11 @@ test("find_records caps pages by UTF-8 JSON bytes and pages across every result"
 
   assert.equal(pages, 5);
   assert.deepEqual(uris, [
-    "autofile:///entries/a",
-    "autofile:///entries/b",
-    "autofile:///entries/c",
-    "autofile:///entries/d",
-    "autofile:///entries/e",
+    "autofile:///records/entries/a",
+    "autofile:///records/entries/b",
+    "autofile:///records/entries/c",
+    "autofile:///records/entries/d",
+    "autofile:///records/entries/e",
   ]);
 });
 
@@ -2035,8 +2026,8 @@ test("find_records reads past nonmatches until it fills the result page", async 
   const first = await store.findRecords({ type: "tasks", q: "needle", limit: 2 });
   assert.ok("records" in first && first.cursor !== undefined);
   assert.deepEqual(first.records.map(({ uri }) => uri), [
-    "autofile:///tasks/b",
-    "autofile:///tasks/d",
+    "autofile:///records/tasks/b",
+    "autofile:///records/tasks/d",
   ]);
   assert.deepEqual(first.errors, []);
 
@@ -2055,34 +2046,34 @@ test("find_records pages record files in URI order and advances after a deleted 
     value: { title, status },
   }, null, 2)}\n`;
   await Promise.all([
-    writeFile(join(dataFolder, "tasks", "e.json"), storedRecord("E")),
-    writeFile(join(dataFolder, "tasks", "d.json"), storedRecord("D", "unknown")),
-    writeFile(join(dataFolder, "tasks", "c.json"), storedRecord("C")),
-    writeFile(join(dataFolder, "tasks", "b.json"), storedRecord("B")),
-    writeFile(join(dataFolder, "tasks", "a.json"), "{\n"),
+    writeFile(join(dataFolder, "records", "tasks", "e.json"), storedRecord("E")),
+    writeFile(join(dataFolder, "records", "tasks", "d.json"), storedRecord("D", "unknown")),
+    writeFile(join(dataFolder, "records", "tasks", "c.json"), storedRecord("C")),
+    writeFile(join(dataFolder, "records", "tasks", "b.json"), storedRecord("B")),
+    writeFile(join(dataFolder, "records", "tasks", "a.json"), "{\n"),
   ]);
 
   const first = await store.findRecords({ type: "tasks", limit: 2 });
   assert.ok("records" in first && first.cursor !== undefined);
-  assert.deepEqual(first.records.map(({ uri }) => uri), ["autofile:///tasks/b"]);
+  assert.deepEqual(first.records.map(({ uri }) => uri), ["autofile:///records/tasks/b"]);
   assert.deepEqual(first.errors, [{
-    uri: "autofile:///tasks/a",
+    uri: "autofile:///records/tasks/a",
     message: "record is unavailable",
   }]);
 
-  await writeFile(join(dataFolder, "tasks", "a.json"), storedRecord("A"));
-  assert.deepEqual(await store.deleteRecord({ uri: "autofile:///tasks/b" }), {
-    uri: "autofile:///tasks/b",
+  await writeFile(join(dataFolder, "records", "tasks", "a.json"), storedRecord("A"));
+  assert.deepEqual(await store.deleteRecord({ uri: "autofile:///records/tasks/b" }), {
+    uri: "autofile:///records/tasks/b",
   });
   const second = await store.findRecords({ type: "tasks", limit: 2, cursor: first.cursor });
   assert.ok("records" in second && second.cursor !== undefined);
-  assert.deepEqual(second.records.map(({ uri }) => uri), ["autofile:///tasks/c"]);
-  assert.deepEqual(second.errors.map(({ uri }) => uri), ["autofile:///tasks/d"]);
+  assert.deepEqual(second.records.map(({ uri }) => uri), ["autofile:///records/tasks/c"]);
+  assert.deepEqual(second.errors.map(({ uri }) => uri), ["autofile:///records/tasks/d"]);
   assert.match(second.errors[0]?.message ?? "", /status/u);
 
   const third = await store.findRecords({ type: "tasks", limit: 2, cursor: second.cursor });
   assert.ok("records" in third);
-  assert.deepEqual(third.records.map(({ uri }) => uri), ["autofile:///tasks/e"]);
+  assert.deepEqual(third.records.map(({ uri }) => uri), ["autofile:///records/tasks/e"]);
   assert.deepEqual(third.errors, []);
   assert.equal("cursor" in third, false);
 });
@@ -2093,7 +2084,7 @@ test("find_records returns at most 50 results by default", async () => {
   const timestamp = "2026-10-07T09:14:00Z";
   await Promise.all(Array.from({ length: 51 }, async (_, index) => {
     const key = `item-${String(index).padStart(2, "0")}`;
-    await writeFile(join(dataFolder, "tasks", `${key}.json`), `${JSON.stringify({
+    await writeFile(join(dataFolder, "records", "tasks", `${key}.json`), `${JSON.stringify({
       createdAt: timestamp,
       updatedAt: timestamp,
       value: { title: key, status: "active" },
@@ -2103,14 +2094,14 @@ test("find_records returns at most 50 results by default", async () => {
   const first = await store.findRecords({ type: "tasks" });
   assert.ok("records" in first && first.cursor !== undefined);
   assert.equal(first.records.length, 50);
-  assert.equal(first.records[0]?.uri, "autofile:///tasks/item-00");
-  assert.equal(first.records.at(-1)?.uri, "autofile:///tasks/item-49");
+  assert.equal(first.records[0]?.uri, "autofile:///records/tasks/item-00");
+  assert.equal(first.records.at(-1)?.uri, "autofile:///records/tasks/item-49");
   assert.deepEqual(first.errors, []);
 
   const second = await store.findRecords({ type: "tasks", cursor: first.cursor });
   assert.ok("records" in second);
   assert.deepEqual(second.records.map(({ uri }) => uri), [
-    "autofile:///tasks/item-50",
+    "autofile:///records/tasks/item-50",
   ]);
   assert.deepEqual(second.errors, []);
   assert.equal("cursor" in second, false);
@@ -2136,7 +2127,7 @@ test("find_records refuses invalid arguments, operators at any depth, and invali
     }],
   });
   assert.deepEqual(await store.findRecords({ type: "missing" }), {
-    errors: [{ uri: "autofile:///_types/missing", message: "type does not exist" }],
+    errors: [{ uri: "autofile:///types/missing", message: "type does not exist" }],
   });
   assert.deepEqual(await store.findRecords({
     type: "tasks",
@@ -2208,9 +2199,9 @@ test("find_records reports an operating-system read refusal and continues", asyn
     key: "kept",
     record: { title: "Kept", status: "active" },
   });
-  const kept = await store.getRecord({ uri: "autofile:///tasks/kept" });
+  const kept = await store.getRecord({ uri: "autofile:///records/tasks/kept" });
   assert.ok("value" in kept);
-  const deniedPath = join(dataFolder, "tasks", "denied.json");
+  const deniedPath = join(dataFolder, "records", "tasks", "denied.json");
   const originalOpen = fsPromises.open;
   // The test process runs as root, so mode bits cannot produce EACCES. Replace
   // only the filesystem boundary for this path with the error open(2) returns.
@@ -2232,7 +2223,7 @@ test("find_records reports an operating-system read refusal and continues", asyn
         value: kept.value,
       }],
       errors: [{
-        uri: "autofile:///tasks/denied",
+        uri: "autofile:///records/tasks/denied",
         message: "record is unavailable",
       }],
     });
@@ -2268,14 +2259,14 @@ test("record keys and canonical record URIs are enforced", async () => {
   }))[0] ?? "", /already exists/u);
   for (const uri of [
     "autofile://tasks/same-key",
-    "autofile:///tasks/same-key.json",
-    "autofile:///tasks/../same-key",
+    "autofile:///records/tasks/same-key.json",
+    "autofile:///records/tasks/../same-key",
     "https://example.com/tasks/same-key",
-    "autofile:///_types/tasks",
+    "autofile:///types/tasks",
   ]) {
     const refusal = {
       errors: [{
-        message: "uri: must be a record URI, such as autofile:///task/book-the-dentist",
+        message: "uri: must be a record URI, such as autofile:///records/task/book-the-dentist",
       }],
     };
     assert.deepEqual(await store.getRecord({ uri }), refusal);
@@ -2331,7 +2322,7 @@ test("record writes are refused without changing files unless the complete value
     key: "invalid",
     record: { title: "Missing status" },
   }))[0] ?? "", /status/u);
-  await assert.rejects(stat(join(dataFolder, "tasks", "invalid.json")));
+  await assert.rejects(stat(join(dataFolder, "records", "tasks", "invalid.json")));
   assert.match(errorMessages(await store.createRecord({
     type: "missing",
     key: "no-type",
@@ -2352,19 +2343,19 @@ test("update_record applies JSON Merge Patch and preserves createdAt while chang
       labels: ["old"],
     },
   });
-  const before = await store.getRecord({ uri: "autofile:///tasks/merge" });
+  const before = await store.getRecord({ uri: "autofile:///records/tasks/merge" });
   assert.ok("createdAt" in before);
   await delay(5);
 
   assert.deepEqual(await store.updateRecord({
-    uri: "autofile:///tasks/merge",
+    uri: "autofile:///records/tasks/merge",
     patch: {
       status: "complete",
       details: { remove: null, note: "done" },
       labels: ["new"],
     },
-  }), { uri: "autofile:///tasks/merge" });
-  const afterRecord = await store.getRecord({ uri: "autofile:///tasks/merge" });
+  }), { uri: "autofile:///records/tasks/merge" });
+  const afterRecord = await store.getRecord({ uri: "autofile:///records/tasks/merge" });
   assert.ok("createdAt" in afterRecord);
   assert.equal(afterRecord.createdAt, before.createdAt);
   assert.notEqual(afterRecord.updatedAt, before.updatedAt);
@@ -2375,7 +2366,7 @@ test("update_record applies JSON Merge Patch and preserves createdAt while chang
     labels: ["new"],
   });
   assert.equal(
-    await readFile(join(dataFolder, "tasks", "merge.json"), "utf8"),
+    await readFile(join(dataFolder, "records", "tasks", "merge.json"), "utf8"),
     `${JSON.stringify({
       createdAt: afterRecord.createdAt,
       updatedAt: afterRecord.updatedAt,
@@ -2391,10 +2382,10 @@ test("update_record applies JSON Merge Patch and preserves createdAt while chang
   await store.createRecord({ type: "freeforms", key: "prototype", record: { kept: true } });
   const prototypePatch = JSON.parse('{"__proto__":{"safe":true}}') as JsonObject;
   assert.deepEqual(await store.updateRecord({
-    uri: "autofile:///freeforms/prototype",
+    uri: "autofile:///records/freeforms/prototype",
     patch: prototypePatch,
-  }), { uri: "autofile:///freeforms/prototype" });
-  const prototypeRecord = await store.getRecord({ uri: "autofile:///freeforms/prototype" });
+  }), { uri: "autofile:///records/freeforms/prototype" });
+  const prototypeRecord = await store.getRecord({ uri: "autofile:///records/freeforms/prototype" });
   assert.ok("value" in prototypeRecord);
   assert.deepEqual(prototypeRecord.value, JSON.parse('{"kept":true,"__proto__":{"safe":true}}'));
   assert.equal(({} as { safe?: boolean }).safe, undefined);
@@ -2410,7 +2401,7 @@ test("update_type always writes a valid declaration and reports every record it 
       record: { title: key, status },
     });
   }
-  const declarationPath = join(dataFolder, "_types", "tasks.json");
+  const declarationPath = join(dataFolder, "types", "tasks.json");
   const declarationBeforeRefusal = await readFile(declarationPath, "utf8");
   const invalidUpdate = await store.updateType({
     type: "tasks",
@@ -2418,7 +2409,7 @@ test("update_type always writes a valid declaration and reports every record it 
   });
   assert.match(errorMessages(invalidUpdate)[0] ?? "", /format/u);
   assert.ok("errors" in invalidUpdate);
-  assert.equal(invalidUpdate.errors[0]?.uri, "autofile:///_types/tasks");
+  assert.equal(invalidUpdate.errors[0]?.uri, "autofile:///types/tasks");
   assert.equal(await readFile(declarationPath, "utf8"), declarationBeforeRefusal);
   const result = await store.updateType({
     type: "tasks",
@@ -2435,14 +2426,14 @@ test("update_type always writes a valid declaration and reports every record it 
     },
   });
   assert.ok("uri" in result && "errors" in result);
-  assert.equal(result.uri, "autofile:///_types/tasks");
+  assert.equal(result.uri, "autofile:///types/tasks");
   assert.deepEqual(result.errors.map(({ uri }) => uri), [
-    "autofile:///tasks/one",
-    "autofile:///tasks/two",
+    "autofile:///records/tasks/one",
+    "autofile:///records/tasks/two",
   ]);
   assert.ok(result.errors.every(({ message }) => message.includes("status")));
   assert.deepEqual(await store.getType({ type: "tasks" }), {
-    uri: "autofile:///_types/tasks",
+    uri: "autofile:///types/tasks",
     description: "Only waiting tasks.",
     schema: {
       type: "object",
@@ -2454,18 +2445,18 @@ test("update_type always writes a valid declaration and reports every record it 
       additionalProperties: false,
     },
   });
-  assert.ok(!await readFile(join(dataFolder, "_types", "tasks.json"), "utf8").then((text) => text.includes("titleField")));
+  assert.ok(!await readFile(join(dataFolder, "types", "tasks.json"), "utf8").then((text) => text.includes("titleField")));
 
-  const invalid = await store.getRecord({ uri: "autofile:///tasks/one" });
+  const invalid = await store.getRecord({ uri: "autofile:///records/tasks/one" });
   assert.ok("error" in invalid);
   const validationError = invalid.error;
   if (typeof validationError !== "string") assert.fail("invalid record should include an error");
   assert.match(validationError, /status/u);
   assert.deepEqual(await store.updateRecord({
-    uri: "autofile:///tasks/one",
+    uri: "autofile:///records/tasks/one",
     patch: { status: "waiting" },
-  }), { uri: "autofile:///tasks/one" });
-  const repaired = await store.getRecord({ uri: "autofile:///tasks/one" });
+  }), { uri: "autofile:///records/tasks/one" });
+  const repaired = await store.getRecord({ uri: "autofile:///records/tasks/one" });
   assert.ok(!("error" in repaired));
 });
 
@@ -2477,24 +2468,24 @@ test("refused updates and unreadable record files return errors without overwrit
     key: "kept",
     record: { title: "Kept", status: "active" },
   });
-  const recordPath = join(dataFolder, "tasks", "kept.json");
+  const recordPath = join(dataFolder, "records", "tasks", "kept.json");
   const before = await readFile(recordPath, "utf8");
   assert.match(errorMessages(await store.updateRecord({
-    uri: "autofile:///tasks/kept",
+    uri: "autofile:///records/tasks/kept",
     patch: { status: "unknown" },
   }))[0] ?? "", /status/u);
   assert.equal(await readFile(recordPath, "utf8"), before);
 
-  await writeFile(join(dataFolder, "tasks", "broken.json"), "{\n");
+  await writeFile(join(dataFolder, "records", "tasks", "broken.json"), "{\n");
   assert.match(errorMessages(await store.getRecord({
-    uri: "autofile:///tasks/broken",
+    uri: "autofile:///records/tasks/broken",
   }))[0] ?? "", /unavailable/u);
   assert.match(errorMessages(await store.updateRecord({
-    uri: "autofile:///tasks/broken",
+    uri: "autofile:///records/tasks/broken",
     patch: { status: "active" },
   }))[0] ?? "", /unavailable/u);
 
-  await writeFile(join(dataFolder, "tasks", "spoofed.json"), `${JSON.stringify({
+  await writeFile(join(dataFolder, "records", "tasks", "spoofed.json"), `${JSON.stringify({
     createdAt: "2026-10-07T09:14:00Z",
     updatedAt: "2026-10-07T09:14:00Z",
     value: { title: "Spoofed", status: "active" },
@@ -2502,24 +2493,24 @@ test("refused updates and unreadable record files return errors without overwrit
     error: "fake",
   }, null, 2)}\n`);
   assert.match(errorMessages(await store.getRecord({
-    uri: "autofile:///tasks/spoofed",
+    uri: "autofile:///records/tasks/spoofed",
   }))[0] ?? "", /record is not valid/u);
 
-  await writeFile(join(dataFolder, "tasks", "bad-time.json"), `${JSON.stringify({
+  await writeFile(join(dataFolder, "records", "tasks", "bad-time.json"), `${JSON.stringify({
     createdAt: "2026-02-31T00:00:00Z",
     updatedAt: "2026-10-07T24:00:00Z",
     value: { title: "Impossible time", status: "active" },
   }, null, 2)}\n`);
   assert.match(errorMessages(await store.getRecord({
-    uri: "autofile:///tasks/bad-time",
+    uri: "autofile:///records/tasks/bad-time",
   }))[0] ?? "", /record is not valid/u);
 });
 
 test("invalid UTF-8 and BOM-prefixed declarations and records are not exposed", async () => {
   const { dataFolder, store } = await makeStore();
   await createTasksType(store);
-  const recordUri = "autofile:///tasks/malformed-utf8";
-  const recordPath = join(dataFolder, "tasks", "malformed-utf8.json");
+  const recordUri = "autofile:///records/tasks/malformed-utf8";
+  const recordPath = join(dataFolder, "records", "tasks", "malformed-utf8.json");
   await writeFile(recordPath, Buffer.concat([
     Buffer.from('{"createdAt":"2026-10-07T09:14:00Z","updatedAt":"2026-10-07T09:14:00Z","value":{"title":"'),
     Buffer.from([0xff]),
@@ -2531,25 +2522,25 @@ test("invalid UTF-8 and BOM-prefixed declarations and records are not exposed", 
   assert.equal(await store.readResource(recordUri), undefined);
 
   const bom = Buffer.from([0xef, 0xbb, 0xbf]);
-  const bomRecordUri = "autofile:///tasks/bom-prefixed";
-  await writeFile(join(dataFolder, "tasks", "bom-prefixed.json"), Buffer.concat([
+  const bomRecordUri = "autofile:///records/tasks/bom-prefixed";
+  await writeFile(join(dataFolder, "records", "tasks", "bom-prefixed.json"), Buffer.concat([
     bom,
     Buffer.from('{"createdAt":"2026-10-07T09:14:00Z","updatedAt":"2026-10-07T09:14:00Z","value":{"title":"BOM","status":"active"}}\n'),
   ]));
-  await writeFile(join(dataFolder, "_types", "bom-type.json"), Buffer.concat([
+  await writeFile(join(dataFolder, "types", "bom-type.json"), Buffer.concat([
     bom,
     Buffer.from('{"description":"BOM type.","schema":{"type":"object"}}\n'),
   ]));
   assert.match(errorMessages(await store.getRecord({ uri: bomRecordUri }))[0] ?? "", /unavailable/u);
   assert.match(errorMessages(await store.getType({ type: "bom-type" }))[0] ?? "", /unavailable/u);
   const resourcesBeforeDeclarationCorruption = await store.listResources();
-  for (const uri of [bomRecordUri, "autofile:///_types/bom-type"]) {
+  for (const uri of [bomRecordUri, "autofile:///types/bom-type"]) {
     assert.equal(resourcesBeforeDeclarationCorruption.some((resource) => resource.uri === uri), false);
     assert.equal(await store.readResource(uri), undefined);
   }
 
-  const typeUri = "autofile:///_types/tasks";
-  await writeFile(join(dataFolder, "_types", "tasks.json"), Buffer.concat([
+  const typeUri = "autofile:///types/tasks";
+  await writeFile(join(dataFolder, "types", "tasks.json"), Buffer.concat([
     Buffer.from('{"description":"'),
     Buffer.from([0xff]),
     Buffer.from('","schema":{"type":"object"}}\n'),
@@ -2582,17 +2573,17 @@ test("resource reads reject symlinked storage directories and final files", asyn
   await Promise.all([
     writeFile(join(external, "types", "tasks.json"), declarationText),
     writeFile(join(external, "blobs", blobName), "outside blob"),
-    symlink(join(external, "types"), join(directoryStore.dataFolder, "_types"), "dir"),
-    symlink(join(external, "blobs"), join(directoryStore.dataFolder, "_blobs"), "dir"),
+    symlink(join(external, "types"), join(directoryStore.dataFolder, "types"), "dir"),
+    symlink(join(external, "blobs"), join(directoryStore.dataFolder, "blobs"), "dir"),
   ]);
 
   assert.deepEqual(await directoryStore.store.listResources(), []);
   assert.equal(
-    await directoryStore.store.readResource("autofile:///_types/tasks"),
+    await directoryStore.store.readResource("autofile:///types/tasks"),
     undefined,
   );
   assert.equal(
-    await directoryStore.store.readResource(`autofile:///_blobs/${blobName}`),
+    await directoryStore.store.readResource(`autofile:///blobs/${blobName}`),
     undefined,
   );
 
@@ -2618,37 +2609,37 @@ test("resource reads reject symlinked storage directories and final files", asyn
     writeFile(join(fileStore.root, "outside-files", "declaration.json"), declarationText),
     writeFile(join(fileStore.root, "outside-files", "blob.pdf"), "outside blob"),
     mkdir(join(fileStore.root, "outside-records"), { recursive: true }),
-    mkdir(join(fileStore.dataFolder, "_blobs"), { recursive: true }),
+    mkdir(join(fileStore.dataFolder, "blobs"), { recursive: true }),
   ]);
   await writeFile(join(fileStore.root, "outside-records", "one.json"), recordText);
-  await rm(join(fileStore.dataFolder, "events"), { recursive: true });
-  await rm(join(fileStore.dataFolder, "_types", "contacts.json"));
+  await rm(join(fileStore.dataFolder, "records", "events"), { recursive: true });
+  await rm(join(fileStore.dataFolder, "types", "contacts.json"));
   await Promise.all([
     symlink(
       join(fileStore.root, "outside-records"),
-      join(fileStore.dataFolder, "events"),
+      join(fileStore.dataFolder, "records", "events"),
       "dir",
     ),
     symlink(
       join(fileStore.root, "outside-files", "record.json"),
-      join(fileStore.dataFolder, "tasks", "linked.json"),
+      join(fileStore.dataFolder, "records", "tasks", "linked.json"),
     ),
     symlink(
       join(fileStore.root, "outside-files", "declaration.json"),
-      join(fileStore.dataFolder, "_types", "contacts.json"),
+      join(fileStore.dataFolder, "types", "contacts.json"),
     ),
     symlink(
       join(fileStore.root, "outside-files", "blob.pdf"),
-      join(fileStore.dataFolder, "_blobs", blobName),
+      join(fileStore.dataFolder, "blobs", blobName),
     ),
   ]);
 
   const resources = await fileStore.store.listResources();
   for (const uri of [
-    "autofile:///events/one",
-    "autofile:///tasks/linked",
-    "autofile:///_types/contacts",
-    `autofile:///_blobs/${blobName}`,
+    "autofile:///records/events/one",
+    "autofile:///records/tasks/linked",
+    "autofile:///types/contacts",
+    `autofile:///blobs/${blobName}`,
   ]) {
     assert.equal(resources.some((resource) => resource.uri === uri), false);
     assert.equal(await fileStore.store.readResource(uri), undefined);
@@ -2658,7 +2649,7 @@ test("resource reads reject symlinked storage directories and final files", asyn
 test("resource reads reject FIFOs without waiting for a writer", { timeout: 5_000 }, async (context) => {
   const { dataFolder, store } = await makeStore();
   const blobName = `${"f".repeat(64)}.bin`;
-  const blobFolder = join(dataFolder, "_blobs");
+  const blobFolder = join(dataFolder, "blobs");
   const fifoPath = join(blobFolder, blobName);
   await mkdir(blobFolder, { recursive: true });
   if (!await makeFifo(fifoPath)) {
@@ -2666,22 +2657,22 @@ test("resource reads reject FIFOs without waiting for a writer", { timeout: 5_00
     return;
   }
 
-  assert.equal(await store.readResource(`autofile:///_blobs/${blobName}`), undefined);
+  assert.equal(await store.readResource(`autofile:///blobs/${blobName}`), undefined);
 });
 
 test("resource reads ignore storage paths whose components are not directories", async () => {
   const wrongRoots = await makeStore();
   await Promise.all([
-    writeFile(join(wrongRoots.dataFolder, "_types"), "not a directory\n"),
-    writeFile(join(wrongRoots.dataFolder, "_blobs"), "not a directory\n"),
+    writeFile(join(wrongRoots.dataFolder, "types"), "not a directory\n"),
+    writeFile(join(wrongRoots.dataFolder, "blobs"), "not a directory\n"),
   ]);
   assert.deepEqual(await wrongRoots.store.listResources(), []);
   assert.equal(
-    await wrongRoots.store.readResource("autofile:///_types/tasks"),
+    await wrongRoots.store.readResource("autofile:///types/tasks"),
     undefined,
   );
   assert.equal(
-    await wrongRoots.store.readResource(`autofile:///_blobs/${"a".repeat(64)}.pdf`),
+    await wrongRoots.store.readResource(`autofile:///blobs/${"a".repeat(64)}.pdf`),
     undefined,
   );
 
@@ -2691,26 +2682,26 @@ test("resource reads ignore storage paths whose components are not directories",
     description: "Things to do.",
     schema: { type: "object" },
   });
-  await rm(join(wrongTypeFolder.dataFolder, "tasks"), { recursive: true });
-  await writeFile(join(wrongTypeFolder.dataFolder, "tasks"), "not a directory\n");
+  await rm(join(wrongTypeFolder.dataFolder, "records", "tasks"), { recursive: true });
+  await writeFile(join(wrongTypeFolder.dataFolder, "records", "tasks"), "not a directory\n");
   assert.deepEqual(await wrongTypeFolder.store.listResources(), [{
-    uri: "autofile:///_types/tasks",
+    uri: "autofile:///types/tasks",
     name: "Type: tasks",
     mimeType: "application/json",
     description: "Things to do.",
   }]);
   assert.equal(
-    await wrongTypeFolder.store.readResource("autofile:///tasks/missing"),
+    await wrongTypeFolder.store.readResource("autofile:///records/tasks/missing"),
     undefined,
   );
 });
 
-test("blob resources accept the size limit and ignore files one byte larger", async () => {
+test("blob resources inline the limit and report download details one byte above it", async () => {
   const { dataFolder, store } = await makeStore();
   const maximumBlobBytes = 7_340_032;
   const acceptedName = `${"b".repeat(64)}.bin`;
   const oversizedName = `${"c".repeat(64)}.bin`;
-  const blobFolder = join(dataFolder, "_blobs");
+  const blobFolder = join(dataFolder, "blobs");
   await mkdir(blobFolder, { recursive: true });
   await Promise.all([
     writeFile(join(blobFolder, acceptedName), ""),
@@ -2723,10 +2714,17 @@ test("blob resources accept the size limit and ignore files one byte larger", as
 
   const resources = await store.listResources();
   assert.deepEqual(resources, []);
-  const accepted = await store.readResource(`autofile:///_blobs/${acceptedName}`);
+  const accepted = await store.readResource(`autofile:///blobs/${acceptedName}`);
   assert.ok(accepted !== undefined && "blob" in accepted);
   assert.equal(Buffer.from(accepted.blob, "base64").byteLength, maximumBlobBytes);
-  assert.equal(await store.readResource(`autofile:///_blobs/${oversizedName}`), undefined);
+  await assert.rejects(store.readResource(`autofile:///blobs/${oversizedName}`), (error: unknown) => {
+    assert.ok(error instanceof Error && "data" in error);
+    const data = error.data as { uri: string; size: number; limit: number };
+    assert.equal(data.uri, `autofile:///blobs/${oversizedName}`);
+    assert.equal(data.size, maximumBlobBytes + 1);
+    assert.equal(data.limit, maximumBlobBytes);
+    return true;
+  });
 });
 
 test("resources enforce recognized files but keep schema-invalid stored envelopes", async () => {
@@ -2745,7 +2743,7 @@ test("resources enforce recognized files but keep schema-invalid stored envelope
       properties: { status: { const: "complete" } },
     },
   });
-  const keptUri = "autofile:///tasks/kept";
+  const keptUri = "autofile:///records/tasks/kept";
 
   const timestamp = "2026-10-07T09:14:00Z";
   const blobDirectoryName = `${"d".repeat(64)}.pdf`;
@@ -2754,35 +2752,35 @@ test("resources enforce recognized files but keep schema-invalid stored envelope
     updatedAt: timestamp,
     value: { status: "complete" },
   }, null, 2)}\n`;
-  await mkdir(join(dataFolder, "_blobs"), { recursive: true });
+  await mkdir(join(dataFolder, "blobs"), { recursive: true });
   await Promise.all([
-    writeFile(join(dataFolder, "tasks", "malformed.json"), "{\n"),
-    writeFile(join(dataFolder, "tasks", "invalid.json"), '{"value":{}}\n'),
-    writeFile(join(dataFolder, "tasks", "Upper.json"), validEnvelope),
-    writeFile(join(dataFolder, "tasks", "note.txt"), validEnvelope),
-    mkdir(join(dataFolder, "tasks", "nested.json")),
-    writeFile(join(dataFolder, "_types", "malformed.json"), "{\n"),
-    writeFile(join(dataFolder, "_types", "invalid.json"), '{"description":42,"schema":{}}\n'),
+    writeFile(join(dataFolder, "records", "tasks", "malformed.json"), "{\n"),
+    writeFile(join(dataFolder, "records", "tasks", "invalid.json"), '{"value":{}}\n'),
+    writeFile(join(dataFolder, "records", "tasks", "Upper.json"), validEnvelope),
+    writeFile(join(dataFolder, "records", "tasks", "note.txt"), validEnvelope),
+    mkdir(join(dataFolder, "records", "tasks", "nested.json")),
+    writeFile(join(dataFolder, "types", "malformed.json"), "{\n"),
+    writeFile(join(dataFolder, "types", "invalid.json"), '{"description":42,"schema":{}}\n'),
     writeFile(
-      join(dataFolder, "_types", "empty-title.json"),
+      join(dataFolder, "types", "empty-title.json"),
       '{"description":"Bad title.","title":"","schema":{}}\n',
     ),
     writeFile(
-      join(dataFolder, "_types", "bad-title.json"),
+      join(dataFolder, "types", "bad-title.json"),
       '{"description":"Bad title.","title":42,"schema":{}}\n',
     ),
     writeFile(
-      join(dataFolder, "_types", "unexpected-field.json"),
+      join(dataFolder, "types", "unexpected-field.json"),
       '{"description":"Unexpected field.","unexpected":true,"schema":{}}\n',
     ),
     writeFile(
-      join(dataFolder, "_types", "bad-schema.json"),
+      join(dataFolder, "types", "bad-schema.json"),
       '{"description":"Bad schema.","schema":{"type":"not-a-type"}}\n',
     ),
-    writeFile(join(dataFolder, "_types", "Bad.json"), '{"description":"Bad","schema":{}}\n'),
-    mkdir(join(dataFolder, "_types", "nested.json")),
-    writeFile(join(dataFolder, "_blobs", "not-a-blob.pdf"), "ignored"),
-    mkdir(join(dataFolder, "_blobs", blobDirectoryName)),
+    writeFile(join(dataFolder, "types", "Bad.json"), '{"description":"Bad","schema":{}}\n'),
+    mkdir(join(dataFolder, "types", "nested.json")),
+    writeFile(join(dataFolder, "blobs", "not-a-blob.pdf"), "ignored"),
+    mkdir(join(dataFolder, "blobs", blobDirectoryName)),
   ]);
 
   const resources = await store.listResources();
@@ -2798,25 +2796,25 @@ test("resources enforce recognized files but keep schema-invalid stored envelope
   ]) {
     assert.equal(listedTypes.types.some((listed) => listed.type === type), false);
     assert.deepEqual(await store.getType({ type }), {
-      errors: [{ uri: `autofile:///_types/${type}`, message: "type declaration is not valid" }],
+      errors: [{ uri: `autofile:///types/${type}`, message: "type declaration is not valid" }],
     });
   }
   for (const uri of [
-    "autofile:///tasks/malformed",
-    "autofile:///tasks/invalid",
-    "autofile:///tasks/Upper",
-    "autofile:///tasks/note.txt",
-    "autofile:///tasks/nested",
-    "autofile:///_types/malformed",
-    "autofile:///_types/invalid",
-    "autofile:///_types/empty-title",
-    "autofile:///_types/bad-title",
-    "autofile:///_types/unexpected-field",
-    "autofile:///_types/bad-schema",
-    "autofile:///_types/Bad",
-    "autofile:///_types/nested",
-    "autofile:///_blobs/not-a-blob.pdf",
-    `autofile:///_blobs/${blobDirectoryName}`,
+    "autofile:///records/tasks/malformed",
+    "autofile:///records/tasks/invalid",
+    "autofile:///records/tasks/Upper",
+    "autofile:///records/tasks/note.txt",
+    "autofile:///records/tasks/nested",
+    "autofile:///types/malformed",
+    "autofile:///types/invalid",
+    "autofile:///types/empty-title",
+    "autofile:///types/bad-title",
+    "autofile:///types/unexpected-field",
+    "autofile:///types/bad-schema",
+    "autofile:///types/Bad",
+    "autofile:///types/nested",
+    "autofile:///blobs/not-a-blob.pdf",
+    `autofile:///blobs/${blobDirectoryName}`,
   ]) {
     assert.equal(resources.some((resource) => resource.uri === uri), false);
     assert.equal(await store.readResource(uri), undefined);
@@ -2831,15 +2829,15 @@ test("record readers ignore names and locations Autofile could not have written"
     updatedAt: "2026-10-07T09:14:00Z",
     value: { title: "Invalid", status: "unknown" },
   }, null, 2)}\n`;
-  await writeFile(join(dataFolder, "tasks", ".temporary.json"), invalidRecord);
-  await writeFile(join(dataFolder, "tasks", "Upper.json"), invalidRecord);
-  await writeFile(join(dataFolder, "tasks", "note.txt"), invalidRecord);
-  await mkdir(join(dataFolder, "tasks", "nested.json"));
-  await mkdir(join(dataFolder, "undeclared"));
-  await writeFile(join(dataFolder, "undeclared", "record.json"), invalidRecord);
+  await writeFile(join(dataFolder, "records", "tasks", ".temporary.json"), invalidRecord);
+  await writeFile(join(dataFolder, "records", "tasks", "Upper.json"), invalidRecord);
+  await writeFile(join(dataFolder, "records", "tasks", "note.txt"), invalidRecord);
+  await mkdir(join(dataFolder, "records", "tasks", "nested.json"));
+  await mkdir(join(dataFolder, "records", "undeclared"));
+  await writeFile(join(dataFolder, "records", "undeclared", "record.json"), invalidRecord);
 
   assert.deepEqual(await store.updateType({ type: "tasks", description: "Still tasks." }), {
-    uri: "autofile:///_types/tasks",
+    uri: "autofile:///types/tasks",
     errors: [],
   });
 });
@@ -2853,23 +2851,23 @@ test("delete_record removes its storage and delete_type refuses all remaining st
     record: { title: "Last", status: "active" },
   });
   assert.match(errorMessages(await store.deleteType({ type: "tasks" }))[0] ?? "", /still has stored data/u);
-  assert.deepEqual(await store.deleteRecord({ uri: "autofile:///tasks/last" }), {
-    uri: "autofile:///tasks/last",
+  assert.deepEqual(await store.deleteRecord({ uri: "autofile:///records/tasks/last" }), {
+    uri: "autofile:///records/tasks/last",
   });
-  await assert.rejects(stat(join(dataFolder, "tasks", "last.json")));
-  assert.match(errorMessages(await store.getRecord({ uri: "autofile:///tasks/last" }))[0] ?? "", /does not exist/u);
-  assert.match(errorMessages(await store.deleteRecord({ uri: "autofile:///tasks/last" }))[0] ?? "", /does not exist/u);
-  await writeFile(join(dataFolder, "tasks", ".DS_Store"), "ignored\n");
+  await assert.rejects(stat(join(dataFolder, "records", "tasks", "last.json")));
+  assert.match(errorMessages(await store.getRecord({ uri: "autofile:///records/tasks/last" }))[0] ?? "", /does not exist/u);
+  assert.match(errorMessages(await store.deleteRecord({ uri: "autofile:///records/tasks/last" }))[0] ?? "", /does not exist/u);
+  await writeFile(join(dataFolder, "records", "tasks", ".DS_Store"), "ignored\n");
   assert.deepEqual(await store.deleteType({ type: "tasks" }), {
-    errors: [{ uri: "autofile:///_types/tasks", message: "type still has stored data" }],
+    errors: [{ uri: "autofile:///types/tasks", message: "type still has stored data" }],
   });
-  assert.equal(await readFile(join(dataFolder, "tasks", ".DS_Store"), "utf8"), "ignored\n");
-  await rm(join(dataFolder, "tasks", ".DS_Store"));
+  assert.equal(await readFile(join(dataFolder, "records", "tasks", ".DS_Store"), "utf8"), "ignored\n");
+  await rm(join(dataFolder, "records", "tasks", ".DS_Store"));
   assert.deepEqual(await store.deleteType({ type: "tasks" }), {
-    uri: "autofile:///_types/tasks",
+    uri: "autofile:///types/tasks",
   });
-  await assert.rejects(stat(join(dataFolder, "_types", "tasks.json")));
-  await assert.rejects(stat(join(dataFolder, "tasks")), { code: "ENOENT" });
+  await assert.rejects(stat(join(dataFolder, "types", "tasks.json")));
+  await assert.rejects(stat(join(dataFolder, "records", "tasks")), { code: "ENOENT" });
 });
 
 test("several processes serialize generated-key creates and updates without losing records", async () => {
@@ -2908,13 +2906,13 @@ test("several processes serialize generated-key creates and updates without losi
     String(worker),
   ])));
 
-  const names = (await readdir(join(dataFolder, "events"))).sort();
+  const names = (await readdir(join(dataFolder, "records", "events"))).sort();
   assert.equal(names.length, 32);
   assert.equal(new Set(names).size, 32);
   for (const name of names) {
     assert.match(name, /^[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}\.json$/u);
     const record = await store.getRecord({
-      uri: `autofile:///events/${name.slice(0, -".json".length)}`,
+      uri: `autofile:///records/events/${name.slice(0, -".json".length)}`,
     });
     assert.ok("value" in record);
     assert.equal(record.value.complete, true);
@@ -2951,7 +2949,7 @@ test("concurrent processes preserve every merge patch to one record", async () =
     }
     const worker = Number(workerText);
     const result = await childStore.updateRecord({
-      uri: "autofile:///shared/one",
+      uri: "autofile:///records/shared/one",
       patch: { [\`worker-\${worker}\`]: true },
     });
     if (!("uri" in result)) throw new Error(JSON.stringify(result));
@@ -2974,7 +2972,7 @@ test("concurrent processes preserve every merge patch to one record", async () =
   await writeFile(startPath, "start\n");
   await Promise.all(workers);
 
-  const result = await store.getRecord({ uri: "autofile:///shared/one" });
+  const result = await store.getRecord({ uri: "autofile:///records/shared/one" });
   assert.ok("value" in result);
   assert.deepEqual(result.value, {
     base: true,
@@ -3043,7 +3041,7 @@ test("reads racing repeated updates see only complete record versions", async ()
     const size = Number(sizeText);
     for (let version = 1; version <= iterations; version += 1) {
       const result = await childStore.updateRecord({
-        uri: "autofile:///snapshots/current",
+        uri: "autofile:///records/snapshots/current",
         patch: {
           version,
           checksum: \`version-\${version}\`,
@@ -3089,7 +3087,7 @@ test("reads racing repeated updates see only complete record versions", async ()
   const observedVersions = new Set<number>();
   let totalReads = 0;
   while (!updateSettled || totalReads < 100) {
-    const result = await store.getRecord({ uri: "autofile:///snapshots/current" });
+    const result = await store.getRecord({ uri: "autofile:///records/snapshots/current" });
     assert.ok("value" in result, JSON.stringify(result));
     assert.ok(!("error" in result), JSON.stringify(result));
     const { version, checksum, payload } = result.value;
@@ -3153,7 +3151,7 @@ test("a public write waits until another process releases write.lock", async () 
     await writeFile(releasePath, "release\n");
   }
   await holder;
-  assert.deepEqual(await write, { uri: "autofile:///tasks/waited" });
+  assert.deepEqual(await write, { uri: "autofile:///records/tasks/waited" });
 });
 
 test("a write fails promptly when the lock path is unusable", async () => {
@@ -3209,7 +3207,7 @@ test("a write takes over a lock left stale for more than ten seconds", async () 
   } finally {
     clearTimeout(timeout);
   }
-  assert.deepEqual(result, { uri: "autofile:///tasks/after-stale-lock" });
+  assert.deepEqual(result, { uri: "autofile:///records/tasks/after-stale-lock" });
   assert.equal(await pathExists(writeLockPath), false);
 });
 

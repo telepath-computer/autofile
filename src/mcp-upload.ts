@@ -1,14 +1,14 @@
 /** Validates MCP upload sources and reads local files only for stdio requests. */
 
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, type FileHandle } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 
 import { lookup as lookupMimeType } from "mime-types";
 
 import { AutofileError, type Autofile } from "./index.js";
 
-// Bound transport decoding and file reads before handing bytes to the library.
+// Bound base64 decoding to bytes that fit in one MCP message.
 const MAX_UPLOAD_BYTES = 7_340_032;
 
 /** Arguments to upload_blob; exactly one source is required. */
@@ -16,7 +16,7 @@ export interface UploadBlobInput { base64?: string; path?: string; mediaType?: s
 /** Local file access is granted only by the stdio transport. */
 export interface UploadBlobOptions { allowLocalPaths?: boolean }
 
-/** Uploads decoded bytes through the library's public blob operation. */
+/** Uploads decoded bytes or streamed local chunks through public blob operations. */
 export async function uploadBlob(
   autofile: Autofile,
   input: UploadBlobInput,
@@ -29,14 +29,12 @@ export async function uploadBlob(
     if (options.allowLocalPaths !== true) refuse("local paths are accepted only over stdio, not HTTP");
     if (!isAbsolute(input.path)) refuse("local upload path must be absolute");
     const mediaType = input.mediaType ?? (lookupMimeType(input.path) || "application/octet-stream");
-    let bytes: Uint8Array;
+    const file = await openUpload(input.path);
     try {
-      bytes = await readUpload(input.path);
-    } catch (error) {
-      if (error instanceof AutofileError) throw error;
-      return refuse("local upload source cannot be read");
+      return { uri: await autofile.blobs.putStream(uploadChunks(file), mediaType) };
+    } finally {
+      await file.close();
     }
-    return { uri: await autofile.blobs.put(bytes, mediaType) };
   }
   if (input.mediaType === undefined) refuse("mediaType is required for base64 uploads");
   const base64 = input.base64!;
@@ -54,30 +52,34 @@ export async function uploadBlob(
   return { uri: await autofile.blobs.put(bytes, input.mediaType) };
 }
 
-async function readUpload(path: string): Promise<Uint8Array> {
-  // Nonblocking opens and a regular-file check keep devices, sockets and pipes
-  // from hanging a request. The extra byte also detects growth after stat.
-  const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+async function openUpload(path: string): Promise<FileHandle> {
+  let file: FileHandle | undefined;
   try {
+    // Nonblocking opens and a regular-file check keep devices, sockets and pipes
+    // from hanging a request.
+    file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
     const details = await file.stat();
     if (!details.isFile()) refuse("local upload source must be a regular file");
-    if (details.size > MAX_UPLOAD_BYTES) refuseSize(details.size);
-    const buffer = Buffer.alloc(MAX_UPLOAD_BYTES + 1);
-    let length = 0;
-    while (length < buffer.length) {
-      const { bytesRead } = await file.read(buffer, length, buffer.length - length, null);
-      if (bytesRead === 0) break;
-      length += bytesRead;
-    }
-    if (length > MAX_UPLOAD_BYTES) refuseSize(length);
-    return buffer.subarray(0, length);
-  } finally {
-    await file.close();
+    return file;
+  } catch (error) {
+    await file?.close();
+    if (error instanceof AutofileError) throw error;
+    return refuse("local upload source cannot be read");
+  }
+}
+
+async function* uploadChunks(file: FileHandle): AsyncGenerator<Uint8Array> {
+  try {
+    // The upload adapter owns the handle and closes it even when validation
+    // fails before the library starts consuming these chunks.
+    for await (const chunk of file.createReadStream({ autoClose: false })) yield chunk as Buffer;
+  } catch {
+    refuse("local upload source cannot be read");
   }
 }
 
 function refuseSize(size: number): never {
-  return refuse(`blob is ${String(size)} bytes; limit is ${String(MAX_UPLOAD_BYTES)} bytes`);
+  return refuse(`base64 upload is ${String(size)} bytes; limit is ${String(MAX_UPLOAD_BYTES)} bytes; use path over stdio for larger files`);
 }
 
 function refuse(message: string): never {

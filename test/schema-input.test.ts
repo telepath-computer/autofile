@@ -51,7 +51,7 @@ test("type writes snapshot nested schemas, replacements, descriptions and titles
   definition.titleField = "changed";
   const created = await creating;
   assert.deepEqual(created, {
-    uri: "autofile:///_types/notes", type: "notes", description: "Original notes.", title: "Note", titleField: "name",
+    uri: "autofile:///types/notes", type: "notes", description: "Original notes.", title: "Note", titleField: "name",
     schema: { type: "object", properties: { name: { type: "string" } } },
   });
   assert.deepEqual(await store.types.get("notes"), created);
@@ -70,7 +70,7 @@ test("type writes snapshot nested schemas, replacements, descriptions and titles
   changes.titleField = "changed";
   const updated = await updating;
   assert.deepEqual(updated, {
-    uri: "autofile:///_types/notes", type: "notes", description: "Updated notes.", title: "Notebook entry", titleField: "title",
+    uri: "autofile:///types/notes", type: "notes", description: "Updated notes.", title: "Notebook entry", titleField: "title",
     schema: { type: "object", properties: { title: { type: "string" } } },
   });
   assert.deepEqual(await store.types.get("notes"), updated);
@@ -86,8 +86,8 @@ test("record creation captures the supplied key before I/O", async () => {
   options.key = "changed";
   const created = await creating;
   assert.equal(created.key, "original");
-  assert.deepEqual(await store.records.get("autofile:///notes/original"), created);
-  assert.equal(await store.records.get("autofile:///notes/changed"), undefined);
+  assert.deepEqual(await store.records.get("autofile:///records/notes/original"), created);
+  assert.equal(await store.records.get("autofile:///records/notes/changed"), undefined);
 });
 
 test("prepareSchema preserves the original schema after immediate caller mutation", async () => {
@@ -117,7 +117,7 @@ const invalidSchemaValues: Array<[string, () => unknown]> = [
 test("schema preparation and type writes reject lossy JSON before changing storage", async (t) => {
   const { root, store } = await fixture();
   const original = await store.types.create("notes", { description: "Notes.", schema: { type: "object" } });
-  const path = join(root, "data", "_types", "notes.json");
+  const path = join(root, "data", "types", "notes.json");
   const previous = await readFile(path, "utf8");
   for (const [index, [name, input]] of invalidSchemaValues.entries()) {
     await t.test(name, async () => {
@@ -126,8 +126,8 @@ test("schema preparation and type writes reject lossy JSON before changing stora
       await assert.rejects(store.types.create(`refused-${index}`, { description: "Refused.", schema }), isSchemaRefusal);
       await assert.rejects(store.types.update("notes", { description: "Refused.", schema }), isSchemaRefusal);
       assert.equal(await readFile(path, "utf8"), previous);
-      assert.deepEqual(await readdir(join(root, "data", "_types")), ["notes.json"]);
-      assert.deepEqual(await readdir(join(root, "data")), ["_types", "notes"]);
+      assert.deepEqual(await readdir(join(root, "data", "types")), ["notes.json"]);
+      assert.deepEqual(await readdir(join(root, "data")), ["records", "types"]);
       assert.deepEqual(await store.types.get("notes"), original);
     });
   }
@@ -156,7 +156,7 @@ test("metadata updates refuse lossy schemas retained from external JSON without 
   await store.types.create("notes", {
     description: "Notes.", schema: { type: "object", properties: { reading: { const: 12 } } },
   });
-  const path = join(root, "data", "_types", "notes.json");
+  const path = join(root, "data", "types", "notes.json");
   const original = await readFile(path, "utf8");
   for (const literal of ["1e400", "-1e400", "-0"]) {
     const external = original.replace('"const": 12', `"const": ${literal}`);
@@ -176,8 +176,8 @@ test("externally edited lossy schemas cannot validate record writes or appear as
     description: "Notes.", schema: { type: "object", properties: { reading: { const: 12 } } },
   });
   const record = await store.records.create("notes", { reading: 12 }, { key: "kept" });
-  const declarationPath = join(root, "data", "_types", "notes.json");
-  const recordPath = join(root, "data", "notes", "kept.json");
+  const declarationPath = join(root, "data", "types", "notes.json");
+  const recordPath = join(root, "data", "records", "notes", "kept.json");
   const originalDeclaration = await readFile(declarationPath, "utf8");
   const originalRecord = await readFile(recordPath, "utf8");
   for (const literal of ["1e400", "-1e400", "-0"]) {
@@ -191,7 +191,7 @@ test("externally edited lossy schemas cannot validate record writes or appear as
     await assert.rejects(store.records.update(record.uri, value), isSchemaRefusal);
     assert.equal(await readFile(declarationPath, "utf8"), external);
     assert.equal(await readFile(recordPath, "utf8"), originalRecord);
-    assert.deepEqual(await readdir(join(root, "data", "notes")), ["kept.json"]);
+    assert.deepEqual(await readdir(join(root, "data", "records", "notes")), ["kept.json"]);
   }
 });
 

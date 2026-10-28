@@ -35,13 +35,11 @@ The data folder contains:
 
 | Stored value | Location | Public address |
 | --- | --- | --- |
-| Record | `<type>/<key>.json` | `autofile:///<type>/<key>` |
-| Type declaration | `_types/<type>.json` | `autofile:///_types/<type>` |
-| Attachment | `_blobs/<hash>.<ext>` | `autofile:///_blobs/<hash>.<ext>` |
+| Record | `records/<type>/<key>.json` | `autofile:///records/<type>/<key>` |
+| Type declaration | `types/<type>.json` | `autofile:///types/<type>` |
+| Attachment | `blobs/<hash>.<ext>` | `autofile:///blobs/<hash>.<ext>` |
 
-Type names and record keys follow the rules in [Types](index.md#types) and [Keys](index.md#keys). The `_types` and `_blobs` directories are reserved for Autofile.
-
-These public addresses are unchanged from 0.3.0, so existing records and schemas need no migration. Clients keep and reuse them as opaque identifiers. The correspondence between addresses and locations in this table belongs to this storage implementation; other implementations need not use it.
+The location of each value is the path of its address, with `.json` added for records and declarations. Type names and record keys follow the rules in [Types](index.md#types) and [Keys](index.md#keys). Other entries at the top of the data folder are ignored.
 
 ## Stored values
 
@@ -57,7 +55,7 @@ Record files contain exactly `createdAt`, `updatedAt` and `value`. The value is 
 
 A type file contains only `description`, `schema` and optional `title` and `titleField`, as defined in [Types](index.md#types). A stored declaration with a `title` that is not a non-empty string is invalid. Autofile writes both kinds of file as UTF-8 JSON without a byte-order mark, with two-space indentation and a final newline. Readers accept other JSON formatting. Record and type identity, record titles and validation problems are added when the class returns public values; they are not stored in these files. Resource JSON is serialized separately from the public values and does not preserve the stored text.
 
-Blob files contain the original attachment bytes. Autofile names them using the 64-character lowercase hexadecimal SHA-256 hash of the bytes and, when known, a lowercase extension derived from the media type. The extension contains only letters, digits, underscores and hyphens; it is omitted when unknown. Equal contents with the same extension share one stored blob. Blob reads infer the media type from the extension, falling back to `application/octet-stream`. The current opaque attachment identifier is this filename; callers of the public interfaces must not interpret it.
+Blob files contain the original attachment bytes. Autofile names them using the 64-character lowercase hexadecimal SHA-256 hash of the bytes and, when known, a lowercase extension derived from the media type. The extension contains only letters, digits, underscores and hyphens; it is omitted when unknown. Equal contents with the same extension share one stored blob. Blob files are written read-only, because a blob address always refers to the same bytes and Autofile gives their path to clients over stdio. Blobs have no size limit. Blob reads infer the media type from the extension, falling back to `application/octet-stream`. The attachment identifier is this filename; callers of the public interfaces must not interpret the hash or extension.
 
 Autofile recognizes only regular files in these locations with valid type names, record keys or blob names. Other entries, including temporary files, `.DS_Store`, symlinks and special files, are not records, declarations or stored attachments. Type deletion nevertheless requires the type directory to be empty or absent. Every entry blocks deletion, including unreadable records and unrelated files or directories. A non-directory entry at the type directory path also blocks deletion. The declaration is preserved and the refusal says "type still has stored data".
 

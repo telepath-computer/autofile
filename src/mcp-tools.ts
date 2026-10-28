@@ -98,9 +98,9 @@ export function buildTools(autofile: Autofile): Tools {
       if (record === undefined) {
         // The library returns undefined for either missing part of this address;
         // MCP has always named the missing declaration when the type is absent.
-        const type = uri.slice("autofile:///".length).split("/")[0];
+        const type = uri.slice("autofile:///records/".length).split("/")[0];
         if (await autofile.types.get(type) === undefined) {
-          return { errors: [{ uri: `autofile:///_types/${type}`, message: "type does not exist" }] };
+          return { errors: [{ uri: `autofile:///types/${type}`, message: "type does not exist" }] };
         }
         return { errors: [{ uri, message: "record does not exist" }] };
       }
@@ -131,7 +131,7 @@ export function buildTools(autofile: Autofile): Tools {
     getType: ({ type }) => withRefusal(async () => {
       const declaration = await autofile.types.get(type);
       if (declaration === undefined) {
-        return { errors: [{ uri: `autofile:///_types/${type}`, message: "type does not exist" }] };
+        return { errors: [{ uri: `autofile:///types/${type}`, message: "type does not exist" }] };
       }
       const { type: _type, ...result } = declaration;
       return result;
@@ -146,7 +146,7 @@ export function buildTools(autofile: Autofile): Tools {
     }),
     deleteType: ({ type }) => withRefusal(async () => {
       await autofile.types.delete(type);
-      return { uri: `autofile:///_types/${type}` };
+      return { uri: `autofile:///types/${type}` };
     }),
   };
 }
