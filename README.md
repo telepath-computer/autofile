@@ -48,6 +48,12 @@ You need Node.js 24 or later.
 
 Autofile starts empty. Your agent proposes types as it needs them, and creates each one once you agree.
 
+## File over app
+
+Autofile follows [File over app](https://stephango.com/file-over-app), the philosophy of Steph Ango (kepano), CEO of Obsidian: "Apps are ephemeral, but your files have a chance to last."
+
+Your records are plain JSON files in one Autofile folder, with attachments kept as the original files. Put the folder anywhere, such as Dropbox to sync it between machines, with `autofile set storage ~/Dropbox/Autofile`. Any program can read it, with or without Autofile, and the files are yours forever.
+
 ## Serve over HTTP
 
 For apps and agents that connect over HTTP, run:
