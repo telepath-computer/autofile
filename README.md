@@ -1,85 +1,92 @@
-# Autofile
+<p align="center">
+  <img src="assets/icon.svg" width="72" height="72" alt="Autofile icon">
+</p>
 
-Autofile makes it easy for agents to store information in a structured, unambiguous way, and makes that information available to the services and interfaces that want to use it and show it.
+<h1 align="center">Autofile</h1>
 
-Autofile is designed for:
+<p align="center">
+  <strong>A portable, open filesystem for agents.</strong>
+</p>
 
-- **No ambiguity on input.** Every kind of information has one defined place and type, with clear instructions for how it is filed.
-- **Efficient retrieval.** Agents find what they need by keyword search, by matching on typed properties, and by following links between records.
-- **Shared access.** Agents and programs use the same records, types and attachments through MCP or the library.
+<p align="center">
+  <a href="https://www.npmjs.com/package/@telepath-computer/autofile"><img src="https://img.shields.io/npm/v/@telepath-computer/autofile" alt="npm version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/telepath-computer/autofile" alt="MIT licence"></a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A524-339933" alt="Node 24 or later">
+</p>
 
-Autofile is an [MCP](https://modelcontextprotocol.io) server and a library. Agents use its tools and resources; programs can embed the same store through the `Autofile` class.
+<p align="center">
+  <img src="assets/autofile-view.png" width="760" alt="A grid of records in Autofile: journal entries, contacts, events, topics and saved references">
+  <br>
+  <em>GUI coming soon</em>
+</p>
 
-## Install
+**Agents file everything, and it never turns into a mess.** Every kind of information has one place and one shape, and anything that doesn't fit is turned away. A year of filing by any number of agents stays as coherent as the first day, and anything in it can still be found straight away.
 
-Autofile needs Node.js 24 or later.
+**The live data layer for the apps you vibe-code.** Point an app at Autofile and it has storage, search, links, file attachments and live updates, with nothing else to build. The screens agents put up on [Television](https://github.com/telepath-computer/television) work this way: they change the moment an agent files something.
 
-```sh
-npm install -g @telepath-computer/autofile
-```
+**Yours, wherever you take it.** Your records are plain files on your own machine, readable without Autofile and easy to move, back up or sync. Autofile is open source, and any agent that speaks [MCP](https://modelcontextprotocol.io) can use it.
 
-This installs the `autofile` command.
+## Get started
 
-## Connect an agent
+You need Node.js 24 or later.
 
-An MCP client starts Autofile itself by running `autofile`, and talks to it over stdio. For Claude Code:
+1. Install Autofile:
 
-```sh
-claude mcp add autofile --scope user -- autofile
-```
+   ```sh
+   npm install -g @telepath-computer/autofile
+   ```
 
-For another client, add an MCP server whose command is `autofile`, with no arguments.
+2. Add it to your agent. For Claude Code:
 
-Autofile starts with no types. Ask your agent to file something: it proposes a type, such as `contact` with the fields a contact needs, and creates it once you agree. It then files records of that type, and finds them again by search, by field value, or by following links between records.
+   ```sh
+   claude mcp add autofile --scope user -- autofile
+   ```
 
-## Choose a store
+   For another MCP client, add a server whose command is `autofile`, with no arguments.
 
-Autofile uses a default store until the `storage` setting selects another. Changing that setting moves no records and takes effect when clients restart Autofile. See [storage configuration](spec/storage.md#folders) for the current implementation and [Commands](spec/index.md#commands) for other settings.
+3. Ask your agent to remember something.
+
+Autofile starts empty. Your agent proposes types as it needs them, and creates each one once you agree.
 
 ## Serve over HTTP
 
-For clients that connect over HTTP, such as a web page, run:
+For apps and agents that connect over HTTP, run:
 
 ```sh
 autofile serve
 ```
 
-This serves the same tools and resources at `http://127.0.0.1:7319/mcp` until stopped. Autofile does not authenticate HTTP clients: anything that can reach the address can read and change every record. It therefore listens only on this machine by default, and accepts requests from web pages only when they are served from this machine. [Serving over HTTP](spec/index.md#serving-over-http) explains how to change the address, the port, and the web pages it accepts.
+This serves the same tools and resources at `http://127.0.0.1:7319/mcp`, and attachments next to it. Autofile does not authenticate HTTP clients, so anything that can reach the address can read and change every record. It listens only on this machine by default. [Serving over HTTP](spec/index.md#serving-over-http) explains how to change the address and which web pages it accepts.
 
-## Use as a library
+## Use it as a library
 
-Install the package in your project with `npm install @telepath-computer/autofile`, then import the ES module:
+Programs can use the same store directly:
+
+```sh
+npm install @telepath-computer/autofile
+```
 
 ```js
 import { Autofile } from "@telepath-computer/autofile";
 
 const store = new Autofile({ folder: "./records" });
 try {
-  const { records } = await store.records.find({ q: "dentist" });
+  const { records } = await store.records.find({ q: "Ada Park" });
   for (const record of records) console.log(record.title ?? record.uri);
 } finally {
   await store.close();
 }
 ```
 
-The `folder` option is the path of a store in the current implementation; [Storage](spec/storage.md) describes its format. Importing starts no server or watcher, and construction does no I/O. The first operation initializes the store if needed. [Library API](spec/index.md#library-api) covers writing records, declaring types, blobs, change subscriptions and errors.
+The [Library API](spec/index.md#library-api) covers writing records, declaring types, attachments and watching for changes.
 
-Record addresses use `autofile:///records/<type>/<key>`, type declarations use `autofile:///types/<name>`, and attachments use `autofile:///blobs/<hash>.<ext>`. Read and write through these addresses rather than opening stored files.
+## Status
 
-Upload an attachment before writing the record that holds it. `blobs.put(bytes, mediaType)` takes a `Uint8Array` and returns an address; put that address in a field marked `"format": "blob"` in the type schema. For an open store with a `document` type that declares `title` and `attachment` fields:
-
-```js
-const uri = await store.blobs.put(new TextEncoder().encode("Meeting notes"), "text/plain");
-await store.records.create("document", { title: "Meeting notes", attachment: uri });
-```
-
-Attachments have no size limit. `blobs.stream(uri)` reads a large one without loading it into memory. MCP clients read attachments of up to 7 MiB with `resources/read`; a larger one is downloaded from `autofile serve` over HTTP, or read from the local file path that Autofile gives over stdio.
-
-Records may share an attachment address. MCP clients use `upload_blob` with base64 bytes and a media type, or an absolute local file path over stdio, then put the returned address in the record. Record writes accept neither data URIs nor local paths in blob fields.
+Autofile is new and changing quickly. Until version 1.0, addresses, tools and the library API may change between minor versions.
 
 ## Specification
 
-[spec/index.md](spec/index.md) describes records, types, links, attachments, the MCP tools and resources, and the commands. [Storage](spec/storage.md) specifies the on-disk format, and [Implementation](spec/implementation.md) describes the code.
+[spec/index.md](spec/index.md) describes records, types, links, attachments, the MCP tools and resources, and the commands. [Storage](spec/storage.md) specifies the folder format, and [Implementation](spec/implementation.md) describes the code.
 
 ## Development
 
@@ -89,3 +96,7 @@ npm test
 ```
 
 `npm test` builds Autofile and runs the tests.
+
+## Licence
+
+[MIT](LICENSE)
