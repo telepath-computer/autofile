@@ -17,18 +17,20 @@
 <p align="center">
   <img src="assets/autofile-view.png" width="760" alt="A grid of records in Autofile: journal entries, contacts, events, topics and saved references">
   <br>
-  <em>Records shown in a prototype interface</em>
+  <em>GUI currently sold separately. If you're interested, <a href="https://telepath.computer">get in touch</a>.</em>
 </p>
 
-Autofile is a simple, local store for the information your agents keep for you. It holds typed records and their attachments in plain files on your own machine, and agents use it through [MCP](https://modelcontextprotocol.io). It is deliberately small, designed for working with agents and the software and interfaces they generate. It is built to work well with [Television](https://github.com/telepath-computer/television), where agents make interfaces for you.
+Autofile is a simple, local store for the information your agents keep for you, with live updates for the apps that show it. It holds typed records and their attachments in plain files on your own machine, is deliberately small, and is designed for working with agents over [MCP](https://modelcontextprotocol.io) and the software and interfaces they generate.
+
+Designed to work great with [Television](https://github.com/telepath-computer/television).
 
 ## Design philosophy
 
-**Agents file everything, and it never turns into a mess.** Every kind of information has one place and one shape, and anything that doesn't fit is turned away. A year of filing by any number of agents stays as coherent as the first day, and anything in it can still be found straight away.
+**Your agents file consistently.** Each type says what belongs in it and has a JSON Schema for its fields, and every write is checked against that schema. Records link to each other, and agents find them by keyword, by field value or by following links.
 
-**The live data layer for the apps you vibe-code.** Point an app at Autofile and it has storage, search, links, file attachments and live updates, with nothing else to build. The screens agents put up on [Television](https://github.com/telepath-computer/television) work this way: they change the moment an agent files something.
+**A live data layer for your apps.** Apps read and write the same records as agents, and are notified when a record changes. That makes it a good fit for artifacts and other software that agents generate.
 
-**Yours, wherever you take it.** Your records are plain JSON files in one folder on your own machine, with attachments kept as the original files. Put the folder anywhere, such as Dropbox to sync it, and read it with or without Autofile. Autofile is open source, and any agent that speaks MCP can use it. It follows [File over app](https://stephango.com/file-over-app), the philosophy of Steph Ango (kepano), CEO of Obsidian: "Apps are ephemeral, but your files have a chance to last."
+**Plain files you own.** Records are JSON files and attachments are the original files, in one folder you can keep anywhere, such as Dropbox. This follows the [File over app](https://stephango.com/file-over-app) philosophy: think of it like Obsidian for data.
 
 ## Get started
 
