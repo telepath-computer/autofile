@@ -17,14 +17,18 @@
 <p align="center">
   <img src="assets/autofile-view.png" width="760" alt="A grid of records in Autofile: journal entries, contacts, events, topics and saved references">
   <br>
-  <em>GUI coming soon</em>
+  <em>Records shown in a prototype interface</em>
 </p>
+
+Autofile is a simple, local store for the information your agents keep for you. It holds typed records and their attachments in plain files on your own machine, and agents use it through [MCP](https://modelcontextprotocol.io). It is deliberately small, designed for working with agents and the software and interfaces they generate. It is built to work well with [Television](https://github.com/telepath-computer/television), where agents make interfaces for you.
+
+## Design philosophy
 
 **Agents file everything, and it never turns into a mess.** Every kind of information has one place and one shape, and anything that doesn't fit is turned away. A year of filing by any number of agents stays as coherent as the first day, and anything in it can still be found straight away.
 
 **The live data layer for the apps you vibe-code.** Point an app at Autofile and it has storage, search, links, file attachments and live updates, with nothing else to build. The screens agents put up on [Television](https://github.com/telepath-computer/television) work this way: they change the moment an agent files something.
 
-**Yours, wherever you take it.** Your records are plain files on your own machine, readable without Autofile and easy to move, back up or sync. Autofile is open source, and any agent that speaks [MCP](https://modelcontextprotocol.io) can use it.
+**Yours, wherever you take it.** Your records are plain JSON files in one folder on your own machine, with attachments kept as the original files. Put the folder anywhere, such as Dropbox to sync it, and read it with or without Autofile. Autofile is open source, and any agent that speaks MCP can use it. It follows [File over app](https://stephango.com/file-over-app), the philosophy of Steph Ango (kepano), CEO of Obsidian: "Apps are ephemeral, but your files have a chance to last."
 
 ## Get started
 
@@ -47,12 +51,6 @@ You need Node.js 24 or later.
 3. Ask your agent to remember something.
 
 Autofile starts empty. Your agent proposes types as it needs them, and creates each one once you agree.
-
-## File over app
-
-Autofile follows [File over app](https://stephango.com/file-over-app), the philosophy of Steph Ango (kepano), CEO of Obsidian: "Apps are ephemeral, but your files have a chance to last."
-
-Your records are plain JSON files in one Autofile folder, with attachments kept as the original files. Put the folder anywhere, such as Dropbox to sync it between machines, with `autofile set storage ~/Dropbox/Autofile`. Any program can read it, with or without Autofile, and the files are yours forever.
 
 ## Serve over HTTP
 
