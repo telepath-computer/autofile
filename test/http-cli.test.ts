@@ -26,6 +26,13 @@ const cli = resolve("dist/cli.js");
 const roots: string[] = [];
 const servers: StartedServer[] = [];
 const clients: Client[] = [];
+const collectionTypeUri = "autofile:///types/collection";
+const collectionSummary = {
+  uri: collectionTypeUri,
+  type: "collection",
+  title: "Collection",
+  description: "Collections group records the way folders do. A record joins a collection through its collections list, not through a field.",
+};
 
 interface StartedServer {
   child: ChildProcess;
@@ -360,7 +367,7 @@ test("serve shares one store across HTTP tool and resource requests", { timeout:
   const resources = await client.listResources();
   assert.deepEqual(
     resources.resources.map(({ uri }) => uri),
-    ["autofile:///records/notes/first", "autofile:///types/notes"],
+    ["autofile:///records/notes/first", collectionTypeUri, "autofile:///types/notes"],
   );
   const record = await client.readResource({ uri: "autofile:///records/notes/first" });
   const content = record.contents[0];
@@ -403,7 +410,7 @@ test("serve refuses local blob paths and accepts explicit base64 uploads", { tim
   assert.deepEqual(await readdir(blobFolder), []);
   assert.deepEqual(
     (await client.listResources()).resources.map(({ uri }) => uri),
-    ["autofile:///types/receipts"],
+    [collectionTypeUri, "autofile:///types/receipts"],
   );
 
   const dataBytes = Buffer.from([0, 1, 2, 3, 250, 251, 252]);
@@ -593,7 +600,7 @@ test("serve refuses a path exposed by a conditional blob annotation", {
   assert.match(String(asObject(body.errors[0]).message), /fallback.*blob/iu);
   assert.deepEqual(
     (await client.listResources()).resources.map(({ uri }) => uri),
-    ["autofile:///types/conditional-assets"],
+    [collectionTypeUri, "autofile:///types/conditional-assets"],
   );
 });
 
@@ -863,7 +870,7 @@ test("an HTTP agent can search, patch, invalidate, read resources, and clean lin
   };
   assert.equal(
     creator.getInstructions(),
-    "Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree.\n\nTypes: none yet. This list was taken when the session began; call `list_types` for types created since.",
+    "Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree. Records of any type can also be put in collections, which work like folders: pass `collections` when creating or updating a record.\n\nTypes: collection. This list was taken when the session began; call `list_types` for types created since.",
   );
   assertToolJson(await creator.callTool({
     name: "create_type",
@@ -888,7 +895,7 @@ test("an HTTP agent can search, patch, invalidate, read resources, and clean lin
 
   const client = await connect(server.endpoint);
   assert.equal(client.getServerVersion()?.description, "Typed records that agents file and retrieve.");
-  assert.match(client.getInstructions() ?? "", /Types: contacts, organizations\./u);
+  assert.match(client.getInstructions() ?? "", /Types: collection, contacts, organizations\./u);
 
   const refusedPath = await client.callTool({ name: "upload_blob", arguments: { path: localPath } });
   const refusedPathBody = asObject(refusedPath.structuredContent);
@@ -1103,7 +1110,7 @@ test("serve options override HTTP settings for that process", { timeout: 30_000 
   assert.equal(server.listeningLine, `autofile: listening on http://127.0.0.1:${port}/mcp\n`);
   const client = await connect(server.endpoint);
   assert.deepEqual((await client.callTool({ name: "list_types", arguments: {} })).structuredContent, {
-    types: [],
+    types: [collectionSummary],
   });
 });
 
@@ -1119,7 +1126,7 @@ test("serve uses the default host when only the port is configured", {
 
   const client = await connect(server.endpoint);
   assert.deepEqual((await client.callTool({ name: "list_types", arguments: {} })).structuredContent, {
-    types: [],
+    types: [collectionSummary],
   });
 });
 
@@ -1236,7 +1243,7 @@ test("a refused valid write leaves the shared store unchanged", {
   assert.equal(response.headers.connection, "close");
   assert.deepEqual(
     (await client.listResources()).resources.map(({ uri }) => uri),
-    ["autofile:///types/notes"],
+    [collectionTypeUri, "autofile:///types/notes"],
   );
 });
 

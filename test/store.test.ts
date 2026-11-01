@@ -25,6 +25,17 @@ import { setTimeout as delay } from "node:timers/promises";
 import { openStore, type JsonObject, type JsonValue, type Store } from "./helpers/store.ts";
 
 const roots: string[] = [];
+const collectionDescription = "Collections group records the way folders do. A record joins a collection through its collections list, not through a field.";
+/** Every store lists the built-in collection type. */
+const collectionSummary = { uri: "autofile:///types/collection", type: "collection", description: collectionDescription, title: "Collection" };
+/** The built-in collection type as resources/list shows it. */
+const collectionResource = {
+  uri: "autofile:///types/collection",
+  name: "Type: collection",
+  title: "Collection",
+  mimeType: "application/json",
+  description: collectionDescription,
+};
 const taskSchema = {
   type: "object",
   required: ["title", "status"],
@@ -155,7 +166,7 @@ test("the initialized fixture creates a missing data folder", async () => {
   const { dataFolder, store } = await makeStore();
 
   assert.equal((await stat(dataFolder)).isDirectory(), true);
-  assert.deepEqual(await store.listTypes({}), { types: [] });
+  assert.deepEqual(await store.listTypes({}), { types: [collectionSummary] });
 });
 
 test("the fixture uses the data and lock locations resolved from AUTOFILE_HOME", async () => {
@@ -216,6 +227,7 @@ test("type operations persist exact declarations and list recognized files in na
   });
   assert.deepEqual(await store.listTypes({}), {
     types: [
+      collectionSummary,
       { uri: "autofile:///types/contacts", type: "contacts", description: "People." },
       {
         uri: "autofile:///types/tasks",
@@ -240,7 +252,7 @@ test("type operations persist exact declarations and list recognized files in na
   await writeFile(join(dataFolder, "types", "Bad.json"), "{}\n");
   await writeFile(join(dataFolder, "types", "notes.txt"), "ignored\n");
   await mkdir(join(dataFolder, "types", "nested.json"));
-  assert.equal((await store.listTypes({})).types.length, 2);
+  assert.equal((await store.listTypes({})).types.length, 3);
 });
 
 test("type names, duplicate types, and missing types are refused as JSON errors", async () => {
@@ -376,7 +388,7 @@ test("update_type preserves, replaces, and removes a type title", async () => {
     schema: { type: "object" },
   });
   assert.deepEqual(await store.listTypes({}), {
-    types: [{
+    types: [collectionSummary, {
       uri: "autofile:///types/journal-entries",
       type: "journal-entries",
       description: "Dated journal entries.",
@@ -2577,7 +2589,7 @@ test("resource reads reject symlinked storage directories and final files", asyn
     symlink(join(external, "blobs"), join(directoryStore.dataFolder, "blobs"), "dir"),
   ]);
 
-  assert.deepEqual(await directoryStore.store.listResources(), []);
+  assert.deepEqual(await directoryStore.store.listResources(), [collectionResource]);
   assert.equal(
     await directoryStore.store.readResource("autofile:///types/tasks"),
     undefined,
@@ -2666,7 +2678,7 @@ test("resource reads ignore storage paths whose components are not directories",
     writeFile(join(wrongRoots.dataFolder, "types"), "not a directory\n"),
     writeFile(join(wrongRoots.dataFolder, "blobs"), "not a directory\n"),
   ]);
-  assert.deepEqual(await wrongRoots.store.listResources(), []);
+  assert.deepEqual(await wrongRoots.store.listResources(), [collectionResource]);
   assert.equal(
     await wrongRoots.store.readResource("autofile:///types/tasks"),
     undefined,
@@ -2684,7 +2696,7 @@ test("resource reads ignore storage paths whose components are not directories",
   });
   await rm(join(wrongTypeFolder.dataFolder, "records", "tasks"), { recursive: true });
   await writeFile(join(wrongTypeFolder.dataFolder, "records", "tasks"), "not a directory\n");
-  assert.deepEqual(await wrongTypeFolder.store.listResources(), [{
+  assert.deepEqual(await wrongTypeFolder.store.listResources(), [collectionResource, {
     uri: "autofile:///types/tasks",
     name: "Type: tasks",
     mimeType: "application/json",
@@ -2713,7 +2725,7 @@ test("blob resources inline the limit and report download details one byte above
   ]);
 
   const resources = await store.listResources();
-  assert.deepEqual(resources, []);
+  assert.deepEqual(resources, [collectionResource]);
   const accepted = await store.readResource(`autofile:///blobs/${acceptedName}`);
   assert.ok(accepted !== undefined && "blob" in accepted);
   assert.equal(Buffer.from(accepted.blob, "base64").byteLength, maximumBlobBytes);

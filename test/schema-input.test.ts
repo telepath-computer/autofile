@@ -184,7 +184,7 @@ test("externally edited lossy schemas cannot validate record writes or appear as
     const external = originalDeclaration.replace('"const": 12', `"const": ${literal}`);
     await writeFile(declarationPath, external);
     await assert.rejects(store.types.get("notes"), isSchemaRefusal);
-    assert.deepEqual(await store.types.list(), []);
+    assert.deepEqual((await store.types.list()).map(({ type }) => type), ["collection"]);
     await assert.rejects(store.records.get(record.uri), isSchemaRefusal);
     const value = { reading: literal === "-0" ? 0 : null };
     await assert.rejects(store.records.create("notes", value, { key: "refused" }), isSchemaRefusal);

@@ -16,7 +16,7 @@ The current implementation stores data in a folder. [Storage](storage.md) specif
 
 A record has a JSON object as its value, like a row in a database table. [Types](#types) describes how a type is declared.
 
-A record has a type, a key, a URI, and the times it was created and last changed. Its fields are held in `value`:
+A record has a type, a key, a URI, the times it was created and last changed, and the [collections](#collections) it is in. Its fields are held in `value`:
 
 ```json
 {
@@ -25,6 +25,7 @@ A record has a type, a key, a URI, and the times it was created and last changed
   "key": "priya-narayan",
   "createdAt": "2026-10-07T09:14:00Z",
   "updatedAt": "2026-10-07T09:20:00Z",
+  "collections": ["autofile:///records/collection/family"],
   "value": {
     "name": "Priya Narayan",
     "employer": "autofile:///records/organization/acme",
@@ -33,7 +34,7 @@ A record has a type, a key, a URI, and the times it was created and last changed
 }
 ```
 
-Autofile sets `createdAt` when it creates the record and `updatedAt` when it writes an updated record value, as UTC times in the [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) format. These are record timestamps, independent of how the store persists the record. The tools that write records change only `value`.
+Autofile sets `createdAt` when it creates a record and `updatedAt` when it updates `value` or `collections`. Both are UTC times in the [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) format, independent of how the store persists the record.
 
 ### URIs
 
@@ -114,6 +115,20 @@ After each update or delete, Autofile deletes every blob that the previous versi
 
 Cleanup of uploads that no record has held is deferred; those uploads remain stored.
 
+### Collections
+
+A collection groups records, as a folder does. Collections are records of the built-in type `collection`, so they are created, found, read and deleted like any other record. The optional `collections` array lists the collection URIs beside `value`:
+
+- `collections` belongs to every record, whatever its type. It is not a field in `value`, so type schemas do not declare it, `where` does not match it, and a type cannot be changed in a way that affects it.
+- A record can be in any number of collections, or none. A record in none has no `collections` property. The array holds each URI at most once, and Autofile keeps it in the order it was written.
+- Each item is the URI of a `collection` record that exists. A write that names anything else is refused.
+- A collection in another collection is nested inside it. A write is refused if it would put a collection inside itself, directly or through the collections it is in.
+- Deleting a collection removes its URI from the `collections` of every record. The records themselves stay, and a nested collection with no other parent becomes a top-level collection. Membership is not part of `value`, so this never makes a record stop matching its type, and it is never refused for that reason.
+
+Membership is kept on each member, not as a list on the collection. Filing a record into a collection therefore changes only that record, and two writers filing different records into one collection do not overwrite each other. A collection has no order of its own; clients order its members, for example by title.
+
+The type `collection` is part of every store. Autofile lists it with the other types and refuses to create, change or delete it. The declaration has title `Collection` and title field `title`. Its schema requires a string `title` and allows a string `description` explaining what belongs in the collection.
+
 ## Types
 
 A type has a name and a declaration that describes its records. The URI of a declaration is `autofile:///types/<type>`, such as `autofile:///types/contact`. Autofile serves each declaration as an MCP resource.
@@ -145,7 +160,7 @@ A declaration has these fields:
 
 Schemas use JSON Schema 2020-12, the version MCP assumes when a schema does not name one. Autofile checks the `format` keyword, which JSON Schema validators skip unless configured to check it, and refuses a schema that uses a format it does not know, since that format would go unchecked. A value marked with `"format": "uri"` or `"format": "blob"` must be a string. A `$ref` in a schema may point only within that schema, so checking a record needs no external schema.
 
-Type names use lowercase letters, digits and hyphens, and start with a letter.
+Type names use lowercase letters, digits and hyphens, and start with a letter. The name `collection` is taken by the [built-in type](#collections).
 
 ### Changing types
 
@@ -171,8 +186,8 @@ The class provides these asynchronous methods:
 | --- | --- |
 | `records.find(query?)` | A `RecordQueryResult`: `records`, `unreadable`, and an optional `cursor`. |
 | `records.get(uri)` | An `AutofileRecord`, or `undefined` when the record or its type does not exist. A readable record is returned even when its value no longer matches the schema. |
-| `records.create(type, value, options?)` | The complete new `AutofileRecord`. `options.key` supplies a key; otherwise one is generated. |
-| `records.update(uri, patch)` | The complete updated `AutofileRecord`. The patch follows [JSON Merge Patch](#update_record). |
+| `records.create(type, value, options?)` | The complete new `AutofileRecord`. `options.key` supplies a key; otherwise one is generated. `options.collections` supplies the [collections](#collections) the record is in. |
+| `records.update(uri, patch, options?)` | The complete updated `AutofileRecord`. The patch follows [JSON Merge Patch](#update_record); `{}` leaves `value` unchanged. `options.collections` replaces the collections of the record, and `[]` removes it from all of them; omitted, they are unchanged. |
 | `records.delete(uri)` | No value. Applies the existing [link](#links) and [blob](#blobs) removal rules. |
 | `types.list()` | Every valid `TypeDeclaration`, ordered by name. |
 | `types.get(name)` | A `TypeDeclaration`, or `undefined` when absent. |
@@ -187,13 +202,13 @@ The class provides these asynchronous methods:
 | `watch(onChange, options?)` | A function returning a promise that stops this subscription. |
 | `close()` | No value. Stops the watcher and all subscriptions; the instance cannot be used afterwards. Calling it again is harmless. |
 
-`AutofileRecord` contains `uri`, `type`, `key`, `createdAt`, `updatedAt`, `value`, and optional `title` and `problems`. The title is the string at the field named by `titleField` in the type declaration. `problems` is an array of `AutofileProblem` values when a readable record does not match its type. Each problem has a `message` and an optional `uri`. Records that match their type omit `problems`.
+`AutofileRecord` contains `uri`, `type`, `key`, `createdAt`, `updatedAt`, `value`, and optional `collections`, `title` and `problems`. The title is the string at the field named by `titleField` in the type declaration. `problems` is an array of `AutofileProblem` values when a readable record does not match its type. Each problem has a `message` and an optional `uri`. Records that match their type omit `problems`.
 
 `TypeDefinition` contains the fields in [Types](#types): `description`, `schema`, and optional `title` and `titleField`. `TypeDeclaration` adds `type` and `uri`. All four methods that return declarations (`types.create`, `types.update`, `types.get`, and `types.list`) include `title` when declared and omit it otherwise. Creating or updating a type refuses a title that is not a non-empty string, except that `null` removes it on update. The declaration returned by `types.update` also has optional `problems`, with a record URI for each problem found when checking existing records against the updated type. `TypeChanges` permits partial updates and removal of `title` or `titleField` with `null`; omitted fields keep their current values. JSON values use the exported `JsonObject`, `JsonValue`, and `JsonPrimitive` types.
 
 Record values, update patches and schemas must contain only plain JSON data: objects with enumerable data properties, dense arrays, strings, booleans, null and finite numbers. Values that JSON serialization would change or drop are refused before schema validation or writing. These include `NaN`, infinities, negative zero, `undefined`, functions, symbols, bigint, sparse arrays, custom objects and circular references. Accessors and custom serialization are not called. Record writes, type writes and schema preparation copy their inputs before asynchronous work, so later changes by the caller do not alter the result.
 
-`RecordQuery` has the same optional `type`, `q`, `where`, `fields`, `limit`, and `cursor` options as [`find_records`](#find_records). With no query it searches every declared type. `type` may name one type or an array; an empty array selects none, and duplicate names have no effect. `where` matches only `value`, so a record field named `type` is distinct from the query option. Results are ordered by complete URI across all selected types. Selecting fields changes only `value`; it does not remove `title` or other record information. `unreadable` lists `{ uri, message }` for records that could not be read and matching records that do not match their schema, using the same rules as the MCP tool `errors` list.
+`RecordQuery` has the same optional `type`, `collection`, `q`, `where`, `fields`, `limit`, and `cursor` options as [`find_records`](#find_records). With no query it searches every declared type. `type` may name one type or an array; an empty array selects none, and duplicate names have no effect. `where` matches only `value`, so a record field named `type` is distinct from the query option. Results are ordered by complete URI across all selected types. Selecting fields changes only `value`; it does not remove `title` or other record information. `unreadable` lists `{ uri, message }` for records that could not be read and matching records that do not match their schema, using the same rules as the MCP tool `errors` list.
 
 Refused operations throw `AutofileError`, whose `problems` array gives each reason as `{ message, uri? }`. This includes invalid arguments, unacceptable schemas, refused writes and writes to missing records or types. Unexpected storage failures throw `Error`, with a message about the failed operation and no physical storage details. Missing reads return `undefined` as listed above.
 
@@ -209,11 +224,11 @@ The asynchronous static method `Autofile.prepareSchema(schema)` returns a `Prepa
 
 Autofile describes itself to clients with the description "Typed records that agents file and retrieve." It also sends instructions for the model, which clients such as Claude Code place in the system prompt for the whole session:
 
-> Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree.
+> Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree. Records of any type can also be put in collections, which work like folders: pass `collections` when creating or updating a record.
 >
-> Types: contact, organization, task. This list was taken when the session began; call `list_types` for types created since.
+> Types: collection, contact, organization, task. This list was taken when the session began; call `list_types` for types created since.
 
-The last line names the types that exist when the client connects, without their descriptions, so the instructions stay short however many types there are. Before any type exists, it begins "Types: none yet." Not every client shows instructions to the model, so the descriptions of `find_records` and `create_record` also say that Autofile is where durable information is kept.
+The last line names the types that exist when the client connects, without their descriptions, so the instructions stay short however many types there are. It always includes the built-in `collection`. Not every client shows instructions to the model, so the descriptions of `find_records` and `create_record` also say that Autofile is where durable information is kept.
 
 ### Resources
 
@@ -256,7 +271,7 @@ A blob larger than the inline limit described in [Reading blobs](#reading-blobs)
 
 The URL is relative because Autofile cannot know the address its clients reach it at, for example when a proxy serves it under a path prefix. Resolved against the endpoint `http://example.com/autofile/mcp`, it gives `http://example.com/autofile/blobs/9f86d081…0a08.jpg`. Over stdio, `data` has `path` in place of `url`, and the message names the file.
 
-Reading a record or type returns the same shape with `text` in place of `blob`. The text is JSON made from the public value, with object keys sorted at every depth, two-space indentation and a final newline. Array order is preserved. A record includes its identity, timestamps, value, optional title and any validation problems. A missing resource, or a record or type that cannot be returned as a readable value, produces MCP error `-32602`. Unexpected storage failures produce a protocol error.
+Reading a record or type returns the same shape with `text` in place of `blob`. The text is JSON made from the public value, with object keys sorted at every depth, two-space indentation and a final newline. Array order is preserved. A record includes its identity, timestamps, collections, value, optional title and any validation problems. A missing resource, or a record or type that cannot be returned as a readable value, produces MCP error `-32602`. Unexpected storage failures produce a protocol error.
 
 Results from `resources/list` and `resources/read` carry `ttlMs: 0` and `cacheScope: "private"`: a record can change at any time and belongs to the user, so a client that needs to know of changes subscribes to them.
 
@@ -288,6 +303,7 @@ Searches records across all types, one type, or selected types.
 | Argument | Type | Meaning |
 | --- | --- | --- |
 | `type` | string or array of strings | The type or types to search. All declared types when absent; an empty array selects none. |
+| `collection` | string or null | The URI of a collection: only records directly in it, not in collections nested inside it. `null` selects only records in no collection. All records when absent. |
 | `q` | string | Words that must all appear in the string values of a record, at any depth, ignoring case. |
 | `where` | object | Fields in the record `value` matched by value, in the [MongoDB query syntax](https://www.mongodb.com/docs/manual/tutorial/query-documents/) and with its matching rules: for an array field, a record matches if any item equals the value, and `null` matches a field that is missing. MongoDB operators such as `$lt` and `$in` are not supported yet, and a `where` that uses one is refused. They can be added later without changing this form. |
 | `limit` | integer | The most results a page returns, counting records and those listed in `errors`: 50 by default, from 1 to 200. |
@@ -298,9 +314,11 @@ Searches records across all types, one type, or selected types.
 { "type": "task", "q": "dentist", "where": { "status": "active" }, "limit": 50 }
 ```
 
+The top level of a folder view is `{ "type": "collection", "collection": null }`, and the contents of one folder are `{ "collection": "autofile:///records/collection/recipes" }`, which returns nested collections and other records together.
+
 `where` applies by field name in every selected type. A `null` match also includes records whose type has no such field. Record information such as the type is selected through its own option, independently of fields in `value`.
 
-Results are ordered by URI across the selected types. A page considers records in that order until it has `limit` results, its result reaches 64 KB of JSON, or no records remain. The size cap never prevents the first result; it keeps a page of long records to a reasonable share of the context of an agent, which can pass `fields` for a compact list. `cursor` is present when records remain, and the next page starts after the last record the current page considered. Each record is returned with `uri`, `createdAt`, `updatedAt`, `value`, and its title in `title` when the type declares a title field with a string value. The title remains present when `fields` omits that value field. The names `uri` and `value` follow AT Protocol. A record that does not match its type is left out of `records`, and listed in `errors` with its URI and a message when it matches `q` and `where`. A record that cannot be read is always listed in `errors`, since it cannot be searched. Code that relies on the schema therefore receives only matching records, and no record the search would find is dropped without notice.
+Results are ordered by URI across the selected types. A page considers records in that order until it has `limit` results, its result reaches 64 KB of JSON, or no records remain. The size cap never prevents the first result; it keeps a page of long records to a reasonable share of the context of an agent, which can pass `fields` for a compact list. `cursor` is present when records remain, and the next page starts after the last record the current page considered. Each record is returned with `uri`, `createdAt`, `updatedAt`, `collections` when it is in any, `value`, and its title in `title` when the type declares a title field with a string value. The title remains present when `fields` omits that value field. The names `uri` and `value` follow AT Protocol. A record that does not match its type is left out of `records`, and listed in `errors` with its URI and a message when it matches `q` and `where`. A record that cannot be read is always listed in `errors`, since it cannot be searched. Code that relies on the schema therefore receives only matching records, and no record the search would find is dropped without notice.
 
 ```json
 {
@@ -341,13 +359,14 @@ Returns one record, in the same shape as an item of `records` from [`find_record
 
 #### create_record
 
-Creates a record and returns `{ "uri": "…" }`. Refused if the record does not match its type, holds a link to a record that does not exist, or the key is taken.
+Creates a record and returns `{ "uri": "…" }`. Refused if the record does not match its type, holds a link to a record that does not exist, names a collection that does not exist, or the key is taken.
 
 | Argument | Type | Meaning |
 | --- | --- | --- |
 | `type` | string, required | The type of the record. |
 | `key` | string | The key, as described in [Keys](#keys). Generated when absent. |
 | `record` | object, required | The full record. Blob fields hold existing attachment URIs, obtained through [`upload_blob`](#upload_blob) or another record. |
+| `collections` | array of strings | The URIs of the [collections](#collections) to put the record in. None when absent. |
 
 ```json
 { "type": "task", "key": "book-the-dentist", "record": { "title": "Book the dentist", "status": "active" } }
@@ -355,15 +374,19 @@ Creates a record and returns `{ "uri": "…" }`. Refused if the record does not 
 
 #### update_record
 
-Changes a record and returns `{ "uri": "…" }`. Refused if the result does not match its type or holds a link to a record that does not exist.
+Changes a record and returns `{ "uri": "…" }`. Refused if the result does not match its type, holds a link to a record that does not exist, or names a collection that does not exist or would contain itself.
 
 | Argument | Type | Meaning |
 | --- | --- | --- |
 | `uri` | string, required | The URI of the record. |
-| `patch` | object, required | A [JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396): fields in the patch are set, a field set to `null` is removed, nested objects are merged, and arrays are replaced whole. Blob fields hold existing attachment URIs, as described in [Blobs](#blobs). |
+| `patch` | object | A [JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396): fields in the patch are set, a field set to `null` is removed, nested objects are merged, and arrays are replaced whole. Blob fields hold existing attachment URIs, as described in [Blobs](#blobs). |
+| `collections` | array of strings | The [collections](#collections) of the record, replacing the current list; `[]` takes it out of all of them. Unchanged when absent. |
+
+Supply `patch`, `collections` or both.
 
 ```json
 { "uri": "autofile:///records/task/book-the-dentist", "patch": { "status": "complete" } }
+{ "uri": "autofile:///records/recipe/tomato-soup", "collections": ["autofile:///records/collection/soups"] }
 ```
 
 #### upload_blob
@@ -384,7 +407,7 @@ Supply exactly one of `base64` and `path`. A path with an unknown extension uses
 
 #### delete_record
 
-Deletes a record, removes the links to it from other records, and returns `{ "uri": "…" }`. Refused if removing the links would leave a record that does not match its type, as described in [Links](#links).
+Deletes a record, removes the links to it from other records and, for a collection, removes it from the `collections` of every record, and returns `{ "uri": "…" }`. Refused if removing the links would leave a record that does not match its type, as described in [Links](#links).
 
 | Argument | Type | Meaning |
 | --- | --- | --- |

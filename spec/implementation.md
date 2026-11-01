@@ -46,4 +46,5 @@ The `Autofile` class is the store implementation. The command, MCP server and li
 - Store tests retain the existing integrity cases through the same adapters, including several processes writing to one store at once.
 - MCP tests cover titles on records and optional or multiple search types, public resource serialization, no blob enumeration, transport-specific attachment inputs, and notifications for record and type addresses only.
 - Blob tests cover attachments larger than the inline limit: creating and updating records that hold them through the library and MCP tools, the error over stdio and HTTP, the HTTP route with whole and partial downloads, `HEAD`, 404, 416, caching headers and the `Origin` and `Host` checks, and read-only blob files.
+- Collection tests cover the built-in declaration, membership writes through the library and MCP tools, validation of collection lists and loops, collection queries, deletion of nested collections, change notices and malformed stored membership.
 - The built `autofile` command is tested over stdio, and `autofile serve` over HTTP.
