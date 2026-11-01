@@ -44,12 +44,29 @@ export type { JsonObject, JsonPrimitive, JsonValue } from "./json.js";
 const typeNamePattern = /^[a-z][a-z0-9-]*$/u;
 const keyPattern = /^[a-z0-9][a-z0-9-]*$/u;
 const recordUriPattern = /^autofile:\/\/\/records\/([a-z][a-z0-9-]*)\/([a-z0-9][a-z0-9-]*)$/u;
+const collectionUriPattern = /^autofile:\/\/\/records\/collection\/[a-z0-9][a-z0-9-]*$/u;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
 const MAX_FIND_RECORDS_PAGE_BYTES = 64 * 1024;
 const tidAlphabet = "234567abcdefghijklmnopqrstuvwxyz";
 const invalidTypeMessage = "type: must use lowercase letters, digits, and hyphens and start with a letter";
 const invalidKeyMessage = "key: must use lowercase letters, digits, and hyphens and start with a letter or digit";
 const invalidRecordUriMessage = "uri: must be a record URI, such as autofile:///records/task/book-the-dentist";
+const builtInTypeMessage = "type: collection is built in and cannot be created, changed or deleted";
+const COLLECTION_TYPE = "collection";
+/** The built-in type whose records group other records, as folders do. */
+const collectionDefinition: TypeDefinition = {
+  description: "Collections group records the way folders do. A record joins a collection through its collections list, not through a field.",
+  title: "Collection",
+  titleField: "title",
+  schema: {
+    type: "object",
+    required: ["title"],
+    properties: {
+      title: { type: "string", description: "The name of the collection, as shown in a folder list." },
+      description: { type: "string", description: "What belongs in the collection." },
+    },
+  },
+};
 const clockIdentifier = BigInt(randomBytes(2).readUInt16BE() & 0x3ff);
 let lastTidTimestamp = 0n;
 
@@ -76,12 +93,15 @@ export interface AutofileRecord {
   problems?: AutofileProblem[];
   createdAt: string;
   updatedAt: string;
+  collections?: string[];
   value: JsonObject;
 }
 
 /** Optional filters and paging controls; where and fields apply only to value. */
 export interface RecordQuery {
   type?: string | string[];
+  /** A collection URI for its direct members, or null for records in no collection. */
+  collection?: string | null;
   q?: string;
   where?: JsonObject;
   fields?: string[];
@@ -139,6 +159,7 @@ interface ChangeSubscription {
 interface StoredRecord {
   createdAt: string;
   updatedAt: string;
+  collections?: string[];
   value: JsonObject;
 }
 
@@ -175,17 +196,21 @@ export class Autofile {
   readonly records = {
     find: (query: RecordQuery = {}): Promise<RecordQueryResult> => this.#operation(() => this.#findRecords(query)),
     get: (uri: string): Promise<AutofileRecord | undefined> => this.#operation(() => this.#getRecord(uri)),
-    create: (type: string, value: JsonObject, options: { key?: string } = {}): Promise<AutofileRecord> => this.#operation(() => {
+    create: (type: string, value: JsonObject, options: { key?: string; collections?: string[] } = {}): Promise<AutofileRecord> => this.#operation(() => {
       if (!isJsonObject(options)) return refuse("options: must be an object");
       const problem = jsonObjectProblem(value);
       if (problem !== undefined) return refuse(`record: ${problem}`);
       // Snapshot checked JSON before asynchronous storage work begins.
-      return this.#createRecord(type, JSON.parse(JSON.stringify(value)) as JsonObject, { key: options.key });
+      return this.#createRecord(type, JSON.parse(JSON.stringify(value)) as JsonObject, {
+        key: options.key,
+        collections: snapshotCollections(options.collections),
+      });
     }),
-    update: (uri: string, patch: JsonObject): Promise<AutofileRecord> => this.#operation(() => {
+    update: (uri: string, patch: JsonObject, options: { collections?: string[] } = {}): Promise<AutofileRecord> => this.#operation(() => {
+      if (!isJsonObject(options)) return refuse("options: must be an object", uri);
       const problem = jsonObjectProblem(patch);
       if (problem !== undefined) return refuse(`patch: ${problem}`, uri);
-      return this.#updateRecord(uri, JSON.parse(JSON.stringify(patch)) as JsonObject);
+      return this.#updateRecord(uri, JSON.parse(JSON.stringify(patch)) as JsonObject, snapshotCollections(options.collections));
     }),
     delete: (uri: string): Promise<void> => this.#operation(() => this.#deleteRecord(uri)),
   };
@@ -309,6 +334,8 @@ export class Autofile {
     for (const change of changes) {
       if (!change.uri.startsWith("autofile:///types/")) continue;
       const type = change.uri.slice("autofile:///types/".length);
+      // The built-in declaration never changes; a file at its path is ignored.
+      if (type === COLLECTION_TYPE) continue;
       try {
         const declaration = await readValidDeclaration(this.#typeFolder, type);
         if (declaration === undefined) this.#watchTypes.delete(type);
@@ -370,6 +397,11 @@ export class Autofile {
     if (input.q !== undefined && typeof input.q !== "string") {
       return refuse("q: must be a string");
     }
+    const collection = input.collection;
+    if (collection !== undefined && collection !== null
+      && (typeof collection !== "string" || !collectionUriPattern.test(collection))) {
+      return refuse("collection: must be a collection URI or null");
+    }
     if (input.where !== undefined && !isJsonObject(input.where)) {
       return refuse("where: must be a JSON object");
     }
@@ -400,6 +432,9 @@ export class Autofile {
       return refuse("cursor: is invalid");
     }
 
+    if (typeof collection === "string" && !await recordExists(this.#dataFolder, this.#typeFolder, collection)) {
+      return refuse("collection does not exist", collection);
+    }
     const declarations = requestedTypes === undefined
       ? await this.#listTypes()
       : await Promise.all([...new Set(requestedTypes)].map(async (type) => {
@@ -448,7 +483,8 @@ export class Autofile {
             message: stored.status === "invalid" ? stored.message : "record does not exist",
           };
         } else if (
-          stringValuesContainWords(stored.value.value, words)
+          inCollection(stored.value, collection)
+          && stringValuesContainWords(stored.value.value, words)
           && query.test(stored.value.value)
         ) {
           const validationErrors = await schema.validate(stored.value.value);
@@ -518,7 +554,7 @@ export class Autofile {
   async #createRecord(
     type: string,
     value: JsonObject,
-    options: { key?: string },
+    options: { key?: string; collections?: string[] },
   ): Promise<AutofileRecord> {
     return this.#withWriteLock(async () => {
       if (typeof type !== "string" || !typeNamePattern.test(type)) return refuse(invalidTypeMessage);
@@ -543,6 +579,9 @@ export class Autofile {
         sourceUri,
       );
       if (linkErrors.length > 0) throw new AutofileError(linkErrors);
+      if (options.collections !== undefined) {
+        await this.#checkCollections(options.collections, sourceUri);
+      }
 
       await mkdir(recordFolder(this.#dataFolder, type), { recursive: true });
       let key = options.key;
@@ -558,7 +597,7 @@ export class Autofile {
       if (blobErrors.length > 0) throw new AutofileError(blobErrors);
 
       const now = new Date().toISOString();
-      const stored = { createdAt: now, updatedAt: now, value };
+      const stored = storedRecord(now, now, options.collections, value);
       await writeJsonAtomically(recordPath(this.#dataFolder, type, key), stored);
       return recordResult(type, key, declaration.value, stored);
     });
@@ -567,6 +606,7 @@ export class Autofile {
   async #updateRecord(
     uri: string,
     patch: JsonObject,
+    collections: string[] | undefined,
   ): Promise<AutofileRecord> {
     return this.#withWriteLock(async () => {
       const parsed = parseRecordUri(uri);
@@ -591,13 +631,15 @@ export class Autofile {
         ...await missingBlobErrors(this.#blobFolder, schema, value, uri),
       ];
       if (errors.length > 0) throw new AutofileError(errors);
+      if (collections !== undefined) await this.#checkCollections(collections, uri);
 
       const previousBlobs = await blobsHeldByRecord(stored.value.value, schema);
-      const updated = {
-        createdAt: stored.value.createdAt,
-        updatedAt: new Date().toISOString(),
+      const updated = storedRecord(
+        stored.value.createdAt,
+        timestampAfter(stored.value.updatedAt),
+        collections ?? stored.value.collections,
         value,
-      };
+      );
       await writeJsonAtomically(path, updated);
       await deleteUnheldBlobs(this.#dataFolder, this.#typeFolder, previousBlobs);
       return recordResult(parsed.type, parsed.key, declaration.value, updated);
@@ -628,15 +670,7 @@ export class Autofile {
       } catch (error) {
         errors.push({ uri: targetUri, message: recordReadError(error) });
       }
-      const typeEntries = (await readDirectory(this.#typeFolder))
-        .filter((entry) => (
-          entry.isFile()
-          && entry.name.endsWith(".json")
-          && typeNamePattern.test(entry.name.slice(0, -".json".length))
-        ))
-        .sort((left, right) => left.name.localeCompare(right.name));
-      for (const typeEntry of typeEntries) {
-        const type = typeEntry.name.slice(0, -".json".length);
+      for (const type of await storedTypeNames(this.#typeFolder)) {
         const otherDeclaration = await readValidDeclaration(this.#typeFolder, type);
         if (otherDeclaration === undefined) continue;
         const schema = await preparedDeclarationSchema(otherDeclaration, typeUri(type));
@@ -659,34 +693,35 @@ export class Autofile {
             continue;
           }
 
-          const validationErrors = await schema.validate(stored.value.value);
+          const collections = stored.value.collections?.filter((collection) => collection !== targetUri);
+          const leavesCollection = collections?.length !== stored.value.collections?.length;
+          let value = stored.value.value;
+          const validationErrors = await schema.validate(value);
           if (validationErrors.length > 0) {
-            if (containsStringValue(stored.value.value, targetUri)) {
+            if (containsStringValue(value, targetUri)) {
               errors.push({
                 uri,
                 message: `record does not match its type and holds ${targetUri} as a string value`,
               });
+              continue;
             }
-            continue;
+          } else {
+            const pointers = schema.formatFields(value, "uri")
+              .filter((field) => field.value === targetUri)
+              .map(({ pointer }) => pointer);
+            if (pointers.length > 0) {
+              value = removeFields(value, pointers);
+              const remainingErrors = await schema.validate(value);
+              if (remainingErrors.length > 0) {
+                errors.push({ uri, message: remainingErrors.join("; ") });
+                continue;
+              }
+            }
           }
-
-          const pointers = schema.formatFields(stored.value.value, "uri")
-            .filter((field) => field.value === targetUri)
-            .map(({ pointer }) => pointer);
-          if (pointers.length === 0) continue;
-          const value = removeFields(stored.value.value, pointers);
-          const remainingErrors = await schema.validate(value);
-          if (remainingErrors.length > 0) {
-            errors.push({ uri, message: remainingErrors.join("; ") });
-            continue;
-          }
+          if (value === stored.value.value && !leavesCollection) continue;
           changes.push({
             path: join(recordFolder(this.#dataFolder, type), entry.name),
-            record: {
-              createdAt: stored.value.createdAt,
-              updatedAt: timestampAfter(stored.value.updatedAt),
-              value,
-            },
+            record: storedRecord(stored.value.createdAt, timestampAfter(stored.value.updatedAt), collections, value),
           });
         }
       }
@@ -712,17 +747,36 @@ export class Autofile {
     });
   }
 
+  /** Refuses a collection list naming anything but existing collections, or placing a collection inside itself. */
+  async #checkCollections(collections: string[], uri: string | undefined): Promise<void> {
+    for (const collection of collections) {
+      if (!await recordExists(this.#dataFolder, this.#typeFolder, collection)) {
+        refuse(`collections: ${collection} is not a collection that exists`, uri);
+      }
+    }
+    if (uri === undefined || parseRecordUri(uri)?.type !== COLLECTION_TYPE) return;
+    const visited = new Set<string>();
+    const pending = [...collections];
+    while (pending.length > 0) {
+      const current = pending.pop() as string;
+      if (current === uri) refuse(`collections: would put ${uri} inside itself`, uri);
+      if (visited.has(current)) continue;
+      visited.add(current);
+      const parsed = parseRecordUri(current);
+      if (parsed === undefined) continue;
+      const stored = await readStoredRecord(recordPath(this.#dataFolder, parsed.type, parsed.key));
+      if (stored.status === "found") pending.push(...stored.value.collections ?? []);
+    }
+  }
+
   async #listTypes(): Promise<TypeDeclaration[]> {
     await this.#ensureReady();
     const types: TypeDeclaration[] = [];
-    for (const entry of await readDirectory(this.#typeFolder)) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const type = entry.name.slice(0, -".json".length);
-      if (!typeNamePattern.test(type)) continue;
+    for (const type of await storedTypeNames(this.#typeFolder)) {
       const declaration = await readValidDeclaration(this.#typeFolder, type);
       if (declaration !== undefined) types.push(typeResult(type, declaration));
     }
-    return types.sort((left, right) => left.type.localeCompare(right.type));
+    return types;
   }
 
   async #getType(type: string): Promise<TypeDeclaration | undefined> {
@@ -737,6 +791,7 @@ export class Autofile {
 
   async #createType(type: string, definition: TypeDefinition): Promise<TypeDeclaration> {
     if (typeof type !== "string" || !typeNamePattern.test(type)) return refuse(invalidTypeMessage);
+    if (type === COLLECTION_TYPE) return refuse(builtInTypeMessage, typeUri(type));
     if (!isJsonObject(definition)) return refuse("declaration: must be an object");
     const { description, titleField } = definition;
     const title = readTypeTitle(definition);
@@ -772,6 +827,7 @@ export class Autofile {
 
   async #updateType(type: string, changes: TypeChanges): Promise<TypeDeclaration> {
     if (typeof type !== "string" || !typeNamePattern.test(type)) return refuse(invalidTypeMessage);
+    if (type === COLLECTION_TYPE) return refuse(builtInTypeMessage, typeUri(type));
     if (!isJsonObject(changes)) return refuse("changes: must be an object");
     const { description, titleField: changedTitleField, schema: changedSchema } = changes;
     const changedTitle = readTypeTitle(changes);
@@ -820,6 +876,7 @@ export class Autofile {
   async #deleteType(type: string): Promise<void> {
     return this.#withWriteLock(async () => {
       if (typeof type !== "string" || !typeNamePattern.test(type)) return refuse(invalidTypeMessage);
+      if (type === COLLECTION_TYPE) return refuse(builtInTypeMessage, typeUri(type));
       const declaration = await readDeclaration(this.#typeFolder, type);
       if (declaration.status !== "found") return declarationRefusal(type, declaration);
       try {
@@ -1023,18 +1080,14 @@ async function blobsHeldInStore(
   typeFolder: string,
 ): Promise<Set<string> | undefined> {
   const held = new Set<string>();
-  let typeEntries;
+  let types;
   try {
-    typeEntries = (await readDirectory(typeFolder)).filter((entry) => (
-      entry.isFile() && entry.name.endsWith(".json")
-    ));
+    types = await storedTypeNames(typeFolder);
   } catch (error) {
     if (hasErrorCode(error)) return undefined;
     throw error;
   }
-  for (const typeEntry of typeEntries) {
-    const type = typeEntry.name.slice(0, -".json".length);
-    if (!typeNamePattern.test(type)) continue;
+  for (const type of types) {
     let declaration: ReadResult<TypeDefinition>;
     try {
       declaration = await readDeclaration(typeFolder, type);
@@ -1146,6 +1199,7 @@ async function invalidRecords(
 }
 
 async function readDeclaration(folder: string, type: string): Promise<ReadResult<TypeDefinition>> {
+  if (type === COLLECTION_TYPE) return { status: "found", value: collectionDefinition };
   if (!await isDirectory(folder)) return { status: "missing" };
   const result = await readJson(join(folder, `${type}.json`), "type declaration");
   if (result.status !== "found") return result;
@@ -1541,9 +1595,54 @@ function isTypeDefinition(value: unknown): value is TypeDefinition {
 
 function isStoredRecord(value: unknown): value is StoredRecord {
   if (!isJsonObject(value)) return false;
-  if (Object.keys(value).length !== 3) return false;
+  const hasCollections = Object.hasOwn(value, "collections");
+  if (Object.keys(value).length !== (hasCollections ? 4 : 3)) return false;
   if (!["createdAt", "updatedAt", "value"].every((key) => Object.hasOwn(value, key))) return false;
+  if (hasCollections && (collectionsProblem(value.collections) !== undefined || (value.collections as string[]).length === 0)) {
+    return false;
+  }
   return isTimestamp(value.createdAt) && isTimestamp(value.updatedAt) && isJsonObject(value.value);
+}
+
+/** Says what is wrong with a list of collection URIs, ignoring whether they exist. */
+function collectionsProblem(value: unknown): string | undefined {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    return "collections: must be an array of collection URIs";
+  }
+  const other = value.find((item: string) => !collectionUriPattern.test(item));
+  if (other !== undefined) return `collections: ${other} is not a collection URI`;
+  if (new Set(value).size !== value.length) return "collections: must not list a collection more than once";
+  return undefined;
+}
+
+/** Checks and copies a caller's collection list before asynchronous work. */
+function snapshotCollections(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  const problem = collectionsProblem(value);
+  if (problem !== undefined) refuse(problem);
+  return [...value as string[]];
+}
+
+/** Builds a stored record, leaving out an empty collection list. */
+function storedRecord(createdAt: string, updatedAt: string, collections: string[] | undefined, value: JsonObject): StoredRecord {
+  return { createdAt, updatedAt, ...(collections?.length ? { collections } : {}), value };
+}
+
+function inCollection(record: StoredRecord, collection: string | null | undefined): boolean {
+  if (collection === undefined) return true;
+  if (collection === null) return record.collections === undefined;
+  return record.collections?.includes(collection) === true;
+}
+
+/** Every type with a declaration file, plus the built-in collection type, ordered by name. */
+async function storedTypeNames(typeFolder: string): Promise<string[]> {
+  const names = new Set([COLLECTION_TYPE]);
+  for (const entry of await readDirectory(typeFolder)) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const type = entry.name.slice(0, -".json".length);
+    if (typeNamePattern.test(type)) names.add(type);
+  }
+  return [...names].sort((left, right) => left.localeCompare(right));
 }
 
 function isTimestamp(value: JsonValue | undefined): value is string {

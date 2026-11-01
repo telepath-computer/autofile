@@ -24,6 +24,22 @@ import {
 
 const roots: string[] = [];
 const stores: Autofile[] = [];
+/** Every store lists the built-in collection type. */
+const collectionDeclaration: TypeDeclaration = {
+  uri: "autofile:///types/collection",
+  type: "collection",
+  description: "Collections group records the way folders do. A record joins a collection through its collections list, not through a field.",
+  title: "Collection",
+  titleField: "title",
+  schema: {
+    type: "object",
+    required: ["title"],
+    properties: {
+      title: { type: "string", description: "The name of the collection, as shown in a folder list." },
+      description: { type: "string", description: "What belongs in the collection." },
+    },
+  },
+};
 const taskDefinition = {
   description: "Things to do.",
   titleField: "name",
@@ -117,7 +133,7 @@ test("construction does no I/O and concurrent first calls wait for folder setup"
     store.records.find(),
     store.blobs.get(`autofile:///blobs/${"a".repeat(64)}.txt`),
   ]);
-  assert.deepEqual(types, []);
+  assert.deepEqual(types, [collectionDeclaration]);
   assert.deepEqual(records, { records: [], unreadable: [] });
   assert.equal(missingBlob, undefined);
   assert.equal((await stat(join(root, "data"))).isDirectory(), true);
@@ -130,7 +146,7 @@ test("types and records complete their lifecycle through the exported class", as
     uri: "autofile:///types/tasks", type: "tasks", ...taskDefinition,
   });
   assert.deepEqual(await store.types.get("tasks"), declaration);
-  assert.deepEqual(await store.types.list(), [declaration]);
+  assert.deepEqual(await store.types.list(), [collectionDeclaration, declaration]);
 
   const created: AutofileRecord = await store.records.create("tasks", {
     name: "Book dentist", status: "active", details: { owner: "Alex", remove: true }, labels: ["old"],
@@ -176,14 +192,14 @@ test("type titles round-trip through the library and partial updates preserve, r
   assert.deepEqual(await store.types.get("journal-entries"), created);
   const untitled = await store.types.create("notes", { description: "Notes.", schema: { type: "object" } });
   assert.equal(Object.hasOwn(untitled, "title"), false);
-  assert.deepEqual(await store.types.list(), [created, untitled]);
+  assert.deepEqual(await store.types.list(), [collectionDeclaration, created, untitled]);
 
   const preserved = await store.types.update("journal-entries", { description: "Dated entries." });
   assert.deepEqual(preserved, { ...created, description: "Dated entries." });
   const replaced = await store.types.update("journal-entries", { title: "Diary entry" });
   assert.deepEqual(replaced, { ...preserved, title: "Diary entry" });
   assert.deepEqual(await store.types.get("journal-entries"), replaced);
-  assert.deepEqual(await store.types.list(), [replaced, untitled]);
+  assert.deepEqual(await store.types.list(), [collectionDeclaration, replaced, untitled]);
 
   const changes: TypeChanges = { title: null };
   const removed = await store.types.update("journal-entries", changes);
@@ -191,7 +207,7 @@ test("type titles round-trip through the library and partial updates preserve, r
     uri: created.uri, type: "journal-entries", description: "Dated entries.", schema: definition.schema,
   });
   assert.deepEqual(await store.types.get("journal-entries"), removed);
-  assert.deepEqual(await store.types.list(), [removed, untitled]);
+  assert.deepEqual(await store.types.list(), [collectionDeclaration, removed, untitled]);
   assert.deepEqual(JSON.parse(await readFile(join(root, "data", "types", "journal-entries.json"), "utf8")), {
     description: "Dated entries.", schema: definition.schema,
   });
@@ -230,7 +246,7 @@ test("stored declarations with invalid titles are unavailable through the librar
       assert.deepEqual(error.problems, [{ uri: "autofile:///types/notes", message: "type declaration is not valid" }]);
       return true;
     });
-    assert.deepEqual(await store.types.list(), []);
+    assert.deepEqual(await store.types.list(), [collectionDeclaration]);
     await assert.rejects(store.types.update("notes", { title: "Note" }), isRefusal);
     assert.equal(await readFile(path, "utf8"), stored);
   }
@@ -318,7 +334,7 @@ test("library methods refuse non-string names, keys and record addresses without
     }
   }
   assert.deepEqual(await store.records.get(record.uri), record);
-  assert.deepEqual((await store.types.list()).map(({ type }) => type), ["notes"]);
+  assert.deepEqual((await store.types.list()).map(({ type }) => type), ["collection", "notes"]);
 });
 
 test("library methods refuse malformed argument objects with AutofileError", async () => {
@@ -335,7 +351,7 @@ test("library methods refuse malformed argument objects with AutofileError", asy
     }
   }
   assert.deepEqual((await store.records.find()).records, []);
-  assert.deepEqual((await store.types.list()).map(({ type }) => type), ["notes"]);
+  assert.deepEqual((await store.types.list()).map(({ type }) => type), ["collection", "notes"]);
 });
 
 test("cross-type pages order complete URIs when one type name prefixes another", async () => {

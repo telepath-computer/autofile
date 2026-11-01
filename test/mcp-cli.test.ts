@@ -21,7 +21,14 @@ import { openStore } from "./helpers/store.ts";
 const cli = resolve("dist/cli.js");
 const roots: string[] = [];
 const serverDescription = "Typed records that agents file and retrieve.";
-const baseInstructions = "Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree.";
+const collectionTypeUri = "autofile:///types/collection";
+const collectionSummary = {
+  uri: collectionTypeUri,
+  type: "collection",
+  title: "Collection",
+  description: "Collections group records the way folders do. A record joins a collection through its collections list, not through a field.",
+};
+const baseInstructions = "Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree. Records of any type can also be put in collections, which work like folders: pass `collections` when creating or updating a record.";
 
 async function temp(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "autofile-mcp-cli-"));
@@ -308,7 +315,7 @@ test("the built command serves a pinned 2026 client and creates configured stora
     assert.equal(client.getNegotiatedProtocolVersion(), "2026-07-28");
     assert.equal(client.getProtocolEra(), "modern");
     const result = await client.callTool({ name: "list_types", arguments: {} });
-    assert.deepEqual(result.structuredContent, { types: [] });
+    assert.deepEqual(result.structuredContent, { types: [collectionSummary] });
 
     // Exceed the SDK's 10 MiB default transport limit with an otherwise safe
     // invalid call. Receiving the ordinary tool validation result proves the
@@ -607,7 +614,7 @@ test("the built command refuses a base64 upload over 7 MiB with its size and lim
     assert.match(body.errors[0]?.message ?? "", /7340032/u);
     assert.deepEqual(
       (await client.listResources()).resources.map(({ uri }) => uri),
-      ["autofile:///types/assets"],
+      ["autofile:///types/assets", collectionTypeUri],
     );
   } finally {
     await client.close();
@@ -983,7 +990,7 @@ test("a watcher read error is reported without closing its stdio connection", {
   });
   try {
     assertToolJson(await client.callTool({ name: "list_types", arguments: {} }), {
-      types: [{
+      types: [collectionSummary, {
         uri: "autofile:///types/tasks",
         type: "tasks",
         description: "Things to do.",
@@ -1003,7 +1010,7 @@ test("a watcher read error is reported without closing its stdio connection", {
 
     try {
       assertToolJson(await client.callTool({ name: "list_types", arguments: {} }), {
-        types: [{
+        types: [collectionSummary, {
           uri: "autofile:///types/tasks",
           type: "tasks",
           description: "Things to do.",
@@ -1123,7 +1130,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     });
     assert.equal(
       bootstrap.getInstructions(),
-      `${baseInstructions}\n\nTypes: none yet. This list was taken when the session began; call \`list_types\` for types created since.`,
+      `${baseInstructions}\n\nTypes: collection. This list was taken when the session began; call \`list_types\` for types created since.`,
     );
 
     const tools = (await bootstrap.listTools()).tools;
@@ -1146,7 +1153,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
       additionalProperties: tool.inputSchema.additionalProperties,
     }])), {
       find_records: {
-        properties: ["type", "q", "where", "limit", "fields", "cursor"],
+        properties: ["type", "collection", "q", "where", "limit", "fields", "cursor"],
         required: [],
         additionalProperties: false,
       },
@@ -1156,13 +1163,13 @@ test("an agent can complete the full record, link, search, blob, type, and resou
         additionalProperties: false,
       },
       create_record: {
-        properties: ["type", "key", "record"],
+        properties: ["type", "key", "record", "collections"],
         required: ["type", "record"],
         additionalProperties: false,
       },
       update_record: {
-        properties: ["uri", "patch"],
-        required: ["uri", "patch"],
+        properties: ["uri", "patch", "collections"],
+        required: ["uri"],
         additionalProperties: false,
       },
       upload_blob: { properties: ["base64", "path", "mediaType"], required: [], additionalProperties: false },
@@ -1268,6 +1275,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
 
     assertToolJson(await bootstrap.callTool({ name: "list_types", arguments: {} }), {
       types: [
+        collectionSummary,
         {
           uri: "autofile:///types/contacts",
           type: "contacts",
@@ -1311,7 +1319,7 @@ test("an agent can complete the full record, link, search, blob, type, and resou
     assert.equal(client.getServerVersion()?.description, serverDescription);
     assert.equal(
       client.getInstructions(),
-      `${baseInstructions}\n\nTypes: contacts, entries, organizations. This list was taken when the session began; call \`list_types\` for types created since.`,
+      `${baseInstructions}\n\nTypes: collection, contacts, entries, organizations. This list was taken when the session began; call \`list_types\` for types created since.`,
     );
 
     assertToolJson(await client.callTool({ name: "upload_blob", arguments: { path: sourcePath } }), { uri: blobUri });
@@ -1952,7 +1960,7 @@ test("stdio rejects nonregular and missing upload sources without creating a rec
       assert.ok(Array.isArray(errors));
       assert.match(String(asObject(errors[0]).message), /blob|source/u);
     }
-    assert.deepEqual((await client.listResources()).resources.map(({ uri }) => uri), ["autofile:///types/uploads"]);
+    assert.deepEqual((await client.listResources()).resources.map(({ uri }) => uri), [collectionTypeUri, "autofile:///types/uploads"]);
   } finally {
     await client.close();
   }

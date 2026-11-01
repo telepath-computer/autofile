@@ -43,7 +43,7 @@ The location of each value is the path of its address, with `.json` added for re
 
 ## Stored values
 
-Record files contain exactly `createdAt`, `updatedAt` and `value`. The value is a JSON object. Both timestamps are valid UTC times ending in `Z`, with whole seconds or three fractional digits:
+Record files contain only `createdAt`, `updatedAt` and `value`, plus `collections` when the record is in any [collection](index.md#collections). The value is a JSON object. Both timestamps are valid UTC times ending in `Z`, with whole seconds or three fractional digits:
 
 ```json
 {
@@ -52,6 +52,10 @@ Record files contain exactly `createdAt`, `updatedAt` and `value`. The value is 
   "value": { "name": "Priya Narayan" }
 }
 ```
+
+`collections`, when present, is a non-empty array of distinct collection URIs; any other value makes the record unreadable. A reference to a missing collection, for example after a file was removed by hand, stays until membership is next written. That write must name only existing collections.
+
+The [built-in type](index.md#collections) `collection` has no type file. Its records are stored in `records/collection/`, and a file at `types/collection.json` is ignored.
 
 A type file contains only `description`, `schema` and optional `title` and `titleField`, as defined in [Types](index.md#types). A stored declaration with a `title` that is not a non-empty string is invalid. Autofile writes both kinds of file as UTF-8 JSON without a byte-order mark, with two-space indentation and a final newline. Readers accept other JSON formatting. Record and type identity, record titles and validation problems are added when the class returns public values; they are not stored in these files. Resource JSON is serialized separately from the public values and does not preserve the stored text.
 

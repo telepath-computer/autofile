@@ -13,9 +13,9 @@ export type FindRecordsInput = RecordQuery;
 /** Arguments to get_record. */
 export interface GetRecordInput { uri: string }
 /** Arguments to create_record. */
-export interface CreateRecordInput { type: string; key?: string; record: JsonObject }
+export interface CreateRecordInput { type: string; key?: string; record: JsonObject; collections?: string[] }
 /** Arguments to update_record. */
-export interface UpdateRecordInput { uri: string; patch: JsonObject }
+export interface UpdateRecordInput { uri: string; patch?: JsonObject; collections?: string[] }
 /** Arguments to delete_record. */
 export interface DeleteRecordInput { uri: string }
 /** Arguments to get_type. */
@@ -51,6 +51,7 @@ export interface RecordResult extends UriResult {
   title?: string;
   createdAt: string;
   updatedAt: string;
+  collections?: string[];
   value: JsonObject;
   error?: string;
 }
@@ -106,12 +107,15 @@ export function buildTools(autofile: Autofile): Tools {
       }
       return recordResult(record);
     }),
-    createRecord: ({ type, record, key }) => withRefusal(async () => {
-      const created = await autofile.records.create(type, record, { key });
+    createRecord: ({ type, record, key, collections }) => withRefusal(async () => {
+      const created = await autofile.records.create(type, record, { key, collections });
       return { uri: created.uri };
     }),
-    updateRecord: ({ uri, patch }) => withRefusal(async () => {
-      const updated = await autofile.records.update(uri, patch);
+    updateRecord: ({ uri, patch, collections }) => withRefusal(async () => {
+      if (patch === undefined && collections === undefined) {
+        return { errors: [{ uri, message: "supply patch, collections or both" }] };
+      }
+      const updated = await autofile.records.update(uri, patch ?? {}, { collections });
       return { uri: updated.uri };
     }),
     uploadBlob: (input, options = {}) => withRefusal(() => uploadBlob(autofile, input, options)),

@@ -34,7 +34,7 @@ import { buildResources, isResourceUri, type ResourceOptions } from "./mcp-resou
 import type { Autofile, JsonObject } from "./index.js";
 
 const SERVER_DESCRIPTION = "Typed records that agents file and retrieve.";
-const BASE_INSTRUCTIONS = "Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree.";
+const BASE_INSTRUCTIONS = "Autofile is where the user keeps durable information, as typed records. When information should outlive the current task, file it here. Call `list_types` to see the types and what belongs in each, and `get_type` for the schema of one. Search with `find_records` before creating a record, so the same thing is not filed twice. If no type fits, propose a new type to the user and create it only once they agree. Records of any type can also be put in collections, which work like folders: pass `collections` when creating or updating a record.";
 const RESOURCE_PAGE_SIZE = 100;
 const packageJson = createRequire(import.meta.url)("../package.json") as { version: string };
 
@@ -45,6 +45,10 @@ const findRecordsSchema = fromJsonSchema<FindRecordsInput>({
       type: ["string", "array"],
       items: { type: "string" },
       description: "The type or types to search. All types when absent.",
+    },
+    collection: {
+      type: ["string", "null"],
+      description: "The URI of a collection: only records directly in it. `null` selects only records in no collection. All records when absent.",
     },
     q: {
       type: "string",
@@ -91,6 +95,11 @@ const createRecordSchema = fromJsonSchema<CreateRecordInput>({
       type: "object",
       description: "The full record, which must match the schema of its type. Blob fields hold existing blob URIs returned by `upload_blob`; the same URI may be used by multiple records.",
     },
+    collections: {
+      type: "array",
+      items: { type: "string" },
+      description: "The URIs of the collections to put the record in, which work like folders. None when absent.",
+    },
   },
   required: ["type", "record"],
   additionalProperties: false,
@@ -103,8 +112,13 @@ const updateRecordSchema = fromJsonSchema<UpdateRecordInput>({
       type: "object",
       description: "A [JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396): fields in the patch are set, a field set to `null` is removed, nested objects are merged, and arrays are replaced whole. Blob fields hold existing blob URIs returned by `upload_blob`; the same URI may be used by multiple records.",
     },
+    collections: {
+      type: "array",
+      items: { type: "string" },
+      description: "The record's collections, replacing its current list; `[]` takes it out of all of them. Unchanged when absent.",
+    },
   },
-  required: ["uri", "patch"],
+  required: ["uri"],
   additionalProperties: false,
 });
 const uploadBlobSchema = fromJsonSchema<UploadBlobInput>({
@@ -182,7 +196,7 @@ export async function buildServer(autofile: Autofile, options: ResourceOptions =
   const resources = buildResources(autofile, options);
   const { types } = await tools.listTypes({});
   const typeNames = types.map(({ type }) => type).sort();
-  const typeSummary = typeNames.length === 0 ? "none yet" : typeNames.join(", ");
+  const typeSummary = typeNames.join(", ");
   const server = new McpServer(
     {
       name: "autofile",
@@ -205,7 +219,7 @@ export async function buildServer(autofile: Autofile, options: ResourceOptions =
   server.registerTool(
     "get_record",
     {
-      description: "Returns one record by URI: its `uri`, optional `title`, `createdAt` and `updatedAt` times, and `value`. A record that does not match its type is still returned, with what must change in `error`.",
+      description: "Returns one record by URI: its `uri`, optional `title`, `createdAt` and `updatedAt` times, the `collections` it is in, and `value`. A record that does not match its type is still returned, with what must change in `error`.",
       inputSchema: getRecordSchema,
     },
     async (input) => toolResult(await tools.getRecord(input)),
@@ -220,7 +234,10 @@ export async function buildServer(autofile: Autofile, options: ResourceOptions =
   );
   server.registerTool(
     "update_record",
-    { description: "Changes a record and returns its URI.", inputSchema: updateRecordSchema },
+    {
+      description: "Changes a record's fields with `patch`, its collections with `collections`, or both, and returns its URI.",
+      inputSchema: updateRecordSchema,
+    },
     async (input) => toolResult(await tools.updateRecord(input)),
   );
   server.registerTool(
@@ -234,7 +251,7 @@ export async function buildServer(autofile: Autofile, options: ResourceOptions =
   server.registerTool(
     "delete_record",
     {
-      description: "Deletes a record, removes the links to it from other records, and returns its URI.",
+      description: "Deletes a record, removes the links to it from other records and, for a collection, removes it from every record's collections, and returns its URI.",
       inputSchema: deleteRecordSchema,
     },
     async (input) => toolResult(await tools.deleteRecord(input)),
